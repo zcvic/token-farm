@@ -1,0 +1,4 @@
+# 已人工核对过的 trae2api-hub 提交 —— 本仓库 Trae 适配层的协议事实来源。
+# 推进时机：跑过 -Refs 看过 diff，确认本仓库不受影响（或已跟着改完）之后。
+# 记录方式：sync-upstream 的 --refs --mark（Windows 用 -Refs -Mark）
+cba75ce6e166e9fbeb1ae1b09131cb94fe8b1121
