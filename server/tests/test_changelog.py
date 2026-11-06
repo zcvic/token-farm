@@ -272,7 +272,10 @@ class ChangelogIsUserFacingTest(unittest.TestCase):
         """先确认切段有效，否则下面几条会在空集合上「通过」。"""
         secs = self._sections()
         self.assertGreaterEqual(len(secs), 1, '没切出版本段落，守卫会空转')
-        self.assertIn('1.0.0', [v for v, _ in secs])
+        # 切段结果必须与文件里的版本标题一一对应：硬编码某个版本号不行 ——
+        # 本仓的更新日志从 1.1.0 重新起步，历史版本不在这个文件里。
+        heads = re.findall(r'^##\s*\[([^\]]+)\]', self.text, re.M)
+        self.assertEqual([v for v, _ in secs], heads, '切段结果与版本标题对不上')
 
     def test_no_content_before_the_first_version_heading(self) -> None:
         """第一个 `## [版本]` 之前不能有**条目**（审查发现的空档）。
