@@ -1,0 +1,325 @@
+> **token-farm** — 本仓库是 [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) 的多平台衍生版：保留 WorkBuddy 全部能力，另加 **Trae** 平台（账号导入 / 签到 / 模型 / `traecn/`、`traecom/` 区域前缀转发，旧 `trae/` 兼容）、**Qoder** 平台（国内版 / 国际版，协议层内置，`qodercn/`、`qodercom/` 区域前缀转发，旧 `qoder/` 兼容）与多平台管理页。项目结构、参考源同步与一键部署见 **[TOKEN-FARM.md](TOKEN-FARM.md)**；以下内容沿用上游文档（品牌、下载源与安装标识已改成本仓库），上游 Go 源码随本仓 `upstream/` 一起维护。
+
+<div align="center">
+
+# token-farm
+
+**腾讯 CodeBuddy 账号池管理控制台 · OpenAI 兼容反代网关**
+
+面向 [`workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api) 的 Web 管理端：扫码纳管、定时签到与保活、密钥分发、IP 与模型白名单、日志与用量统计；上游源码随发布包分发（MIT），迁移见[部署指南](deploy/README.md#〇上游源码从哪来随发布包分发)。
+
+![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-22c55e)
+
+[![Release](https://img.shields.io/github/v/release/zcvic/token-farm?color=22c55e&label=Release)](https://github.com/zcvic/token-farm/releases)
+[![Changelog](https://img.shields.io/badge/更新日志-CHANGELOG-blue)](CHANGELOG.md)
+[![Issues](https://img.shields.io/github/issues/zcvic/token-farm?color=f59e0b&label=反馈)](https://github.com/zcvic/token-farm/issues)
+[![Stars](https://img.shields.io/github/stars/zcvic/token-farm?color=f5c542&label=Stars)](https://github.com/zcvic/token-farm)
+
+[English](README.en.md) · **简体中文**
+
+<p align="center">
+  <strong>⚠️ 使用边界：</strong>本项目只用于管理<strong>本人及亲属自愿授权</strong>的账号；禁止批量注册、账号交易、代注册、接码、盗号、绕过平台风控，以及任何商业转售或盈利性用途。使用即表示你已阅读并同意<a href="#使用边界与免责声明">完整免责声明</a>。
+</p>
+
+<img src="docs/images/dashboard.png" alt="token-farm 仪表盘" width="100%" />
+
+**界面预览**
+
+</div>
+
+<p align="center">
+  仓库地址：<a href="https://github.com/zcvic/token-farm">github.com/zcvic/token-farm</a> —— 问题与建议走 Issues。
+  觉得好用，欢迎点个 <a href="https://github.com/zcvic/token-farm">Star</a>。
+</p>
+
+---
+
+## 这是什么
+
+`workbuddy2api` 是一个把腾讯 CodeBuddy 账号池包装成 OpenAI 兼容接口的反代服务（Go 编写）。它的能力很完整，但只有命令行：加账号要跑脚本、看状态要 `curl /status`、发密钥没有界面。
+
+本项目补上这一块 —— 一个可以公网运营的 Web 控制台：
+
+| 你原本要做的 | 现在在面板上 |
+|---|---|
+| 服务器上跑 `login.sh` 扫码加号 | 点「添加账号」扫码，自动签到并纳管 |
+| `curl /status` 看哪个号挂了 | 仪表盘实时展示健康度、冷却、有效期 |
+| 手动改 `config.json` 调签到/并发 | 中文可视化设置，开关 + 数字框 |
+| 所有下游共用一个全局 Key | 多密钥分发，各自独立配额、IP 与模型白名单 |
+| 无法知道谁用了多少 | 每次调用的模型、Token、延迟、来源 IP 全量留痕 |
+| 无任何 IP 防护 | 入站白/黑名单 + 每密钥 IP 上限与白名单 |
+
+**与 workbuddy2api 的关系**：本项目是为它做**可视化**的配套项目 —— 让能力强大的
+上游网关变得看得见、管得动。上游源码现在随本仓库的 `upstream/` 一起维护
+（MIT，版权见 `upstream/LICENSE`）；账号轮询、并发与熔断仍由它负责。两者配合的
+方式很自然：
+
+- **上游负责能力，面板负责呈现**：账号调度、令牌刷新、限流熔断由 workbuddy2api
+  完成；面板把这些能力可视化，并补上密钥分发、IP 管控、用量统计这些运营环节
+- **互为参照、一起演进**：上游新增能力时本项目跟随适配，面板侧发现的运营需求也
+  会直接落到 `upstream/` 的网关代码里，两边在同一个仓库、同一个 tag 里发布
+- **边界清晰**：网关行为改在 `upstream/`，面板侧只负责管理与呈现，不互相穿透
+
+欢迎参与共建：面板与上游源码的问题、想法都提到
+[本仓库](https://github.com/zcvic/token-farm/issues)
+（上游源码随本项目的发布包分发）。
+
+---
+
+## 功能亮点
+
+### 账号管理
+
+- **扫码纳管** —— 微信 / QQ 扫码授权，成功后自动每日签到、写授权文件、重载上游
+- **有效期监控** —— 进度条 + 临期预警；一键续期、连通性探测、手动签到
+- **账号分组** —— 多个账号池分组管理，列表、签到、密钥各自独立
+- **积分与到期** —— 实时余额、按余额分级着色、快过期积分倒计时
+- **任务记录** —— 签到 / 旅行 / 活跃 / 保活的执行结果与积分流水分页可查
+
+### 反代网关（对外 `/v1`）
+
+- **OpenAI 兼容** —— 标准 SDK 直连，流式与非流式都支持
+- **多密钥分发** —— 每把密钥独立设版本、有效期、IP 数、IP / 模型白名单与额度
+- **模型别名映射** —— 把下游在用的名字映到实际模型，迁移无感
+- **模型中心** —— 账号可用模型单列一页：上下文、最大输出、思考档位
+- **全量审计** —— 每次调用记密钥、IP、模型、状态码、首字延迟、扣费与缓存命中
+
+### 可视化设置
+
+- **定时任务** —— 签到 / 旅行 / 活跃 / 保活四类开关与执行时刻
+- **多上游** —— 「设置 → 上游」配多个实例，各带地址与 `api_key`
+- **安全** —— 入站 IP 白 / 黑名单（CIDR）、审计日志、会话与令牌分离
+- **更新与备份** —— 一键更新（核验发布包摘要）、PostgreSQL 异地备份
+- **五语种界面** —— 简体中文 / 繁体 / English / 日本語 / 한국어
+
+完整清单（每条带详解）见 [功能一览（完整版）](docs/features.md)。
+
+---
+
+## 界面预览
+
+<img src="docs/images/accounts.png" alt="账号管理" width="100%" />
+
+账号管理：分组切换、状态分档、积分与有效期
+
+<img src="docs/images/keys.png" alt="密钥" width="100%" />
+
+密钥：版本、额度、IP 与模型白名单
+
+<img src="docs/images/stats.png" alt="用量统计" width="100%" />
+
+用量统计：按天 / 按小时、失败与延迟
+
+<img src="docs/images/logs.png" alt="调用日志" width="100%" />
+
+调用日志：每一笔的模型、状态、首字延迟与扣费
+
+其余界面截图见 [界面预览（全部）](docs/screenshots.md)。
+
+---
+
+## 官方下载源
+
+**建议从本仓库的 [Releases](https://github.com/zcvic/token-farm/releases) 下载。** 发布说明里给出每个产物的 sha256，更新器会逐个核对；从别处获得的包无法按这条校验链确认来源与完整性，请自行判断，并**不要为此跳过摘要校验**（`WB_SKIP_SIGNATURE=1` 等）。
+
+本项目以 MIT 许可开源，欢迎任何人在许可证范围内使用、修改与分发；出现其他来源的构建属于正常现象，请以本仓库的发布说明与校验值为准。
+
+---
+
+## 快速开始
+
+服务器部署需要 Docker（1 核 1G 起）；Windows 桌面用户可直接用图形安装器。三种方式任选：
+
+**① Windows 安装器（桌面图形化，无需 Docker / 命令行）**
+
+1. 从该版本 [Release](https://github.com/zcvic/token-farm/releases) 下载
+   `TokenFarmSetup.exe`（发版时由 CI 在 Windows runner 上自动构建并附带，同目录还有
+   一个 `.sha256` 可核对）。v1.0.88 的安装器曾因卸载会误删文件被下线（见该版本 Release
+   说明），**v1.0.89 起已修复**：卸载只删程序自己的文件，安装目录也改成「选中目录 +
+   `token-farm` 子目录」。
+2. 按向导选择安装目录 → 安装 → 完成时可勾选「立即启动」。
+3. 之后用桌面快捷方式打开控制台：点 **启动项目**，状态变「运行中」并自动打开管理面板；
+   随时可 **重启 / 关闭项目**、修改监听 IP 与端口（保存后重启生效）、点 **打开面板** 回到页面。
+4. 点 X 可选「最小化到托盘」或「退出程序」（可记住选择，托盘图标随时恢复）。
+5. 需要「开机即驻留」时，在控制窗口勾选 **开机自动启动（静默驻留托盘）**：写入当前用户
+   的启动项（HKCU，无需管理员），下次登录不显示窗口、只驻留托盘；卸载时会自动清理。
+6. 需要升级时点控制窗口的 **检查更新**：查询本仓库最新 Release，下载安装包并用发布页
+   的 SHA-256 校验，校验通过后启动安装向导（`.env`、账号与 `data` 保留）。
+
+> 默认成功构建的单文件安装包内置全部运行环境（Python 运行时、上游网关、前端页面），
+> 目标机器**无需安装任何依赖**，Windows 10 (1903+) / 11 双击即用。当前安装器没有
+> Authenticode 签名，SmartScreen 可能显示警告；请确认文件来自可信 Release 或自行构建。
+> 安装器自身不会自动升级，升级时重新获取新 exe 并覆盖安装即可；`.env`、账号和 `data`
+> 等个人数据会保留。卸载：**设置 → 应用** 或开始菜单「卸载 token-farm」，
+> 可选保留账号与配置。细节见 [Windows 启动器](windows/README.md#启动器安装版)。
+
+**② Docker（自己起容器）**
+
+```bash
+# 端口只绑本机：公网访问请走反向代理（HTTPS + 访问控制），直接暴露管理面风险高
+docker run -d --name token-farm -p 127.0.0.1:7864:7864 -v /opt/token-farm/data:/app/data ghcr.io/zcvic/token-farm:latest
+```
+
+**③ 服务器一键脚本（装依赖、拉包、配 systemd）**
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/zcvic/token-farm/main/deploy/install.sh)
+```
+
+装完浏览器打开 `http://<服务器>:7864`，首次启动的日志里会打印初始管理员密码。
+
+> 上游源码随发布包一起分发，装完即可用。反向代理与 HTTPS、端口收敛、Windows 原生
+> 部署（无需 Docker）、本地开发等细节见 [部署指南](deploy/README.md) 与
+> [开发与架构](docs/development.md)。
+
+---
+
+## 使用指南
+
+日常就三步：**纳管账号 → 分发密钥 → 把下游指到 `/v1`**。每步怎么做、下游接入示例
+（OpenAI SDK、cc-switch 等）与常见问题见 [使用指南](docs/usage.md)。
+
+---
+
+## 接口说明
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| `POST` | `/v1/chat/completions` | 网关密钥 | OpenAI 兼容对话（流式 / 非流式） |
+| `POST` | `/v2/chat/completions` | 网关密钥 | 同上（v2 路径） |
+| `POST` | `/v1/responses` `/responses` | 网关密钥 | OpenAI Responses API 兼容（流式 / 非流式） |
+| `POST` | `/v1/messages` | 网关密钥 | Anthropic Messages API 兼容（Claude Code 等） |
+| `POST` | `/v1/messages/count_tokens` | 网关密钥 | 按字符数粗估输入 token |
+| `GET` | `/v1/models` | 网关密钥 | 模型列表 |
+| `GET` | `/v1/usage` | 网关密钥 | 密钥自查：已用 / 剩余额度、有效期与模型范围（只读面板记录，不产生调用） |
+| `GET` | `/healthz` | 无 | 存活探测（含上游连通性） |
+| `GET` | `/api/me` | 会话 | 当前登录用户 |
+| `POST` | `/api/login` `/api/logout` | 无 | 登录 / 登出 |
+| `GET` | `/api/accounts` | 会话 | 账号列表 |
+| `GET` | `/api/accounts/credits-snapshot` | 会话 / 只读令牌 | 已登记积分的只读快照（给看板 / 对账脚本，不查上游） |
+| `POST` | `/api/auth/start` `/api/auth/poll` | 管理员 | 扫码授权流程 |
+| `POST` | `/api/accounts/{file}/checkin` `/test` `/refresh` | 管理员 | 签到 / 测活 / 刷新 |
+| `DELETE` | `/api/accounts/{file}` | 管理员 | 删除账号 |
+| `GET/POST/PATCH/DELETE` | `/api/keys[/{id}]` | 会话 / 管理员 | 密钥管理（发给下游调模型） |
+| `GET/POST/PATCH/DELETE` | `/api/upstreams[/{id}]` | 会话（管理员） | 多上游接入点（密钥绑定上游 = 账号池分组）；`POST /api/upstreams/{id}/probe` 探测连通性 |
+| `GET/POST/PATCH/DELETE` | `/api/tokens[/{id}]` | 会话（管理员） | 管理面 API Token（给脚本 / CI，见 [docs/api-tokens.md](docs/api-tokens.md)） |
+| `GET` | `/api/logs` `/api/stats/*` | 会话 | 日志与用量 |
+| `GET/POST/DELETE` | `/api/security/*` | 会话 / 管理员 | IP 规则与审计 |
+| `GET/POST` | `/api/settings/*` | 会话 / 管理员 | 上游配置、模型映射 |
+| `GET/POST` | `/api/settings/pg-sync*` | 会话（管理员） | PostgreSQL 异地备份：配置 / 测试连接 / 迁移 / 恢复 |
+
+管理端接口细节可在服务启动后访问 `/docs` 查看（Swagger UI）。
+
+---
+
+## 安全说明
+
+- 密钥用哈希校验，明文只在创建时展示一次、之后仅管理员可在密钥页再查看 / 复制（逐次记审计）；账号凭据不返回前端
+- 入站 IP 白 / 黑名单（支持 CIDR）、每把密钥的 IP 与模型白名单
+- 敏感操作全部留审计日志（谁、什么时候、做了什么）
+- 发布包校验：一键更新会核对发布页给的 sha256 与文件大小，不符即拒绝安装
+
+完整的威胁模型与加固建议见 [安全说明](docs/security-notes.md) 与
+[安全审计报告](docs/SECURITY-AUDIT.md)。
+
+---
+
+## 已知限制
+
+- **账号出口线路**：管理端支持按账号绑定命名 HTTP/HTTPS 代理。聊天和上游后台任务还需 workbuddy2api 配套支持，配置与兼容条件见 [账号出口线路](docs/account-proxy-routes.md)。
+- 请求的**请求体 / 响应体内容不做留存**，仅记录元数据（模型、状态、Token、延迟、来源），以保护隐私。
+- 用量统计按「天 × 密钥 × 模型」聚合；如需小时粒度可扩展 `usage_daily` 表。
+
+---
+
+## 更多文档
+
+- [使用指南](docs/usage.md) —— 三部曲怎么点、下游怎么接
+- [功能一览（完整版）](docs/features.md) —— 每条功能的细节
+- [界面预览（全部）](docs/screenshots.md) —— 全部截图
+- [开发与架构](docs/development.md) —— 本地开发、架构、目录结构
+- [安全说明](docs/security-notes.md) —— 威胁模型与加固
+- [部署指南](deploy/README.md) —— 反向代理、HTTPS、Windows 原生、一键更新
+- [账号出口线路](docs/account-proxy-routes.md) —— 每个账号走不同代理出口
+- [API 令牌](docs/api-tokens.md) —— 只读令牌与作用域
+- [页面监控](docs/watchdog.md) —— 上游网页改版检测、LLM 判读与邮件 / QQ / Webhook 通知
+- [Prometheus 指标](docs/metrics.md) —— 抓取配置、指标口径与鉴权
+- [Qoder 接入](docs/qoder.md) —— 国内版 / 国际版、模型前缀与内置网关
+- [QQ 机器人通知与开放接口](docs/qq-bot.md) —— AstrBot 对接、UMO 与机器人控制边界
+
+---
+
+## 更新日志与反馈
+
+- **更新日志**：[CHANGELOG.md](CHANGELOG.md) —— 各版本的新增、修复与变更
+- **下载发布包**：[Releases](https://github.com/zcvic/token-farm/releases) —— 每个版本提供可直接部署的
+  `.tar.gz` / `.zip`（含已构建的前端产物），解压后执行 `sudo bash deploy/install.sh` 即可
+- **反馈问题**：[提交 Bug](https://github.com/zcvic/token-farm/issues/new?template=bug_report.yml) ·
+  [功能建议](https://github.com/zcvic/token-farm/issues/new?template=feature_request.yml)
+
+> 反馈时请附上版本号与错误日志，并**先移除其中的密钥、Token 等敏感信息**。
+> 上游 workbuddy2api 自身的问题也提到[本仓库](https://github.com/zcvic/token-farm/issues)
+> ——上游源码随本项目的发布包分发。
+
+### 版本发布流程
+
+维护者打 tag 即可自动构建并发布：
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+CI 会构建前端、打包产物、从 CHANGELOG 提取对应版本段落作为发布说明，
+并创建 Release 附带压缩包。
+
+---
+
+## 相关项目
+
+- [**sanguine886/workbuddy-sdk**](https://github.com/sanguine886/workbuddy-sdk)（Go，MIT）——
+  社区维护的 Go 客户端库，完整覆盖本项目的两个 API 面：管理面 `/api/*`（账号池、密钥、
+  统计、日志、安全、设置、用户、系统更新）与数据面 `/v1/*`（Chat Completions /
+  Responses / Anthropic Messages / Models）。用 Go 写运维工具时可直接 `go get`，
+  不必自己拼 HTTP 与登录态。
+
+> 以上为社区项目，**与本仓库无代码依赖**；使用中遇到问题请到其[仓库](https://github.com/sanguine886/workbuddy-sdk/issues)反馈。
+
+---
+
+## 致谢
+
+- [**LINUX DO**](https://linux.do) —— 本项目的发布与交流社区
+- [**linux-do/cdk**](https://github.com/linux-do/cdk)（MIT）—— 界面设计令牌与浮动底栏组件来源，本项目 UI 视觉与其保持一致
+- [**Sliverkiss/workbuddy2api**](https://github.com/Sliverkiss/workbuddy2api) —— 底层账号池与 OpenAI 兼容代理（MIT；源码随本项目的发布包分发，版权归原作者）
+- [**lbjlaq/Antigravity-Manager**](https://github.com/lbjlaq/Antigravity-Manager) —— 管理端功能形态参考
+
+---
+
+## 使用边界与免责声明
+
+**本项目的初衷是方便个人管理本人及亲属自愿授权的账号，不是为批量运营或商业牟利设计的。**
+
+允许的用途：
+
+- 管理你本人或亲属明确授权给你的腾讯 CodeBuddy 账号；
+- 在自己的设备或内网中学习、研究和自用。
+
+禁止的用途：
+
+- 批量注册、代注册、接码，以及买卖、出租或交易账号；
+- 盗号、撞库、绕过实名认证、风控、区域限制或其他平台安全机制；
+- 将本项目或其派生服务用于对外收费、转售、引流或其他盈利性用途；
+- 任何违反腾讯服务条款、当地法律法规或侵犯他人权益的用途。
+
+使用者应自行确认账号授权与使用方式合法合规。因滥用、误用或违反上述边界导致的封号、数据丢失、服务中断或法律责任，由使用者自行承担；项目作者与贡献者不对使用者的行为负责，也不提供任何形式的担保。
+
+本项目与腾讯、CodeBuddy 官方无隶属或合作关系；相关商标归其权利人所有。项目按 [MIT](LICENSE) 许可「按现状」提供。
+
+---
+
+## License
+
+[MIT](LICENSE)

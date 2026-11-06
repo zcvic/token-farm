@@ -1,0 +1,7 @@
+# 已人工核对过的 workbuddy2api-panel 提交 —— 本次同步的来源。
+#
+# 同步的是「对本项目有益」的能力，不是整套 Go 实现：只移植协议无关的
+# 运维 / 观测能力（请求 ID、Prometheus、隐藏模型、通用 Webhook）。
+# 记录方式：一次同步对应一个提交；后续再同步时追加新行并更新 docs。
+# 仓库：https://github.com/misakano7545/workbuddy2api-panel
+49fad282fb0d6d2e8c483bcbc3940a0031dfcb19

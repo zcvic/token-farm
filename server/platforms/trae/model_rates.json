@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "updated_at": "2026-11-01",
+  "source": "Trae CN 1.107.1 客户端模型列表快照",
+  "note": "每模型积分消耗速度（同一 prompt 的扣费倍数，客户端显示为 `0.78 ×`）。服务器部署拿不到客户端快照时用这份默认值；面板可导入新的 JSON 覆盖。缺失的模型显示 — 而不是 0。",
+  "rates": {
+    "DeepSeek-V4-Pro-Official": 0.36,
+    "Doubao-Seed-2.1-Pro": 0.8,
+    "Doubao-Seed-2.1-Turbo": 0.2,
+    "Doubao-Seed-Code": 0.06,
+    "Doubao-Seed-Evolving": 0.8,
+    "deepseek-v4.1-flash": 0.06,
+    "glm-5.3": 0.78,
+    "glm-5.3-flash": 0.08,
+    "glm-5.3-flashx": 0.31,
+    "kimi-k3": 1.83,
+    "kimi-k3.1-pro": 1.2,
+    "mimo-v2.6-flash": 0.06,
+    "mimo-v2.6-pro": 0.15,
+    "minimax-m3": 0.26,
+    "minimax-m3.1-flash": 0.09,
+    "qwen3.8-flash": 0.08,
+    "qwen3.8-max": 1.5,
+    "step-5-preview": 0.48
+  }
+}

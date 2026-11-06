@@ -1,0 +1,328 @@
+{
+  "version": 1,
+  "updated_at": "2026-11-01",
+  "source": "Trae CN 1.107.1 客户端模型列表快照",
+  "note": "Trae 模型目录的服务器端默认值：合并顺序为 面板导入 > 本机客户端快照 > 这份文件。条目只保留客户端 chat 面可用的模型（code_reviewer / refactor 等内部角色模型不列）。channel：cn 走 Agent 通道 solo，intl 走 IDE 数据面 chat。",
+  "models": [
+    {
+      "id": "DeepSeek-V4-Flash-Official",
+      "name": "DeepSeek-V4-Flash",
+      "realm": "cn",
+      "context_window": 116000,
+      "max_tokens": 64000,
+      "multimodal": false,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "DeepSeek-V4-Pro-Official",
+      "name": "DeepSeek-V4-Pro",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": false,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "name": "DeepSeek-V4.1-Flash",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "Doubao-Seed-2.1-Pro",
+      "name": "Seed-2.1-Pro-0915",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": false,
+      "channel": "solo"
+    },
+    {
+      "id": "Doubao-Seed-2.1-Turbo",
+      "name": "Seed-2.1-Turbo",
+      "realm": "cn",
+      "context_window": 256000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": false,
+      "channel": "solo"
+    },
+    {
+      "id": "Doubao-Seed-Code",
+      "name": "Seed-Code",
+      "realm": "cn",
+      "context_window": 256000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": false,
+      "channel": "solo"
+    },
+    {
+      "id": "Doubao-Seed-Evolving",
+      "name": "Seed-Evolving",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": false,
+      "channel": "solo"
+    },
+    {
+      "id": "glm-5.2",
+      "name": "GLM-5.2",
+      "realm": "cn",
+      "context_window": 116000,
+      "max_tokens": 64000,
+      "multimodal": false,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "glm-5.3",
+      "name": "GLM-5.3",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": false,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "glm-5.3-flash",
+      "name": "GLM-5.3-Flash",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "glm-5.3-flashx",
+      "name": "GLM-5.3-FlashX",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "kimi-k2.8-preview",
+      "name": "Kimi-K2.8-Preview",
+      "realm": "cn",
+      "context_window": 200000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "kimi-k3",
+      "name": "Kimi-K3",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": false,
+      "channel": "solo"
+    },
+    {
+      "id": "kimi-k3.1-pro",
+      "name": "Kimi-K3.1-Pro",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": false,
+      "channel": "solo"
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "name": "MiMo-V2.6-Flash",
+      "realm": "cn",
+      "context_window": 981504,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": false,
+      "channel": "solo"
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "name": "MiMo-V2.6-Pro",
+      "realm": "cn",
+      "context_window": 981504,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": false,
+      "channel": "solo"
+    },
+    {
+      "id": "minimax-m3",
+      "name": "MiniMax-M3",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "minimax-m3.1-flash",
+      "name": "MiniMax-M3.1-Flash",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "qwen-3.7-plus",
+      "name": "Qwen3.7-Plus",
+      "realm": "cn",
+      "context_window": 200000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "qwen3.8-flash",
+      "name": "Qwen3.8-Flash",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "qwen3.8-max",
+      "name": "Qwen3.8-Max",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "step-5-preview",
+      "name": "Step-5-Preview",
+      "realm": "cn",
+      "context_window": 1000000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "solo"
+    },
+    {
+      "id": "aws_claude_4.6_sonnet",
+      "name": "Claude-Sonnet-4.6",
+      "realm": "intl",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "aws_claude_4.7_opus",
+      "name": "Claude-Opus-4.7",
+      "realm": "intl",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "gemini-2.5-pro-latest",
+      "name": "Gemini-2.5-Pro",
+      "realm": "intl",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "gemini_2.5_flash_premium",
+      "name": "Gemini-2.5-Flash",
+      "realm": "intl",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "gemini_3.1_pro",
+      "name": "Gemini-3.1-Pro-Preview",
+      "realm": "intl",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "gemini_3_flash",
+      "name": "Gemini-3-Flash-Preview",
+      "realm": "intl",
+      "context_window": 200000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "gpt-5.5",
+      "name": "GPT-5.5",
+      "realm": "intl",
+      "context_window": 272000,
+      "max_tokens": 32000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT-6-Astra",
+      "realm": "intl",
+      "context_window": 272000,
+      "max_tokens": 64000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "grok-4",
+      "name": "Grok-4",
+      "realm": "intl",
+      "context_window": 128000,
+      "max_tokens": 16000,
+      "multimodal": true,
+      "thinking": true,
+      "channel": "chat"
+    },
+    {
+      "id": "kimi-k2",
+      "name": "Kimi-K2-0905",
+      "realm": "intl",
+      "context_window": 200000,
+      "max_tokens": 16000,
+      "multimodal": false,
+      "thinking": true,
+      "channel": "chat"
+    }
+  ]
+}

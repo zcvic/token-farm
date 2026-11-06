@@ -1,0 +1,6 @@
+﻿* text=auto eol=lf
+# cmd.exe 对 LF-only 批处理有边缘解析风险（上游 #163）；仓库里按 LF 存，
+# 导出/检出时还原成 CRLF。发布包与 Windows 原生部署都依赖这条。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+.gitattributes export-ignore
