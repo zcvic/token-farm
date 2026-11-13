@@ -203,9 +203,10 @@ def _task_groups() -> list[dict]:
 async def _run_platform_checkin() -> tuple[bool, str]:
     """对所有支持签到的平台执行一次「全部签到」。
 
-    复用 `/api/platforms/{name}/checkin-all` 的实现（并发 3、单个账号失败
-    不拖垮整批），避免在调度器里再抄一份并发与错误处理。与 WorkBuddy 的
-    `checkin` 任务相互独立：两边对象不同（上游账号目录 vs 平台账号目录）。
+    复用 `/api/platforms/{name}/checkin-all` 的实现（并发与账号间隔按平台
+    设置，默认并发 2、间隔 2–5 秒；单个账号失败不拖垮整批），避免在调度器
+    里再抄一份并发与错误处理。与 WorkBuddy 的 `checkin` 任务相互独立：两边
+    对象不同（上游账号目录 vs 平台账号目录）。
     """
     from ..platforms import all_adapters  # noqa: PLC0415
     from ..routers import platforms as platforms_router  # noqa: PLC0415

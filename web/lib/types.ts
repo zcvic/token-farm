@@ -2125,13 +2125,29 @@ export interface PlatformUsage {
 /**
  * 平台的调度设置（`/api/platforms/{name}/settings`）。
  *
- * 只有**池级**并发：一个平台上所有账号合计的在途请求上限，0 = 不限。
- * 不做账号级并发——上游没有这个字段，而账号一多，每号一个数字等于没有上限。
+ * 两组口径互不相干：
+ *   · `max_in_flight` —— **池级**推理并发（所有账号合计的在途请求上限，0 = 不限）；
+ *   · `checkin_*` —— **批量签到**节奏：同时签到的账号数 + 相邻两个账号开始
+ *     签到之间的随机间隔（秒，0 = 不间隔）。
+ *
+ * 不做账号级推理并发——上游没有这个字段，而账号一多，每号一个数字等于没有上限。
  */
 export interface PlatformSettings {
   platform: string;
   max_in_flight: number;
   limits: {min: number; max: number};
+  /** 同时进行签到的账号数（默认 2） */
+  checkin_concurrency: number;
+  /** 相邻两个账号开始签到之间的随机间隔下限 / 上限（秒，默认 2–5） */
+  checkin_delay_min: number;
+  checkin_delay_max: number;
+  /** 签到节奏的可填范围（界面据此校验） */
+  checkin_limits: {
+    concurrency_min: number;
+    concurrency_max: number;
+    delay_min: number;
+    delay_max: number;
+  };
 }
 
 /** 跨平台模型目录里的一项（一个平台一份）。 */

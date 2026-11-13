@@ -564,8 +564,14 @@ export const platformApi = {
   checkin: (name: string, uid: string) =>
     post<{platform: string; result: PlatformCheckinResult}>(
       `${platformPath(name)}/accounts/${encodeURIComponent(uid)}/checkin`),
-  checkinAll: (name: string) =>
-    post<PlatformCheckinAllResult>(`${platformPath(name)}/checkin-all`),
+  /**
+   * 全部账号签到。账号之间按平台设置的间隔（默认 2–5 秒）依次开始，
+   * 账号一多就会超过全局 60s：这里放宽到 5 分钟。超时只影响这次等待，
+   * 后端仍会跑完并落库。
+   */
+  checkinAll: async (name: string) =>
+    (await http.post<PlatformCheckinAllResult>(
+      `${platformPath(name)}/checkin-all`, {}, {timeout: 300000})).data,
   /** 模型目录默认读缓存；refresh=true 强制向上游拉一次 */
   models: (name: string, refresh = false) =>
     get<{platform: string; models: PlatformModel[]}>(
@@ -648,10 +654,18 @@ export const platformApi = {
    * 失败只体现在该条的 `error` 上，不会让整份清单为空。
    */
   catalog: () => get<PlatformCatalog>('/api/platforms/model-catalog'),
-  /** 平台的池级并发上限（0 = 不限）。账号级并发由适配器内部调度，不在界面调。 */
+  /**
+   * 平台设置：池级推理并发（0 = 不限）+ 批量签到节奏（并发 / 账号间隔）。
+   * 只提交需要改的字段即可，未提交的保持原值。
+   */
   settings: (name: string) =>
     get<PlatformSettings>(`${platformPath(name)}/settings`),
-  saveSettings: (name: string, body: {max_in_flight: number}) =>
+  saveSettings: (name: string, body: {
+    max_in_flight?: number;
+    checkin_concurrency?: number;
+    checkin_delay_min?: number;
+    checkin_delay_max?: number;
+  }) =>
     put<PlatformSettings>(`${platformPath(name)}/settings`, body),
   /**
    * 账号调度参数：权重（0 = 恢复默认）与临时冻结（`disabled`）。

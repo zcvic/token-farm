@@ -24,14 +24,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from .. import db, security
 from ..platforms import PlatformAdapter, PlatformError, all_adapters, get as get_platform
-from ..platforms import limiter
+from ..platforms import checkinpacing, limiter
 
 logger = logging.getLogger('workbuddy.platforms')
 
 router = APIRouter(prefix='/api/platforms', tags=['platforms'])
 
-# 批量签到并发上限：与 WorkBuddy 的签到同口径，保守值避免触发风控。
-_CHECKIN_CONCURRENCY = 3
 # 积分查询并发：只读状态接口，比签到宽松一档；账号很多时也不至于把站点打满。
 _CREDITS_CONCURRENCY = 4
 # 「永久冷却」的截止时刻（2099-12-31 23:59:59 UTC）。与 Trae 存储层里的
@@ -145,19 +143,21 @@ async def model_catalog(user: dict = Depends(security.current_user)) -> dict:
     return {'platforms': out}
 
 
-# ── 平台设置（池级并发上限）───────────────────────────────
+# ── 平台设置（池级并发上限 / 签到节奏）────────────────────
 def _settings_payload(name: str) -> dict:
     return {
         'platform': name,
         'max_in_flight': limiter.load_limit(name),
         'limits': {'min': limiter.LIMIT_MIN, 'max': limiter.LIMIT_MAX},
+        # 批量签到的并发与账号间隔（与上面的推理并发是两个口径）。
+        **checkinpacing.load(name),
     }
 
 
 @router.get('/{name}/settings')
 def platform_settings(name: str,
                       user: dict = Depends(security.current_user)) -> dict:
-    """平台级设置。目前只有「在途请求上限」（0 = 不限）。"""
+    """平台级设置：在途请求上限（0 = 不限）+ 批量签到节奏。"""
     _adapter(name)
     return _settings_payload(name)
 
@@ -165,21 +165,28 @@ def platform_settings(name: str,
 @router.put('/{name}/settings')
 def save_platform_settings(name: str, body: dict = Body(...),
                            user: dict = Depends(security.require_admin)) -> dict:
-    """改平台池的并发上限。
+    """改平台设置（池级并发上限 / 签到并发与间隔）。
 
+    两个部分可以分开提交：界面改签到节奏时不必把 `max_in_flight` 一起带上。
     保存后立刻让适配器丢掉缓存的信号量（`invalidate_limit`）：否则新上限要等
     适配器自己的缓存过期才生效，界面会显示「已保存但没变化」。
     """
     adapter = _adapter(name)
     payload = body if isinstance(body, dict) else {}
+    changes: list[str] = []
     try:
-        value = limiter.save_limit(name, payload.get('max_in_flight'))
+        if 'max_in_flight' in payload:
+            value = limiter.save_limit(name, payload.get('max_in_flight'))
+            changes.append(f'max_in_flight={value}')
+            # 并非所有适配器都用到并发闸门（基类没有这个方法），取不到就跳过。
+            getattr(adapter, 'invalidate_limit', lambda: None)()
+        pace = checkinpacing.save(name, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # 并非所有适配器都用到并发闸门（基类没有这个方法），取不到就跳过。
-    getattr(adapter, 'invalidate_limit', lambda: None)()
-    security.audit(user, 'update_platform_settings', name,
-                   f'max_in_flight={value}')
+    changes.extend(f'{field}={pace[field]}' for field in (
+        'checkin_concurrency', 'checkin_delay_min', 'checkin_delay_max')
+        if payload.get(field) is not None)
+    security.audit(user, 'update_platform_settings', name, ' '.join(changes))
     return _settings_payload(name)
 
 
@@ -547,16 +554,24 @@ async def checkin_all(name: str,
 
     单个账号失败只记进结果，不影响其他账号——批量任务里一个坏号让整批回滚
     是反直觉的，而且用户没法知道到底哪个号有问题。
+
+    节奏按平台设置（`checkinpacing.py`）：并发上限默认 2，相邻两个账号的
+    **开始时刻**默认间隔 2–5 秒。先占并发名额再等间隔，避免间隔结束后排队
+    账号同时开跑；间隔为 0 时退化为「只受并发上限约束」的旧行为。
     """
     adapter = _adapter(name)
+    pace = checkinpacing.load(name)
     # 临时冻结的账号不参与批量任务：这就是「冻结」与「只冷却调度」的区别，
     # 界面文案也按这个口径写给用户。
     accounts = [a for a in adapter.list_accounts() if not a.get('disabled')]
-    semaphore = asyncio.Semaphore(_CHECKIN_CONCURRENCY)
+    semaphore = asyncio.Semaphore(pace['checkin_concurrency'])
+    pacer = checkinpacing.StartPacer(pace['checkin_delay_min'],
+                                     pace['checkin_delay_max'])
 
     async def run(account: dict) -> dict:
         account_id = str(account.get('uid') or '')
         async with semaphore:
+            await pacer.wait()
             try:
                 result = await adapter.checkin(account_id)
                 _log_platform_checkin(name, account, result, 'platform-batch')

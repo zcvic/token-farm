@@ -200,6 +200,29 @@ export function PlatformAccountsPanel({
   const [poolDraft, setPoolDraft] = useState('');
   const [poolBusy, setPoolBusy] = useState(false);
 
+  /**
+   * 批量签到的节奏（并发 + 账号间隔）。
+   *
+   * 与上面的池级并发是两个口径：那个限制推理请求的在途数，这个决定「全部
+   * 签到」时几个账号同时跑、相邻两个账号隔多久开始。默认并发 2、间隔 2–5
+   * 秒；间隔填 0 = 不间隔。
+   */
+  const [paceDraft, setPaceDraft] = useState({
+    concurrency: '',
+    min: '',
+    max: '',
+  });
+  const [paceBusy, setPaceBusy] = useState(false);
+
+  function resetPaceDraft(value: PlatformSettings | null = pool) {
+    if (!value) return;
+    setPaceDraft({
+      concurrency: String(value.checkin_concurrency),
+      min: String(value.checkin_delay_min),
+      max: String(value.checkin_delay_max),
+    });
+  }
+
   useEffect(() => {
     let alive = true;
     platformApi.settings(platform)
@@ -207,6 +230,11 @@ export function PlatformAccountsPanel({
         if (!alive) return;
         setPool(value);
         setPoolDraft(String(value.max_in_flight));
+        setPaceDraft({
+          concurrency: String(value.checkin_concurrency),
+          min: String(value.checkin_delay_min),
+          max: String(value.checkin_delay_max),
+        });
       })
       .catch(() => {
         // 设置是辅助信息：取不到就不显示这一块，不打断账号列表。
@@ -235,6 +263,57 @@ export function PlatformAccountsPanel({
       setPoolDraft(String(pool.max_in_flight));
     } finally {
       setPoolBusy(false);
+    }
+  }
+
+  /**
+   * 提交签到节奏。
+   *
+   * 三个数字一起提交（后端按最小 / 最大间隔整体校验）。非法时**保留草稿**
+   * 而不是回滚：改「4–8 秒」时必然先经历 `min > max` 的中间态，立刻回滚
+   * 会让用户永远改不到目标值；提示一次错误，等另一个输入框填完再提交即可。
+   */
+  async function commitPace() {
+    if (!pool || paceBusy) return;
+    const lim = pool.checkin_limits;
+    if (!lim) return;
+    const concurrency = Number(paceDraft.concurrency.trim());
+    const min = Number(paceDraft.min.trim());
+    const max = Number(paceDraft.max.trim());
+    const values = [concurrency, min, max];
+    const valid = values.every(Number.isInteger)
+      && concurrency >= lim.concurrency_min && concurrency <= lim.concurrency_max
+      && min >= lim.delay_min && min <= lim.delay_max
+      && max >= lim.delay_min && max <= lim.delay_max
+      && min <= max;
+    if (!valid) {
+      notify.err(t('platforms.checkinPaceInvalid', {
+        cmin: lim.concurrency_min,
+        cmax: lim.concurrency_max,
+        dmin: lim.delay_min,
+        dmax: lim.delay_max,
+      }));
+      return;
+    }
+    if (concurrency === pool.checkin_concurrency
+        && min === pool.checkin_delay_min
+        && max === pool.checkin_delay_max) {
+      return;
+    }
+    setPaceBusy(true);
+    try {
+      const next = await platformApi.saveSettings(platform, {
+        checkin_concurrency: concurrency,
+        checkin_delay_min: min,
+        checkin_delay_max: max,
+      });
+      setPool(next);
+      resetPaceDraft(next);
+      notify.ok(t('platforms.checkinPaceSaved'));
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setPaceBusy(false);
     }
   }
 
@@ -734,6 +813,75 @@ export function PlatformAccountsPanel({
                   {pool.max_in_flight === 0 ? t('platforms.poolUnlimited') : ''}
                 </span>
               </label>
+            )}
+            {/* 批量签到节奏：几个账号同时跑 + 相邻两个账号隔多久开始。
+                默认并发 2、间隔 2–5 秒；间隔 0 = 不间隔。非管理员只读展示。 */}
+            {pool?.checkin_limits && (
+              <div
+                className="flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground"
+                title={t('platforms.checkinPaceHint')}
+              >
+                <CalendarClock className="h-3.5 w-3.5" />
+                <span className="whitespace-nowrap">{t('platforms.checkinPace')}</span>
+                {isAdmin ? (
+                  <>
+                    <Input
+                      value={paceDraft.concurrency}
+                      onChange={(e) => setPaceDraft((d) => ({...d, concurrency: e.target.value}))}
+                      onBlur={() => void commitPace()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void commitPace();
+                        }
+                      }}
+                      inputMode="numeric"
+                      disabled={paceBusy}
+                      aria-label={t('platforms.checkinConcurrency')}
+                      className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
+                    />
+                    <span className="whitespace-nowrap">{t('platforms.checkinConcurrency')}</span>
+                    <span className="opacity-40">·</span>
+                    <Input
+                      value={paceDraft.min}
+                      onChange={(e) => setPaceDraft((d) => ({...d, min: e.target.value}))}
+                      onBlur={() => void commitPace()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void commitPace();
+                        }
+                      }}
+                      inputMode="numeric"
+                      disabled={paceBusy}
+                      aria-label={t('platforms.checkinDelayMin')}
+                      className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
+                    />
+                    <span className="opacity-60">–</span>
+                    <Input
+                      value={paceDraft.max}
+                      onChange={(e) => setPaceDraft((d) => ({...d, max: e.target.value}))}
+                      onBlur={() => void commitPace()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void commitPace();
+                        }
+                      }}
+                      inputMode="numeric"
+                      disabled={paceBusy}
+                      aria-label={t('platforms.checkinDelayMax')}
+                      className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
+                    />
+                    <span className="whitespace-nowrap">{t('platforms.checkinSeconds')}</span>
+                  </>
+                ) : (
+                  <span className="tabular-nums text-foreground">
+                    {pool.checkin_concurrency} · {pool.checkin_delay_min}–{pool.checkin_delay_max}
+                    {t('platforms.checkinSeconds')}
+                  </span>
+                )}
+              </div>
             )}
             <Button
               variant="outline"

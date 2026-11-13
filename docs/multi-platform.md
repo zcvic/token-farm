@@ -166,7 +166,9 @@ registry.register(FooAdapter())
 | DELETE | `/api/platforms/{name}/accounts/{id}` | 删除 |
 | GET | `/api/platforms/{name}/accounts/{id}/usage` | 额度快照 |
 | POST | `/api/platforms/{name}/accounts/{id}/checkin` | 单个签到 |
-| POST | `/api/platforms/{name}/checkin-all` | 批量签到（并发 3，单条失败不中断；跳过已冻结账号） |
+| POST | `/api/platforms/{name}/checkin-all` | 批量签到（并发与账号间隔按平台设置，默认并发 2、间隔 2–5 秒；单条失败不中断；跳过已冻结账号） |
+| GET | `/api/platforms/{name}/settings` | 平台设置：池级在途上限 + 批量签到节奏 |
+| PUT | `/api/platforms/{name}/settings` | 改上述设置（可只提交要改的字段） |
 | PATCH | `/api/platforms/{name}/accounts/{id}` | 账号调度参数（`weight` / `disabled`） |
 | POST | `/api/platforms/{name}/accounts/{id}/cooling` | 强制冷却（定时 / 永久） |
 | DELETE | `/api/platforms/{name}/accounts/{id}/cooling` | 立即解除冷却 |
