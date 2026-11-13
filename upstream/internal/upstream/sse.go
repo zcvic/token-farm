@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -32,8 +33,27 @@ var errTruncatedStream = errors.New("upstream stream ended before completion")
 
 // IsTruncatedStreamError 报告错误是否为「上游截断」——供 handler 在流式路径把
 // 截断记为失败观测（HTTP 头已发出只能 200，但日志/状态不应留下成功）。
-// 告知客户端的义务由 StreamHint 在 [DONE] 之前插入的 error 帧承担。
+// 告知客户端的义务由 StreamHint 在 [DONE] 之前插入的 error 帧与截断终态帧承担。
 func IsTruncatedStreamError(err error) bool { return errors.Is(err, errTruncatedStream) }
+
+// TruncationFinishReason 上游没有给出正常收尾时（既无 finish_reason 也无
+// data: [DONE] 就 EOF = 断流）如实上报的截断终态取值。
+//
+// 为什么是 "length"：OpenAI 协议的 finish_reason 词表里没有「上游断流」这一项，
+// 而客户端真正需要知道的事实是「这条输出是残缺的，别当完整结果用」——"length"
+// 是唯一既合法又让三条适配器如实标截断的取值：
+//   - chat：finish_reason="length"（客户端据此提示被截断）；
+//   - responses：response.incomplete + incomplete_details.reason=max_output_tokens
+//     （见 server/routers/responses.py 的 finish_reason=="length" 分支）；
+//   - messages：stop_reason="max_tokens"。
+//
+// 不给这个取值时，三条路径各自 default 成「正常完成」（空 finish_reason /
+// response.completed / end_turn），客户端把半截内容当完整答案落库——那是静默丢内容。
+// 同一判据（!sawDone）本文件处理残缺 tool_calls 时早已在用：代码知道这是截断，
+// 只是此前没让它出现在客户端可见的协议字段里。
+//
+// 流式与非流式共用这一个常量，避免两处口径漂移（改一处忘另一处）。
+const TruncationFinishReason = "length"
 
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
@@ -51,6 +71,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		gotAnyContent bool
 		validEvents   int
 		sawDone       bool // 上游显式发过 data: [DONE]（正常收尾）
+		sawFinish     bool // 上游显式给过非空 finish_reason（与默认值 "stop" 区分开）
 		toolCalls     = map[int]map[string]any{}
 		toolOrder     []int
 		// toolSeq 缺 index 的 tool_call 的分配序号源：跨帧延续「最近分配」槽位，
@@ -163,8 +184,21 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 				sawDone = true
 				break
 			} else {
-				var chunk map[string]any
-				if json.Unmarshal([]byte(payload), &chunk) == nil {
+				// 粘帧（issue #197）：一个 data 行里塞了多个 JSON 对象。流式路径在
+				// writeFrame 里拆分；聚合路径此前直接解析失败后静默 continue ——
+				// 内容不是「报错」而是**整段丢失**，比流式那边更隐蔽。这里拆开后
+				// 逐个并入聚合。
+				chunks := []string{payload}
+				if parts := splitConcatenatedJSON(payload); len(parts) > 1 {
+					log.Printf("WARN: [upstream] 聚合流 data 帧内含 %d 个 JSON 对象（上游粘帧）→ 拆开并入",
+						len(parts))
+					chunks = parts
+				}
+				for _, one := range chunks {
+					var chunk map[string]any
+					if json.Unmarshal([]byte(one), &chunk) != nil {
+						continue
+					}
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
 					validEvents++
 					if v, ok := chunk["id"].(string); ok && id == "" {
@@ -187,6 +221,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 							}
 							if fr, ok := c["finish_reason"].(string); ok && fr != "" {
 								finishReason = fr
+								sawFinish = true
 							}
 							if delta, ok := c["delta"].(map[string]any); ok {
 								if r2, ok := delta["role"].(string); ok && r2 != "" {
@@ -223,6 +258,14 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		// 不再合成空 content 的假成功响应，直接报错，由 handler 映射为 502 upstream_parse。
 		return nil, errEmptyStream
 	}
+	// 断流如实上报：既没给 finish_reason 也没给 data: [DONE] 就 EOF（上游连接中断），
+	// 此时 finishReason 还是初始默认值 "stop"——直接下发等于告诉客户端「模型正常
+	// 说完了」，而半截正文/残缺 tool_calls 会被当完整结果。同一判据（!sawDone）下方
+	// 处理 tool_calls 时早已在用，这里只是让它同时出现在客户端可见的 finish_reason 上。
+	// 已收到任一正常收尾信号（sawFinish 或 sawDone）则一律不动。
+	if !sawDone && !sawFinish {
+		finishReason = TruncationFinishReason
+	}
 	if id == "" {
 		id = fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	}
@@ -254,7 +297,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		//   - 上游连接中断（EOF 收尾但未发 data: [DONE]，sawDone=false）。
 		// 完整参数原样保留（正例零改动）；空参数（无参工具）不是截断，同样保留。
 		// 此前只认 finish_reason=="length"，EOF 截断的 tool_calls 残缺参数被原样下发。
-		if finishReason == "length" || !sawDone {
+		if finishReason == TruncationFinishReason || !sawDone {
 			calls = dropTruncatedToolCalls(calls)
 		}
 		if len(calls) > 0 {
@@ -562,79 +605,142 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 		return nil
 	}
 
+	// writeFinishOnlyFrame 写一帧「只有 finish_reason、没有正文」的收尾帧（delta 为空）。
+	// 用于断流兜底：让只读 finish_reason 的客户端也知道这一轮是残缺的。
+	// 用 JSON 构造而非手拼字符串，避免 id 里出现引号/反斜杠时写出坏帧。
+	writeFinishOnlyFrame := func(id, finish string) error {
+		if id == "" {
+			id = "chatcmpl-wb2api"
+		}
+		frame := map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"choices": []any{map[string]any{
+				"index":         0,
+				"delta":         map[string]any{},
+				"finish_reason": finish,
+			}},
+		}
+		raw, merr := json.Marshal(frame)
+		if merr != nil {
+			return nil // 构造失败不阻断收尾（比写出坏帧更安全的是不写）
+		}
+		if _, werr := io.WriteString(w, "data: "+string(raw)+"\n\n"); werr != nil {
+			return werr
+		}
+		if fl != nil {
+			fl.Flush()
+		}
+		return nil
+	}
+
 	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
 	// 仅 JSON 解析成功时计数记为一次有效转发（JSON 解析失败照常降级原样写出，但不计数）。
-	writeFrame := func(payload string) (int, error) {
+	//
+	// 声明与赋值分开：粘帧拆分需要递归调用本帧处理（见下方 issue #197 分支）。
+	var writeFrame func(string) (int, error)
+	writeFrame = func(payload string) (int, error) {
 		var obj map[string]any
 		valid := 0
-		if json.Unmarshal([]byte(payload), &obj) == nil {
-			// 上游错误帧透传（error-passthrough）：带 error 键的帧**原样写出**，不走
-			// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
-			// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
-			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
-			if _, hasErr := obj["error"]; hasErr {
-				// 已进入收尾段：先把缓冲的收尾帧发出去，再发错误帧，避免顺序反转。
-				if werr := flushTail(); werr != nil {
-					return 0, werr
+		if json.Unmarshal([]byte(payload), &obj) != nil {
+			// 粘帧（issue #197）：上游偶发把两个 chunk 塞进同一个 data 行，形如
+			// `data: {a} {b}`。原样透传会让客户端按 SSE 规范把整行当一个 JSON 解析，
+			// 直接失败在「第二个对象」上，整轮对话作废。这里拆成多个对象逐个走常规
+			// 路径，客户端看到的每帧都是单个合法 JSON。
+			if parts := splitConcatenatedJSON(payload); len(parts) > 1 {
+				log.Printf("WARN: [upstream] data 帧内含 %d 个 JSON 对象（上游粘帧）→ 拆成独立帧透传，首个 %.120q",
+					len(parts), truncate(parts[0], 120))
+				n := 0
+				for _, part := range parts {
+					c, werr := writeFrame(part)
+					if werr != nil {
+						return n, werr
+					}
+					n += c
 				}
-				if werr := writeRaw(payload); werr != nil {
-					return 0, werr
-				}
-				return 1, nil
+				return n, nil
 			}
-			// reasoningBackfill：记录整轮是否出现正文/工具调用，并累积思考原文。
-			// 放在错误帧早退之后 —— 上游错误帧不属于正常内容，不该参与判定。
-			if ReasoningFallbackEnabled() {
-				if chs, ok := obj["choices"].([]any); ok {
-					for _, ci := range chs {
-						c, _ := ci.(map[string]any)
-						if c == nil {
-							continue
-						}
-						d, _ := c["delta"].(map[string]any)
-						if d == nil {
-							continue
-						}
-						if v, ok := d["content"].(string); ok && v != "" {
-							sawContent = true
-						}
-						if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
-							sawToolCalls = true
-						}
-						if v, ok := d["reasoning_content"].(string); ok && v != "" {
-							reasoningBuf.WriteString(v)
-						}
+			// 非 JSON 帧：原样降级写出，不计数（与修复前一致）。但「看起来该是 JSON
+			// 却解析失败」此前是静默透传，线上完全查不到，这里补一条 WARN——纯文本
+			// 心跳不刷屏（looksLikeJSON 只认 { / [ 开头）。
+			if looksLikeJSON(payload) {
+				log.Printf("WARN: [upstream] data 帧不是合法 JSON → 原样透传 %.160q", truncate(payload, 160))
+			}
+			if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+				return 0, werr
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+			return 0, nil
+		}
+		// 上游错误帧透传（error-passthrough）：带 error 键的帧**原样写出**，不走
+		// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
+		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
+		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
+		if _, hasErr := obj["error"]; hasErr {
+			// 已进入收尾段：先把缓冲的收尾帧发出去，再发错误帧，避免顺序反转。
+			if werr := flushTail(); werr != nil {
+				return 0, werr
+			}
+			if werr := writeRaw(payload); werr != nil {
+				return 0, werr
+			}
+			return 1, nil
+		}
+		// reasoningBackfill：记录整轮是否出现正文/工具调用，并累积思考原文。
+		// 放在错误帧早退之后 —— 上游错误帧不属于正常内容，不该参与判定。
+		if ReasoningFallbackEnabled() {
+			if chs, ok := obj["choices"].([]any); ok {
+				for _, ci := range chs {
+					c, _ := ci.(map[string]any)
+					if c == nil {
+						continue
+					}
+					d, _ := c["delta"].(map[string]any)
+					if d == nil {
+						continue
+					}
+					if v, ok := d["content"].(string); ok && v != "" {
+						sawContent = true
+					}
+					if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+						sawToolCalls = true
+					}
+					if v, ok := d["reasoning_content"].(string); ok && v != "" {
+						reasoningBuf.WriteString(v)
 					}
 				}
 			}
-			// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
-			stripToolCallNames(obj, toolCallSeen)
-			// id 续传：首帧非空真实 id 缓存；后续帧缺 id / 空 id 一律用缓存值，
-			// 有自己 id 的帧保持原样（不同流分裂的帧允许各自 id）。
-			if firstID == "" {
-				if v, ok := obj["id"].(string); ok && v != "" {
-					firstID = v
-				}
-			} else {
-				if v, ok := obj["id"].(string); !ok || v == "" {
-					obj["id"] = firstID
-				}
+		}
+		// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
+		stripToolCallNames(obj, toolCallSeen)
+		// id 续传：首帧非空真实 id 缓存；后续帧缺 id / 空 id 一律用缓存值，
+		// 有自己 id 的帧保持原样（不同流分裂的帧允许各自 id）。
+		if firstID == "" {
+			if v, ok := obj["id"].(string); ok && v != "" {
+				firstID = v
 			}
-			if raw, err := json.Marshal(normalizeFrame(obj)); err == nil {
-				payload = string(raw)
+		} else {
+			if v, ok := obj["id"].(string); !ok || v == "" {
+				obj["id"] = firstID
 			}
-			valid = 1
-			// 收尾观测：出现过 finish_reason 即算上游正常收了尾（与开关无关）。
-			if frameHasFinish(obj) {
-				sawFinish = true
-			}
-			// 帧序修正：出现 finish_reason 后（含本条）先缓冲，等补发正文后再发。
-			// 开关关闭时整段不执行 —— 与改造前逐字节一致。
-			if ReasoningFallbackEnabled() && (tailing || frameHasFinish(obj)) {
-				tailing = true
-				tailBuf = append(tailBuf, payload)
-				return valid, nil
-			}
+		}
+		if raw, err := json.Marshal(normalizeFrame(obj)); err == nil {
+			payload = string(raw)
+		}
+		valid = 1
+		// 收尾观测：出现过 finish_reason 即算上游正常收了尾（与开关无关）。
+		if frameHasFinish(obj) {
+			sawFinish = true
+		}
+		// 帧序修正：出现 finish_reason 后（含本条）先缓冲，等补发正文后再发。
+		// 开关关闭时整段不执行 —— 与改造前逐字节一致。
+		if ReasoningFallbackEnabled() && (tailing || frameHasFinish(obj)) {
+			tailing = true
+			tailBuf = append(tailBuf, payload)
+			return valid, nil
 		}
 		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
 			return 0, werr
@@ -725,15 +831,30 @@ readLoop:
 	//
 	// 为什么保留 [DONE] 兜底而不换掉它：管理端 responses 转换层依赖 chat 流以
 	// [DONE] 收尾来补齐推理事件，去掉会让 /v1/responses 的思考内容显示不全
-	// （实测回归过、已回退）。所以收尾契约不动，只在 [DONE] **之前**插一条 error
-	// 帧：客户端（NarraFork 等）优先识别 error → 判失败 / 可续跑，不再把半截
-	// 回答当成完成；管理端 responses.py 也会把无 choices 的 error 帧转成
-	// response.failed。
+	// （实测回归过、已回退）。所以收尾契约不动，只在 [DONE] **之前**插两条帧。
 	//
 	// 判据与非流式 Aggregate 同构：那边同样以 !sawDone 认定「未正常收尾」。
 	// 空流（validFrames == 0）走上方的 errEmptyStream 分支，不重复判定。
 	truncated := validFrames > 0 && !sawDone && !sawFinish
 	if truncated {
+		// 第一帧：截断终态 finish_reason=length（TruncationFinishReason）。
+		//
+		// 为什么必须补这一帧：只补 error 帧时，**只读 finish_reason 的客户端**
+		// （很多 SDK 都是）看到的是空 finish_reason + 正常 [DONE]，仍把半截回答当
+		// 完整结果；responses 适配器按 finish_reason 分流，也仍会回
+		// response.completed。补上 length 之后三条适配器同时如实标截断：
+		// chat 侧看到 length，responses 侧走 incomplete(max_output_tokens)，
+		// messages 侧走 max_tokens —— 与非流式 Aggregate 的口径一致。
+		//
+		// 只在这一层一个终态都没发过时补（truncated 已含 !sawFinish 与 !sawDone），
+		// 否则两个 finish_reason 里后一个会把前一个洗掉。
+		if werr := writeFinishOnlyFrame(firstID, TruncationFinishReason); werr != nil {
+			return werr
+		}
+		// 第二帧：本地 error 帧，给「优先识别 error」的客户端（NarraFork 等）判失败 /
+		// 可续跑。两者语义不冲突：error 帧说「这是故障」，finish_reason 帧说
+		// 「内容被截断了」。
+		//
 		// 本地判定帧不走 writeRaw：它的 hintFn 是给**上游** error 帧配建议用的，
 		// 这里不是上游错误，不编造 hint。
 		if _, werr := io.WriteString(w,

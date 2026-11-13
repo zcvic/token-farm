@@ -201,6 +201,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			sessionDeadFails: s.SessionDeadFails,
 			consecutiveFails: s.ConsecutiveFails,
 			creditsExpiring:  expiring,
+			lastCheckinDay:   s.LastCheckinDay,
 		}
 		// 恢复熔断器：breakerUntil 在未来才恢复（惰性过滤过期/零值，与落盘同口径）。
 		// retryCount 仅在 breakerUntil 未过期时恢复——已过期则归零（不保留无用退避指数）。
@@ -450,6 +451,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			CreditsExpiring:  e.creditsExpiring,
 			ModelCooldowns:   mcs,
 			ModelCosts:       mcosts,
+			LastCheckinDay:   e.lastCheckinDay,
 		}
 	}
 	return sf

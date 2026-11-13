@@ -47,6 +47,12 @@
 > P0-1 里的「入站请求体上限」那一半已完成（连坐保护仍未做），M-P2-6 的慢上传
 > 可见性已完成（在途名额释放回归仍未做）。
 
+> **2026-11 低风险批**（本文「一页摘要」前 9 项，逐项见各条目末尾的「落地状态」）：
+> **九项全部落地**——M-P0-3、M-P2-14（Go 侧）、M-P2-15、M-P1-11、M-P1-6、
+> M-P1-8、M-P1-14、M-P1-12、M-P1-15、M-P0-2。这批不改流量分布，与下一批
+> （`reserve_credits` → `model_fallback` → 6020/6021 → `account_priority` /
+> `account_share` → `balance_window`，需灰度）不是同一批。
+
 ## 先看两套运行时的差异
 
 本项目是 **Python 面板 + Go 上游网关** 双运行时；参考仓是**单二进制 Go 程序，
@@ -200,6 +206,48 @@
 - 与 P1-12（签到回执四态）有交集：补签成功/失败也要写进同一份回执，否则面板
   仍看不出「补签已重试过」。两项建议一起做。
 
+**落地状态（2026-11 低风险批）**：✅ **已同步**。新增
+`upstream/internal/scheduler/checkin_retry.go`：
+
+- `checkinLateRetryDelays = []time.Duration{10m, 40m}`（包级变量，测试可改小）；
+  与本地已有的 `checkinRetryDelays`（5s/15s/60s **原地**退避）语义不同，故另起名
+  `checkinLateRetry*`——同名会让两套节奏混在一个变量里；
+- 抽出 `checkinOne(a, uid) (CheckinStatus, error)`：成功 → `CheckinOK`；上游
+  幂等拒绝 → `CheckinAlready` 且 err 为 nil；真失败 → `CheckinFail` + err。两种
+  「今天确实已签」都落 `NoteCheckinDone`，主批与补签共用同一份判据；
+  `dailyCheckinWithRetry` 改名 `checkinWithRetry` 并改为调它，语义不变；
+- `checkinAll` 收集 `lateRetry`（只收 `checkinRetryable` 为真的错误），末尾
+  `startCheckinLateRetry(ctx, lateRetry)` 起后台 goroutine，**不阻塞返回**；
+- 每轮补签前先 `Pool.CheckinDoneToday(uid)` 跳过已签账号；再按主批同一条跳过
+  规则排除 `Disabled` / `RiskPaused` / `global` / 无凭证；
+- `lateRetryWait(round, prev)` 单独成函数：延迟是**从本批结束起算的绝对偏移**，
+  第二轮只再等 40m−10m=30m。内联 `[round]-prev` 的算术差异藏在分钟级时间里，
+  功能测试看不出来（漏掉 `-prev` 会让第二次补签被推到 50 分钟后）。
+
+`pool` 侧补签到记账（参考仓已有、本地原先完全没有）：新增
+`internal/pool/checkin.go` 的 `NoteCheckinDone` / `CheckinDoneToday`，日键走
+`checkinDayKey` → `cst.Day`；`entry.lastCheckinDay` +
+`stateAccount.LastCheckinDay`（`last_checkin_day`，空串省略）+ `persist.go`
+落盘/恢复两处映射。**没有**照抄参考仓把记账塞进 `cooldown.go`——签到与冷却域
+正交，混在冷却文件里会让人误以为改冷却会影响签到。
+
+**有意不移植**（本地没有对应能力，照抄会引入空壳）：`GetCheckinActivityStatus`
+（上游活动状态查询，本地无此接口，签到自身的幂等错误标记仍是兜底判据）、
+`SupportsPersonalEndpoints`（本地用 `RefreshTokenValue() != ""` + `IsGlobal()`）、
+`includeDisabledInTasks`（本地无此开关，直接按 `Disabled` 跳过）、
+`upstream.IsTransientBilling`（本地等价物就是 `checkinRetryable`，判据一致）。
+
+测试：`checkin_retry_test.go` 7 条（瞬时失败后补签成功 / 两轮后成功 /
+两轮后放弃 / 业务拒绝不排 / 已签跳过 / 禁用与 global 跳过 / ctx 取消即退）+
+`TestLateRetryWaitIsAbsoluteOffset` + `TestCheckinOneAlreadyIsIdempotent`；
+`pool/checkin_test.go` 5 条（记账 / CST 日键 / 跨重启保留 / 空值不落盘 /
+`checkinDayKey` 与宿主时区无关）。14 条变异全 RED。来源提交 `1adfa520`
+（部分同步）。
+
+**仍未做**：P1-12（签到回执四态）没做，所以补签成功/失败**不写进**
+`CheckinOutcome` 回执——面板在补签那一轮看不到结果，只能从日志看。这是本项的
+已知缺口，两项一起做才闭环。
+
 ### P0-3　单个 `data:` 行里塞了多个 JSON 时拆分
 
 **能力**
@@ -242,6 +290,14 @@
 - 成本：低。一个纯函数 + 三处接线，无新依赖；
 - 风险：切分器必须严格——切错会把一个合法帧劈成两个半截，比不切更糟。所以每段
   都要单独 `json.Valid`，任何一段不合法就整体放弃拆分。
+
+**落地状态（2026-11 低风险批）**：✅ **已同步**。新增
+`upstream/internal/upstream/sse_frame_split.go`（`splitConcatenatedJSON` /
+`looksLikeJSON` / `trimJSONValue` / `maxSplitParts=64`），`sse.go` 的流式
+`writeFrame` 与聚合路径 `Aggregate` 两处接入（参考仓只改了流式一处，本地聚合路径
+解析失败是静默 `continue`、内容整段丢失，所以一并接）。测试
+`sse_frame_split_test.go` 7 组用例；三条变异（流式去拆分 / 聚合去拆分 / 切分器
+去 `json.Valid`）全部 RED。来源提交 `afb5f224`。
 
 ### P0-4　新版桌面端 `$wbEncrypted` auth 文件（解密 + 回写保持加密）
 
@@ -574,6 +630,14 @@ body 换任何号都会撞。
    恰好也在冷却，就会撞一次冷却再换——多一次往返，但换来的前缀缓存命中远大于
   这一跳成本。真正的账号级故障不受影响（仍解绑）。
 
+**落地状态（2026-11 低风险批）**：✅ **已同步**。新增 `failKeepBinding()`（只
+`releaseHeld()`），6 个请求级分支改用它：`ErrContentBlocked`、`ErrPromptTooLong`、
+`ErrImageInvalid`、`ErrEmptyMessage`、`ErrToolCallMismatch`、`ErrClient`+11133。
+**渠道校验分支（`IsChannelCheck`）仍走 `fail()` 解绑**——它按账号灰度启用、分支
+直接返回不轮转，解绑才能换到未灰度号（与参考仓一致，参考仓也只改了 4 处）。新增
+`sticky_request_error_test.go`（6 个子用例 + 账号级 429 反例 + 渠道校验反例）；
+六处改回 `fail()` 全 RED。来源提交 `2b210e92`。
+
 ### P1-7　等上游首帧期间补 SSE 注释帧
 
 **能力**
@@ -683,6 +747,24 @@ body 换任何号都会撞。
 - 成本：低。两个纯函数 + 两处接线；
 - 风险：补位值是 `" "` 而不是 `""`——写错成空串等于没修。镜像方向也要小心：
   只在 `reasoning` **缺失或为空**时写，已非空绝不覆盖（客户端可能有意带空）。
+
+**落地状态（2026-11 低风险批）**：✅ **已同步**（部分；11151 归请求级本地此前
+已有 `ErrEmptyMessage` + fail-fast 分支，没重做）。新增
+`internal/upstream/empty_text_part.go`（`guardEmptyTextParts` / `sniffParts` /
+`fillEmptyTextParts` / `partType` / `isEmptyText`）与 `reasoning_mirror.go`
+（`readsUpstreamReasoning` / `mirrorUpstreamReasoning` /
+`upstreamReasoningModelPrefixes`），都在 `payload.go` 的
+`PrepareBodyOptWithEffortsAndDefault` 里接线，位置在 repack / cleanup 之后。
+
+与参考仓的一处**有意偏离**：镜像放在 `sanitize` **之后**（参考仓在之前）。
+sanitize 只净化 `reasoning_content`、不看 `reasoning`，先镜像会把未净化的原文
+抄进 `reasoning`，等于绕过脱敏；后置则抄的是已净化值。
+
+补位只补值不删段（`" "`），嗅探只在「去前导空白后以 `[` 开头 + 能解析成非空
+对象数组」时生效。测试 `empty_text_part_test.go`：形态矩阵 7 组 + 嗅探 1 组 +
+不嗅探 5 组 + 零改动 1 组 + 六家族命中 + realm 前缀 + 5 条反例 + 管线级 2 条；
+10 条变异里 9 条 RED（「嗅探去掉首字符判据」是等价变异——`json.Unmarshal` 本身
+就容忍前导空白，已在注释里写明，不算漏测）。来源提交 `f987bacc`。
 
 ### P1-9　上游漏进正文的 `<think:...>` 拆回 thinking 块
 
@@ -831,6 +913,15 @@ Agent 侧的表现就是「说到一半停了、也不报错」，只能人工�
 - 风险：**多补一帧会污染正常流**。判据必须严格（`!sawDone && !sawFinish`），
   且要在 `flushTail()` 之后、`[DONE]` 之前。
 
+**落地状态（2026-11 低风险批）**：✅ **已同步**。新增导出常量
+`TruncationFinishReason = "length"`；`StreamHint` 的截断分支补
+`finish_reason=length` 帧（在本地 error 帧之前、`[DONE]` 之前）；`Aggregate`
+补 `sawFinish` 并在 `!sawDone && !sawFinish` 时改写 `finishReason`（本地此前
+非流式已在 `finishReason == "length" || !sawDone` 时丢掉残缺 tool_calls，但
+`finish_reason` 仍下发默认 `stop`）。新增 `sse_truncation_test.go` 6 条用例；
+四条变异（流式不补帧 / 取值改 stop / 聚合去掉改写 / 判据放宽）全 RED。
+来源提交 `84a48d9e`。
+
 ### P1-12　11134 供应商过载不罚号 / 不换号并保留会话粘性
 
 **能力**
@@ -881,6 +972,24 @@ switch to another model`）是**模型供应商侧过载**，与账号健康无�
 - 风险：`retry_after` 的单位未能确认（参考仓按秒解释，日志 body 截断在 200 字符）。
   实现时按值域判断（>1000 视为毫秒）更稳；
 - 与 M-P1-6 有依赖：`failKeepBinding` 先落地，这项才能直接复用。
+
+**落地状态（2026-11 低风险批）**：✅ **已同步**（有意偏离见下）。不新增枚举，
+把本地 `ErrUpstreamQueue` **全局改名 `ErrUpstreamBusy`**（`String()` 也从
+`upstream_queue` 改为 `upstream_busy`），语义扩成「上游容量信号」三形态：6020
+排队 / 6021 队列满 / 11134 供应商过载。`Classify` 只认结构化
+`hasBusinessCode(body,"11134")`（无业务码的 5xx 仍是 `ErrServer`）；新增
+`parseQueueRetryAfter`（认 `data.retry_after` 与 `retry_policy.retry_after`，超
+`retryAfterSanity`=2h 封顶）；`IsUpstreamQueue` 补 6021（`queue.full` +
+`hasBusinessCode("6021")`）；handler 新增 `ErrUpstreamBusy` 专用分支用
+`failKeepBinding()`，且 `RetryAfter>0` 时 `break` 不轮转（无口径时保留轮转，撞
+间歇空窗）；末端映射改 `429` + code `upstream_busy` + `Retry-After`（向上取整、
+封顶 `maxRetryAfterSec`=600、无口径兜底 5s）。测试：
+`queue_retry_after_test.go`（9 子用例 + 数字字段不误伤）、`upstream_busy_test.go`
+（4 条端到端）；7 条变异全 RED。
+
+有意偏离参考仓：`doJSON`（refresh/report/travel 共用）**不改** 429 口径
+（`refreshRetryAfter` 有 300s 下限），只在 chat 流路径接 `parseQueueRetryAfter`。
+`retry_after` 单位按秒解释（与参考仓一致），未加毫秒猜测。来源提交 `48306862`。
 
 ### P1-13　签到回执四态（`checked` / `already` / `pending` / `failed`）
 
@@ -994,6 +1103,25 @@ code 分支判定、只看 `errors`，前端再拿一个布尔拼死字符串。
 - 风险：正则写宽会误伤正常 system prompt。参考仓的「连写」约束是关键，
   不要简化成单个短语。
 
+**落地状态（2026-11 低风险批）**：✅ **已同步**。`sanitize.go` 加
+`sanitizeInjectedIdentityRe`（`when asked about your … identity, identify yourself
+as …` 整句，`{0,60}` 两段宽松上限 + `[^.\n]` 防跨句）+ `sanitizeModelIdentityTagRe`
+（`</?model_identity\s*/?>`，含自闭合变体）；两条规则挂在 `sanitizeText` 的通用
+路径上，并把 `identify yourself as` / `model_identity` 补进 `sanitizeFeatures`
+预检（漏了预检等于规则永远不执行）。`hint.go` 的 `ErrHardCredit` 改成 realm 中立：
+CN 号走次日签到、global 号需充值，不再承诺「等签到恢复」。
+
+与上文建议的第 2 条**有意偏离**：`mirrorUpstreamReasoning` 现在排在
+`sanitizeMessages` **之后**（见 M-P1-8 的落地状态），所以镜像出来的是**已净化**
+值，不是原文。原方案「镜像在前、靠 sanitize 一并洗掉」依赖 sanitize 也清洗
+`reasoning` 字段，而本地 `sanitizeMessages` 只洗 `content` / `reasoning_content` /
+`tool_calls`——照原顺序会把未净化原文抄进 `reasoning`，等于绕过脱敏。
+
+`TestSanitizeLiteralByteExact` 快照同步更新（features 9→11 项、正则 3→5 个）。
+新增 `sanitize_identity_test.go` 6 条用例（整句命中 / 大写变体 / 4 条误伤反例 /
+标签剥离 / 标签变体 / assistant reasoning 载体）；8 条变异全 RED。来源提交
+`8f9fa3c5`。
+
 ### P1-15　`/v1/models` 透出 `promo_factor` / `promo_credits` / `promo_label`
 
 **能力**
@@ -1035,6 +1163,33 @@ code 分支判定、只看 `errors`，前端再拿一个布尔拼死字符串。
 
 - 成本：低。解析 + 输出各一处；
 - 风险：`promo_factor` 用零值判断会把「免费」吞掉——这是本项唯一容易做错的地方。
+
+**落地状态（2026-11 低风险批）**：✅ **已同步**。新增
+`upstream/internal/upstream/promo.go`（参考仓把 promo 塞在 `client.go`，本地拆成
+独立文件）：
+
+- `v3ModelPromotion` 用具名子结构 `v3PromoBadge` / `v3PromoDiscount` /
+  `v3PromoWindow` / `v3PromoSchedule`，不照抄匿名嵌套——匿名结构体在测试里没法
+  复用（构造一条带窗口的优惠要重复写三层类型字面量）；
+- `promoActive` 的时段判定用本地 `internal/cst` 的 `cst.Loc`，不新建
+  `promoZone`（`time.FixedZone`）。`cst` 已经承载「上游恒 UTC+8」这一事实，
+  再开一个同义常量就是双表示；`TestPromoActiveCSTNotHostZone` 用 UTC 入参锁定
+  「结论只取决于 CST，不取决于宿主时区」；
+- 挂载点选在 `parseGlobalModelNames` 末尾（`applyPromotionsFromRaw`），而不是
+  `fetchV3Models`。CN `FetchModels` 与 global 探测共用这条解析、响应同构，两处
+  各写一遍必然漂移；
+- `applyModelInfoFields` 按「`PromoFactor` 非 nil → 写 `promo_factor` +
+  `promo_credits`；`PromoLabel` 非空 → 写 `promo_label`」输出，牌价 `credits`
+  原样保留（启动器要拿它划掉显示）。
+
+**有意不移植**：参考仓的 `PromoNote`（hover 文案，只有面板悬浮提示用得上）与
+`applyModelTiers` / `ModelTier`（本地没有「官方标识文案」这个能力，属于
+M-P2-10 的另一条线）。
+
+测试：`promo_test.go` 8 条（时段矩阵 13 子用例、CST 非宿主时区、priority 取高、
+`factor=0` 非 nil、badge-only、目录外不挂、坏 JSON/窄表不拖垮解析、目录解析挂载）
++ `models_promo_test.go` 4 条（三字段透出 / 只有标签 / 无优惠全省略 / 端到端）。
+11 条变异全 RED。来源提交 `b64773e8`（部分同步）。
 
 ---
 
@@ -1358,6 +1513,14 @@ Python 侧同样处理。**这是本清单里成本最低的一项**，可以单
 
 **成本/风险**：极低。一个排序比较函数。
 
+**落地状态（2026-11 低风险批）**：✅ **已同步**（Go 侧）。`LoadAuthFiles` 改为
+`sortAuthFilesByModTime`（mtime 升序，mtime 相同或 `stat` 失败退回字典序
+tie-break）；`LoadDir` 本身不去重，去重在 `pool.SyncToDir`（后载入者覆盖），
+测试断言点是「最后一个是最新」。新增 `TestLoadAuthFilesSortsByModTime`、
+`TestLoadDirNewestCredentialWins`，原 `TestAuthFileGlobUnification` 的排序断言
+改为集合断言。变异回 `sort.Strings` 两条用例全 RED。Python 侧
+`server/services/tencent.py` 的同类排序**未动**（部分同步）。来源提交 `97d3f259`。
+
 ### P2-15　`buddyapp_enter_click` 的 `isFirstPage` 改布尔
 
 **来源**：`8818458b`、`cf16478d`（merge PR #206）；参考文件 `internal/upstream/desktop.go`。
@@ -1373,6 +1536,12 @@ Python 侧同样处理。**这是本清单里成本最低的一项**，可以单
 
 **成本/风险**：极低。唯一风险是上游若对某些号仍接受字符串——布尔是更符合
 命名的形态，且参考仓已实测有效。
+
+**落地状态（2026-11 低风险批）**：✅ **已同步**。`task_runner.py` 两处改
+`True` / `False`，并把降级单发事件抽成 `desktop_buddy_enter_single()`（便于测试
+锁类型）。新增 `server/tests/test_task_runner_buddyapp_is_first_page.py`（3 条
+用例，直接 `importlib` 加载真实脚本，不复制事件构造）；两处改回字符串全 RED。
+来源提交 `8818458b`。
 
 ### P2-16　个人资料接口空昵称不再静默成功
 
@@ -1466,28 +1635,33 @@ transport（`upstream/transport.go`），Python 侧有
 
 按「本地缺不缺 + 收益 / 成本」排序，建议的实施顺序是：
 
-| 顺序 | 条目 | 一句话 | 成本 |
-|---|---|---|---|
-| 1 | **M-P0-3** | 一个 `data:` 行多个 JSON 会整轮失败，纯函数修复 | 低 |
-| 2 | **M-P2-14** | 同 uid 多文件按 mtime 最新胜出，一个排序比较函数 | 极低 |
-| 3 | **M-P2-15** | `isFirstPage` 字符串改布尔，一行修复 | 极低 |
-| 4 | **M-P0-2** | 签到分钟级补签，纯调度层 | 低 |
-| 5 | **M-P1-11** | 断流补 `finish_reason=length`，流式收尾加一帧 | 低 |
-| 6 | **M-P1-6** | 请求级错误不解绑粘性，一个函数 + 调用点替换 | 低 |
-| 7 | **M-P1-8** | 空 text 段补位 + reasoning 镜像，两个纯函数 | 低 |
-| 8 | **M-P1-14** | 清洗注入的身份指令，两条正则 | 低 |
-| 9 | **M-P1-15** | `/v1/models` 透出 promo 三字段 | 低 |
-| 10 | **M-P1-13** | 签到回执四态（要改 `DailyCheckin` 签名） | 中低 |
-| 11 | **M-P1-12** | 11134 归供应商过载，依赖 `failKeepBinding` | 低 |
-| 12 | **M-P1-10** | 输出预算下限 | 低 |
-| 13 | **M-P1-9** | `<think:...>` 拆回 thinking（落点在 Python） | 低 |
-| 14 | **M-P1-7** | 首帧前 SSE 注释帧（并发正确性） | 中低 |
-| 15 | **M-P0-4** | `$wbEncrypted` 解密 + 回写保持加密（Go + Python） | 中 |
-| 16 | **M-P1-5** | 只发 `user_id` 也派生粘性键（改流量分布，需灰度） | 低 |
-| 17 | **M-P2-13** | 目录热重载补两条护栏 | 低 |
-| 18 | **M-P2-12** | 日志落盘 / 劣化告警 / 选号策略（三件分开做） | 中 |
-| 19 | **M-P2-10** | 免费号事前避让 `exclusive` 模型（依赖两处解析） | 中 |
-| 20 | **M-P2-17** | 续写 / 救援链（与 M-P1-3 同一套机制） | 高 |
+| 顺序 | 条目 | 一句话 | 成本 | 状态 |
+|---|---|---|---|---|
+| 1 | **M-P0-3** | 一个 `data:` 行多个 JSON 会整轮失败，纯函数修复 | 低 | ✅ 已同步 |
+| 2 | **M-P2-14** | 同 uid 多文件按 mtime 最新胜出，一个排序比较函数 | 极低 | ✅ 已同步（Go 侧；Python 侧未动） |
+| 3 | **M-P2-15** | `isFirstPage` 字符串改布尔，一行修复 | 极低 | ✅ 已同步 |
+| 4 | **M-P0-2** | 签到分钟级补签，纯调度层 | 低 | ✅ 已同步 |
+| 5 | **M-P1-11** | 断流补 `finish_reason=length`，流式收尾加一帧 | 低 | ✅ 已同步 |
+| 6 | **M-P1-6** | 请求级错误不解绑粘性，一个函数 + 调用点替换 | 低 | ✅ 已同步 |
+| 7 | **M-P1-8** | 空 text 段补位 + reasoning 镜像，两个纯函数 | 低 | ✅ 已同步 |
+| 8 | **M-P1-14** | 清洗注入的身份指令，两条正则 | 低 | ✅ 已同步 |
+| 9 | **M-P1-15** | `/v1/models` 透出 promo 三字段 | 低 | ✅ 已同步 |
+| 10 | **M-P1-13** | 签到回执四态（要改 `DailyCheckin` 签名） | 中低 | 待做 |
+| 11 | **M-P1-12** | 11134 归供应商过载，依赖 `failKeepBinding` | 低 | ✅ 已同步 |
+| 12 | **M-P1-10** | 输出预算下限 | 低 | 待做 |
+| 13 | **M-P1-9** | `<think:...>` 拆回 thinking（落点在 Python） | 低 | 待做 |
+| 14 | **M-P1-7** | 首帧前 SSE 注释帧（并发正确性） | 中低 | 待做 |
+| 15 | **M-P0-4** | `$wbEncrypted` 解密 + 回写保持加密（Go + Python） | 中 | 待做 |
+| 16 | **M-P1-5** | 只发 `user_id` 也派生粘性键（改流量分布，需灰度） | 低 | 待做（单独灰度） |
+| 17 | **M-P2-13** | 目录热重载补两条护栏 | 低 | 待做 |
+| 18 | **M-P2-12** | 日志落盘 / 劣化告警 / 选号策略（三件分开做） | 中 | 待做 |
+| 19 | **M-P2-10** | 免费号事前避让 `exclusive` 模型（依赖两处解析） | 中 | 待做 |
+| 20 | **M-P2-17** | 续写 / 救援链（与 M-P1-3 同一套机制） | 高 | 待做 |
+
+> **进度（2026-11 低风险批）**：前 9 项**全部落地**（M-P0-3、M-P2-14、
+> M-P2-15、M-P1-11、M-P1-6、M-P1-8、M-P1-14、M-P1-12、M-P1-15、M-P0-2，
+> 各项末尾都有「落地状态」段）。M-P1-12 原本排在第 11 位，
+> 因为依赖的 `failKeepBinding` 已在第 6 项落地，提前并入本批一起做。
 
 明确**暂不移植**：M-P2-11（活动 2026-11-16 结束）、M-P2-18（无 profiling 需求
 时不必开）、M-P2-19（参考仓自己刚 revert 了号池分区）、M-P2-16（与 M-B-11 合并
@@ -1560,7 +1734,7 @@ transport（`upstream/transport.go`），Python 侧有
 3. **第三批（任务系统）**：A-9 的 Python 侧持久作业与锁、A-12 外观 API、A-14 补领清扫、A-15～A-18 调度健壮性。
 4. **最后再评估**：B-6 活跃上报通道切换。没有 A/B 实测数据不要动。
 
-#### 取舍：哪些真值得做
+#### A.3.1 取舍：成长任务里哪些真值得做
 
 判断口径只有一条——**这一项能不能换成积分**。成长任务里绝大多数动作是「该拿没拿到」，
 不做就是每天确定性地少拿，收益随天数线性累积；纯调度健壮性（A-15～A-18）只防重复
@@ -1702,7 +1876,7 @@ transport（`upstream/transport.go`），Python 侧有
 4. **高风险协议层**：B-1 DSML、B-21 头/UA 黄金头集、B-22 头顺序/TLS。
 5. **已覆盖，不要重复做**：B-10 国际版注册（Python 已有）、B-12 桌面事件链（Python 已有主体，只缺 apply）、B-13 小程序任务（Python 已有）。
 
-#### 取舍：哪些真值得做
+#### B.5.1 取舍：协议层里哪些真值得做
 
 判断口径比成长任务多一条——除了「有没有收益」，还要看**改错了会不会影响全部请求**。
 协议层的改动分三类：纯函数（最安全）、错误分类与状态（影响单请求）、
@@ -1940,3 +2114,9 @@ B-1～B-24 同样是按旧基线整理的。`7a48d72e` 之后又筛出 18 项协
    [upstream-sync-baseline-gaps.md](upstream-sync-baseline-gaps.md)，
    两份清单同一项只在一处展开。其中前四项与 `keepalive_refresh_window`、
    Go 侧 hidden 过滤**已于 2026-11 第一批落地**，状态见那份文档的「同步状态」表。
+5. **2026-11 低风险批**：本文「一页摘要」里前 9 项已按本地风格**全部**逐项重写
+   落地（M-P1-12 也提前并入，依赖的 `failKeepBinding` 已就绪）。这批都不改流量
+   分布、不引入依赖、不动 transport，`deploy/workbuddy-panel-ref.txt` 里单独成段。
+   下一批（`reserve_credits` → `model_fallback` → 6020/6021 →
+   `account_priority`/`account_share` → `balance_window`）会改流量分布，必须灰度，
+   与这批不是同一批。

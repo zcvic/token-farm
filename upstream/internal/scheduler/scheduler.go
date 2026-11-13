@@ -473,23 +473,6 @@ func checkinRetryable(err error) bool {
 	return upstream.CodeOf(ue.Msg) == "10001"
 }
 
-// dailyCheckinWithRetry 执行签到，遇到上游瞬时失败（HTTP 5xx / code 10001）
-// 按 checkinRetryDelays 退避重试；ctx 取消立即返回最后一次错误。
-func (s *Scheduler) dailyCheckinWithRetry(ctx context.Context, a *auth.Auth, label string) error {
-	err := s.cfg.Upstream.DailyCheckin(a)
-	for i, delay := range checkinRetryDelays {
-		if err == nil || upstream.IsAlreadyCheckin(err) || !checkinRetryable(err) {
-			return err
-		}
-		log.Printf("checkin %s: %v — %s 后重试(%d/%d)", label, err, delay, i+1, len(checkinRetryDelays))
-		if !sleepCtx(ctx, delay) {
-			return err
-		}
-		err = s.cfg.Upstream.DailyCheckin(a)
-	}
-	return err
-}
-
 // CheckinAll 全量签到：按需刷新 token → daily-checkin → 查余额 → 解冻冷却账号。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
 // 同一时刻只允许一次签到在跑，重复调用返回 ErrBusy（防止手动触发与定时撞车重复打上游）。
@@ -560,6 +543,9 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
 	var okN, alreadyN, failCheckinN, failResourceN, skipN int
+	// lateRetry 收集本轮「瞬时失败」的账号，主批结束后交给 startCheckinLateRetry
+	// 在 10/40 分钟后补签（分钟级沉降，见 checkin_retry.go）。
+	var lateRetry []string
 	first := true
 	// pace 相邻账号之间的间隔：签到与只读余额查询都会打上游，global 账号也要限速。
 	// 返回 false 表示 ctx 已取消。
@@ -642,19 +628,17 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			}
 		}
 		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
-		// 瞬时失败（HTTP 5xx / 10001）先在原地退避重试，避免错过当天签到。
-		if err := s.dailyCheckinWithRetry(ctx, a, logfmt.Label(st.UID, st.Nickname)); err != nil {
-			if upstream.IsAlreadyCheckin(err) {
-				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
-				// 出现一整段 400 报文、被误读成签到失败。
-				oc.Status = CheckinAlready
-			} else {
-				oc.Status = CheckinFail
-				oc.Detail = err.Error()
-				log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+		// 瞬时失败（HTTP 5xx / 10001）先在原地退避重试，避免错过当天签到；
+		// 秒级退避仍失败的排进分钟级补签队列（lateRetry）。
+		if cs, err := s.checkinWithRetry(ctx, a, st.UID); err != nil {
+			oc.Status = CheckinFail
+			oc.Detail = err.Error()
+			log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			if checkinRetryable(err) {
+				lateRetry = append(lateRetry, st.UID)
 			}
 		} else {
-			oc.Status = CheckinOK
+			oc.Status = cs
 		}
 		// 分桶查余额：快过期窗口内的积分单独标记，pool 优先消耗（issue:积分过期）。
 		// ExpiringSoonWindow<=0 时退化为纯总量（与引入前一致）。
@@ -684,6 +668,9 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	// 末尾追加拆分字段，排障时能直接区分「上游限流」与「账号/余额异常」。
 	log.Printf("checkin done: total=%d ok=%d already=%d fail=%d skipped=%d fail_checkin=%d fail_resource=%d",
 		len(statuses), okN, alreadyN, failCheckinN+failResourceN, skipN, failCheckinN, failResourceN)
+	// 分钟级补签：只排「瞬时失败」（HTTP 5xx / code 10001）。业务拒绝重试必然同样
+	// 失败，排进去只会每天多打几轮无效写调用。后台 goroutine，不阻塞本函数返回。
+	s.startCheckinLateRetry(ctx, lateRetry)
 	return out, nil
 }
 

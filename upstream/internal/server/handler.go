@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -421,6 +422,19 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	if mi.IsDefault {
 		entry["is_default"] = true
 	}
+	// 限时优惠（上游 modelPromotions）：credits 是**牌价**，promo_* 是当前生效折扣。
+	// 这两个字段原先只在面板的 /panel/api/models 里透出，OpenAI 兼容端点看不到——
+	// 而第三方启动器/客户端恰恰只读 /v1/models 来判断「这个模型现在是不是免费」
+	// （issue #203）。口径与面板一致：PromoFactor 为 nil 表示上游没给可计算的折扣
+	// （例如「错峰使用」只有标签没有系数），此时不写 promo_factor，但仍写标签。
+	// 判据用非 nil 而不是 != 0：0 恰恰是「限时免费」这个最该被看到的取值。
+	if mi.PromoFactor != nil {
+		entry["promo_factor"] = *mi.PromoFactor
+		entry["promo_credits"] = mi.PromoCredits
+	}
+	if mi.PromoLabel != "" {
+		entry["promo_label"] = mi.PromoLabel
+	}
 	if mi.SupportsImages {
 		entry["supports_images"] = true // 多模态能力透出
 	}
@@ -754,6 +768,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			unbindSticky()
 		}
 	}
+	// failKeepBinding 供**请求级错误**（内容拦截 / prompt 超长 / 图片无效 / 工具不匹配 /
+	// 空消息 / 参数错）使用：只释放租约，**不解绑会话**。
+	//
+	// 这些错误与账号无关（同一个 body 换任何号都会撞），账号仍然健康、它的前缀缓存也
+	// 还热着；一旦解绑，下一轮就会被分配到另一个号上，十万~几十万 token 的前缀从头
+	// 重算——用户看到的就是「报错一次之后缓存就一直不生效」，而且报错越密集（例如
+	// 上游 content_blocked 成片出现时）越会连环换号，每一跳都是全量 miss。
+	//
+	// 账号级故障（401/403/429 冷却、熔断、连败、12153）仍走 fail() 解绑——那些确实
+	// 该换号，绑在坏号上只会反复撞墙。
+	failKeepBinding := func() {
+		releaseHeld()
+	}
 
 	// 系统提示词改写（出站前、轮转前；每个请求一次）。
 	//   - custom：用自有提示词替换客户端 system/developer（从源头消灭 system 指纹误报）。
@@ -997,6 +1024,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 				}
+				// 渠道校验不在此列：它按**账号**灰度启用（issue #193/#201），且本分支
+				// 直接返回不轮转——解绑反而能让下一轮换到未被灰度的号，故仍走 fail()。
 				fail(acct.UID)
 				st.status = status
 				writeOpenAIErrorHint(w, status, "channel_check_rejected", string(respBody),
@@ -1023,7 +1052,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// error-passthrough：message 装上游 body 原文（code/msg/requestId 原样，
 				// 任务书授权上游错误码/账号语义对客户端可见），不再改写成网关固定文案。
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				failKeepBinding()
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
@@ -1043,7 +1072,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 的错误信息，客户端必须看到，禁止固定词覆盖）。
 			if kind == upstream.ErrPromptTooLong {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				failKeepBinding()
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
 					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
@@ -1053,7 +1082,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 同一 body 换账号仍是同样的解析结果，轮转只会放大无效请求。
 			if kind == upstream.ErrImageInvalid {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				failKeepBinding()
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					msg = "image request was rejected by upstream"
@@ -1069,7 +1098,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游原文（含 code/requestId，客户端按它自查），不罚号、不轮转。
 			if kind == upstream.ErrEmptyMessage {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				failKeepBinding()
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					msg = "a message in the conversation has empty content"
@@ -1082,7 +1111,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 11148 is deterministic for this request body. Return immediately without
 			// rotating accounts or incrementing account failure counters.
 			if kind == upstream.ErrToolCallMismatch {
-				fail(acct.UID)
+				failKeepBinding()
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_call_mismatch",
 					string(respBody), h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
@@ -1096,7 +1125,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 因此这里 fail-fast：400 + 上游原文，不轮转、不罚号（本分支不进
 			// applyErrorPolicy，ErrClient 的 NoteFailures 不会执行）。
 			if kind == upstream.ErrClient && strings.Contains(string(respBody), "11133") {
-				fail(acct.UID)
+				failKeepBinding()
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					msg = "request parameters were rejected by the model provider"
@@ -1105,6 +1134,32 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				return
+			}
+			// 6020「queue.waiting.title」/6021「queue.full.title」/11134 供应商过载：
+			// 上游**容量信号**，与账号健康无关 —— 不罚号（保留既有修正：按 ErrSoftRate
+			// 罚号会与全冷却兜底互相喂成整池停摆），但保留请求内轮转（排队可用性是
+			// 间歇的：2026-10-28 生产实案同一分钟内既有 6021 也有成功，一次性 fail-fast
+			// 把几秒的抖动直接交给客户端）。终态映射见末端 ErrUpstreamBusy 分支
+			// （429 + Retry-After）。
+			//
+			// 与 6020/6021 的唯一差异是**解绑**：11134 是 provider 侧过载，账号级前缀
+			// 缓存仍热；换号会丢掉它（issue #188：同号命中 97–99%、换号 0–12%）。所以
+			// 只释放租约、保留绑定，客户端按 Retry-After 重试时仍回同一个号。
+			if kind == upstream.ErrUpstreamBusy {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				failKeepBinding()
+				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
+				// body 已给出「N 秒后重试」的通道级口径时不再换号：在这几毫秒内换号
+				// 必然撞同一堵墙，只是把同一份排队请求多发几次（issue #125）。
+				// 6021（队列满、无 retry_after）与 11134 无 retry_after 时保留轮转：
+				// 那是间歇空窗，换号有机会碰上。
+				if uerr.RetryAfter > 0 {
+					break
+				}
+				if !rotateBackoff(i, r.Context()) {
+					break // ctx 取消：终止轮转（排队满载换号退避）
+				}
+				continue
 			}
 			if kind == upstream.ErrSoftRate {
 				if at, ok := upstream.ParseRateReset(string(respBody)); ok &&
@@ -1233,6 +1288,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
+	// retryAfterSec 非 0 时写 Retry-After 头：只有「上游只是忙/排队」这种可重试
+	// 形态才有意义（见下方 ErrUpstreamBusy 分支）。
+	retryAfterSec := 0
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定（11133/11135
 	// 在 hint 层自带形态判定，ErrClient 家族也能带上 hint）；本地调度类错误
 	// （无上游原文）固定 no_healthy_account hint。
@@ -1245,11 +1303,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
-		case upstream.ErrUpstreamQueue:
-			// 排队是全局队列，不是账号问题；仍返回 429 让客户端等待。
+		case upstream.ErrUpstreamBusy:
+			// 6020/6021 渠道级排队/容量满载 + 11134 供应商过载：轮转已耗尽（本请求
+			// 每个号都撞同一堵墙，或上游明示了等待时长直接止损）。
+			// 回 429 + Retry-After 而不是 503：上游对这些形态本身回的就是 429（6020
+			// 还带 data.retry_after=40），网关改写成 503 等于把「稍后再试」翻译成
+			// 「服务不可用」——WorkBuddy CLI 对 429 按 Retry-After 自动重试（官方排队
+			// 语义），对 503 直接中断任务（2026-10-28 实案：任务在两次 503 后死亡）。
+			// 上游原文（requestId / queue_position）仍在 message 原样透传。
 			status = http.StatusTooManyRequests
-			code = "rate_limit_exceeded"
-			msg = "upstream model is queueing: peak-hour wait list, please retry later"
+			code = "upstream_busy"
+			msg = "upstream is busy; retry after a short wait"
+			if ue.RetryAfter > 0 {
+				// 向上取整：8.4s 报 9s，客户端不会早醒一毫秒又撞同一堵墙。
+				secs := int((ue.RetryAfter + time.Second - 1) / time.Second)
+				if secs > 0 {
+					retryAfterSec = secs
+					if retryAfterSec > maxRetryAfterSec {
+						retryAfterSec = maxRetryAfterSec
+					}
+				}
+			}
+			if retryAfterSec == 0 {
+				retryAfterSec = 5 // 上游未给口径时的本地兜底（沿用旧 fail-fast 分支的 5s）
+			}
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：空 body 时给出明确可读文案——
@@ -1270,9 +1347,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			hint = h.hintOf(ue.Kind, earliestRateBody, bareModel, reqHasImage, ue)
 		}
 	}
+	if retryAfterSec > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSec))
+	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
 }
+
+// maxRetryAfterSec Retry-After 上报上限（秒，10 分钟）。客户端普遍把该头当成
+// 「睡多久」的指令（codebuddy CLI 直接 delayMs = retry-after×1000，不设上限），
+// 把几十分钟的冷却原样报出去等于让客户端静默挂起；超过上限按上限报，到点重试
+// 再拿一次 429 即可（只是选号失败，不打上游）。
+const maxRetryAfterSec = 600
 
 // promptTooLongMessage 11115 透传 message：上游 body 原文（含真实 token 数/
 // 上限值/requestId，客户端自行排查）；空 body 兜底为可读分类短文案（不编造原文）。
@@ -1410,9 +1496,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
-	case upstream.ErrUpstreamQueue:
-		// 排队是全局队列，与账号无关：不冷却、不计数、不禁用。本次请求仍由调用方
-		// 继续轮转（MaxRotate 兜住总次数），最终映射为 429 让客户端等待。
+	case upstream.ErrUpstreamBusy:
+		// 上游容量信号（6020/6021 排队 + 11134 供应商过载），与账号无关：不冷却、
+		// 不计数、不禁用。是否继续轮转由调用方按 RetryAfter 有无决定，最终统一映射
+		// 为 429 + Retry-After 让客户端等待。
 	case upstream.ErrAuthRejected:
 		// 纯 401（无 12153、无业务信封）：凭证被上游拒绝，但单次可能是网关抖动
 		// 或 token 轮换竞态 —— 不直接 Disable（chat 路径误判一次就是永久杀号），

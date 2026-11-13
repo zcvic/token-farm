@@ -18,11 +18,13 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// TestMain 统一关掉签到账号间隔与退避等待：默认值面向生产（3s / 5s+15s+60s），
-// 直接带进测试会让 500 响应类用例白等几十秒。需要验证节奏/重试的用例自行临时改回。
+// TestMain 统一关掉签到账号间隔与退避等待：默认值面向生产（3s / 5s+15s+60s /
+// 10m+40m），直接带进测试会让 500 响应类用例白等几十秒，分钟级补签更会留下
+// 一直睡着的后台 goroutine。需要验证节奏/重试的用例自行临时改回。
 func TestMain(m *testing.M) {
 	checkinAccountDelay = 0
 	checkinRetryDelays = nil
+	checkinLateRetryDelays = nil
 	os.Exit(m.Run())
 }
 

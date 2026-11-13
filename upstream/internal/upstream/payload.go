@@ -99,6 +99,20 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 			sanitizeTools(tools)
 		}
 	}
+	// 出站前最后一道形状检查，两条都是「不可自愈的 400」：
+	//   - 空 text 段（11151）：客户端重试只会重放同一段历史，换号也救不回来；
+	//   - reasoning 镜像：Kimi/GLM/MiniMax 等按 `reasoning` 读历史，只看
+	//     reasoning_content 的话它们的多轮一致性校验会挂。
+	// 位置必须在 repack/cleanup 之后：那两步会把字符串 content 挪到别的消息上，
+	// 先补位再挪动等于漏掉被挪过去的那一段。
+	//
+	// 与参考仓的差异：镜像放在 sanitize **之后**（参考仓在之前）。sanitize 只净化
+	// reasoning_content、不看 reasoning，先镜像会把未净化的原文抄进 reasoning，
+	// 等于绕过脱敏；后置则抄的是已净化值。
+	if msgs, ok := obj["messages"].([]any); ok {
+		guardEmptyTextParts(msgs)
+	}
+	mirrorUpstreamReasoning(obj)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return src

@@ -698,6 +698,19 @@ def desktop_expert_actual_use_local(expert, conversation_id, request_id):
 
 
 
+def desktop_buddy_enter_single(buddy_id, buddy_name, uid, now):
+    """buddy5 五连上报失败时的降级单发事件（旧形状兜底）。
+
+    isFirstPage 必须是**布尔**，理由同 desktop_buddy5_sequence：上游 /v2/report 的
+    格式校验会丢弃字符串形态的整条事件，响应仍是 2xx，只在 body 里回
+    {"code":10001,"msg":"partial success: ... dropped=1 ..."}。
+    """
+    return {"eventCode": "buddyapp_enter_click", "timestamp": now,
+            "reportDelay": 0, "elementId": buddy_id,
+            "elementName": buddy_name, "position": 1,
+            "isFirstPage": False, "userId": uid}
+
+
 def desktop_buddy5_sequence(auth, buddy_id, buddy_name):
     """fork DesktopBuddyAppSequence 同款五连「进入 Buddy 应用」事件（点亮 Buddy_App/_QQ）。
 
@@ -714,8 +727,14 @@ def desktop_buddy5_sequence(auth, buddy_id, buddy_name):
 
     mk("buddyapp_discover_click", {})
     mk("buddyapp_show", {"elementId": buddy_id, "elementName": buddy_name, "position": 2})
+    # isFirstPage 必须是**布尔**。上游 /v2/report 的格式校验会丢弃字符串 "1" 的整条
+    # 事件，但响应仍是 2xx，只在 body 里回 {"code":10001,"msg":"partial success:
+    # kept=4 events, dropped=1 ...","data":{"dropped":1,"invalidIndices":[2]}} ——
+    # invalidIndices=[2] 正是五连里的第三条（discover → show → enter_click）。
+    # 任务判据吃不到这条，Buddy_App / Buddy_App_QQ 就永远停在 0/1，日志里只有一行
+    # WARN，看起来像「上报过了但没点亮」。
     mk("buddyapp_enter_click",
-       {"elementId": buddy_id, "elementName": buddy_name, "position": 2, "isFirstPage": "1"})
+       {"elementId": buddy_id, "elementName": buddy_name, "position": 2, "isFirstPage": True})
     mk("buddyapp_auth_confirm_click", {"elementId": buddy_id, "elementName": buddy_name})
     mk("buddyapp_bindaccount_skip_click", {"elementId": buddy_id, "elementName": buddy_name})
     return ev
@@ -1557,10 +1576,7 @@ def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0):
             st_r, sc = report_desktop_events(auth, events)
             if st_r != 200 or sc != 0:
                 now = int(time.time() * 1000)
-                single = {"eventCode": "buddyapp_enter_click", "timestamp": now,
-                          "reportDelay": 0, "elementId": buddy_id,
-                          "elementName": buddy_name, "position": 1,
-                          "isFirstPage": "0", "userId": auth["uid"]}
+                single = desktop_buddy_enter_single(buddy_id, buddy_name, auth["uid"], now)
                 st2, sc2 = report_desktop_events(auth, [single])
                 print(f"[task_runner] {uid8} {code}: report {i + 1}/{need} {st_r} code={sc} "
                       f"buddy5 失败 -> 降级单发 {st2} code={sc2}")

@@ -59,10 +59,16 @@ const (
 	// 一次误判就是永久杀号。故单列一类，由 handler 走「连续 N 次才禁用」的计数
 	// 路径（与 12153 的 NoteSessionDead 同口径、共用计数器）。
 	ErrAuthRejected
-	// ErrUpstreamQueue 上游「排队等待」（429 + 业务码 6020 / queue.waiting.title）
-	// 不是账号级限流：队列按账号等级全局共享，换号不会改变排队位置。账号不冷却、
-	// 不计数、不禁用；请求仍按 MaxRotate 轮转，最终以 429 返回让客户端等待。
-	ErrUpstreamQueue
+	// ErrUpstreamBusy 上游**容量信号**，不是账号级限流。三种形态同族：
+	//   - 6020「queue.waiting.title」排队等待（429）；
+	//   - 6021「queue.full.title」队列满（429，无等待口径）；
+	//   - 11134「the model provider is temporarily unavailable」（500/503，供应商过载）。
+	//
+	// 共同点：换账号不会改变结果（队列按 client_user_type 全局共享、11134 的
+	// provider 侧过载跨账号同时出现），账号本身健康。故不冷却、不计数、不禁用。
+	// 请求内是否继续轮转由 handler 按 RetryAfter 有无决定；末端统一 429 +
+	// Retry-After，让客户端按 OpenAI 限流语义等待重试。
+	ErrUpstreamBusy
 )
 
 func (k ErrKind) String() string {
@@ -99,8 +105,8 @@ func (k ErrKind) String() string {
 		return "fallback_model_missing"
 	case ErrAuthRejected:
 		return "auth_rejected"
-	case ErrUpstreamQueue:
-		return "upstream_queue"
+	case ErrUpstreamBusy:
+		return "upstream_busy"
 	case ErrClient:
 		return "client"
 	default:
@@ -489,6 +495,42 @@ func ParseRetryAfter(h http.Header) (time.Duration, bool) {
 	return 0, false
 }
 
+// parseQueueRetryAfter 从排队/容量信封的 body 抽上游明示的重试等待时长。
+// 两种形态都认（整数秒，超 retryAfterSanity 按异常值封顶）：
+//
+//	6020/6021 排队：data.retry_after。2026-10-28 真机实测 429 + code 6020，data 含
+//	  queue_position/queue_size/retry_after/estimated_wait，头侧无等待信息。
+//	11134 供应商过载：retry_policy.retry_after。2026-11-07 生产实测 500 + code 11134，
+//	  retry_policy={retry:true,retry_after:N}，同样没有 Retry-After 头。
+//
+// ParseRetryAfter（只认头）拿不到这两处口径。只认结构化字段——msg 是 i18n 键无数值
+// 可解析，requestId 等恰好含数字的字段不误伤。解析不到返回 false，调用方回落本地兜底。
+func parseQueueRetryAfter(body []byte) (time.Duration, bool) {
+	var env struct {
+		Data struct {
+			RetryAfter int64 `json:"retry_after"`
+		} `json:"data"`
+		RetryPolicy struct {
+			RetryAfter int64 `json:"retry_after"`
+		} `json:"retry_policy"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return 0, false
+	}
+	secs := env.Data.RetryAfter
+	if secs <= 0 {
+		secs = env.RetryPolicy.RetryAfter
+	}
+	if secs <= 0 {
+		return 0, false
+	}
+	d := time.Duration(secs) * time.Second
+	if d > retryAfterSanity {
+		d = retryAfterSanity
+	}
+	return d, true
+}
+
 // isAllDigits 报告 s 是否为纯数字（前置快筛，免 strconv 之后再判语义）。
 func isAllDigits(s string) bool {
 	if s == "" {
@@ -610,18 +652,21 @@ func isToolCallMismatch(lower string) bool {
 		codeMarker(lower, "11148")
 }
 
-// IsUpstreamQueue 是否为「上游排队」而非账号限流：429 + 6020 / queue.waiting。
+// IsUpstreamQueue 是否为「上游排队」而非账号限流：429 + 6020 / 6021 / queue.waiting
+// / queue.full。
 //
 // 6020 的 queue_position 只随全局队列推进，换账号不会变好；把它当账号级 429
-// 会按 600s 冷却每个被轮到的号（任务现场 6 条请求冷 18 个健康号）。
+// 会按 600s 冷却每个被轮到的号（任务现场 6 条请求冷 18 个健康号）。6021
+// （queue.full.title，队列满、无等待口径）是同族的容量信号，换号同样是撞墙。
 func IsUpstreamQueue(body string) bool {
 	if strings.TrimSpace(body) == "" {
 		return false
 	}
-	if strings.Contains(strings.ToLower(body), "queue.waiting") {
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "queue.waiting") || strings.Contains(lower, "queue.full") {
 		return true
 	}
-	return hasBusinessCode(body, "6020")
+	return hasBusinessCode(body, "6020") || hasBusinessCode(body, "6021")
 }
 
 func Classify(status int, body string) ErrKind {
@@ -670,7 +715,21 @@ func Classify(status int, body string) ErrKind {
 	// 6020「排队等待」不是账号级限流：队列全局共享，账号不该被冷却。必须判在
 	// 通用 429 兜底之前（issue #416）。只认 429，200 + 6020 文案不改变分类。
 	if status == http.StatusTooManyRequests && IsUpstreamQueue(body) {
-		return ErrUpstreamQueue
+		return ErrUpstreamBusy
+	}
+	// 11134「the model provider is temporarily unavailable, please retry later or
+	// switch to another model」：模型供应商侧过载，与账号健康无关（2026-11-07 生产
+	// 实测 15 分钟内跨 6 个不同账号同时返回，issue #188）。
+	//
+	// 落 ErrServer 的代价是双向的：①按 5xx 喂熔断/降权（threshold 3 → 30m）把整片
+	// 健康号在高峰期打进冷却；②换号重试撞的是同一个 provider，白耗在途名额，且换号
+	// 打断会话粘性的账号级前缀缓存（上游 prompt cache 按账号隔离，同号 97–99% vs
+	// 换号 0–12%）。
+	// 归 ErrUpstreamBusy = 不罚号 + body 侧解析 retry_policy.retry_after 后不轮转，
+	// 与 6020/6021 同一族（上游容量信号，自带重试口径）。
+	// 只认结构化 code：没有业务码的 5xx 仍是 ErrServer（别把上游偶发 500 当容量信号）。
+	if hasBusinessCode(body, "11134") {
+		return ErrUpstreamBusy
 	}
 	// status==429 先于 hardRule（fork-scan-absorb T-3）：限流响应 body
 	// 高频携带 "quota exceeded"/"额度不足" 等跨两界措辞，hardRule 先判会误归
@@ -1459,6 +1518,13 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
+			} else if kind == ErrUpstreamBusy {
+				// 6020/6021 的等待口径与 11134 的 retry_policy.retry_after 都在 body
+				// 里（上游这几族不发 Retry-After 头，见 parseQueueRetryAfter 注释）。
+				// 头解析拿不到时从 body 抽；仍抽不到则留零值，由 handler 回落本地兜底。
+				if d, ok := parseQueueRetryAfter(raw); ok {
+					ue.RetryAfter = d
+				}
 			}
 			return nil, resp.StatusCode, raw, ue
 		}
@@ -1618,6 +1684,14 @@ type ModelInfo struct {
 	MaxAllowedSize    int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
 	ReasoningEffort   string   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
 	ReasoningSummary  string   // reasoning.summary 推理摘要模式（如 "auto"）
+
+	// 限时优惠（/v3/config data.modelPromotions，issue #203）：Credits 是**牌价**
+	//（转正后基准倍率），Promo* 是当前生效的折扣——/v1/models 据此透出「生效价 +
+	// 标签 + 牌价」。PromoFactor 为 nil 表示上游没给 machine-readable 折扣（如
+	// 「错峰使用」只有时段文案无 factor），此时只透标签。
+	PromoFactor  *float64 // 折扣系数（0=限时免费，0.5=五折）；nil=无
+	PromoCredits string   // 折扣后倍率原文（如 "0x" / "0.50x"），仅展示
+	PromoLabel   string   // 徽章文案（限时免费 / 夜间折扣 / 错峰使用）
 }
 
 // dynModelEntry 上游模型目录（CN /console 与 global /v2 同构）的单条模型解析形态，

@@ -27,10 +27,10 @@ func TestGatewayHintKindMap(t *testing.T) {
 		{"11115 prompt too long", ErrPromptTooLong, `{"code":11115,"msg":"prompt is too long"}`, "request context exceeds the model's limit; reduce history/message size"},
 		{"WAF 403", ErrWafBlock, `<html><head><title>403 Forbidden</title></head></html>`, "upstream WAF blocked the gateway; retry after the block window"},
 		{"429 soft rate", ErrSoftRate, `{"code":6004,"msg":"rate limited"}`, "rate limited by upstream; retry after reset"},
-		{"6020 queue", ErrUpstreamQueue, `{"code":6020,"msg":"queue.waiting.title"}`, "upstream model is queueing (peak-hour wait list); switching accounts does not help, retry after the queue clears"},
+		{"6020 queue", ErrUpstreamBusy, `{"code":6020,"msg":"queue.waiting.title"}`, "upstream capacity signal (queueing or provider overload); switching accounts does not help, retry after the indicated delay"},
 		{"11140 account fault", ErrAccountFault, `{"code":11140,"msg":"request illegal"}`, "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"},
 		{"12153 session dead", ErrSessionDead, `{"code":12153,"msg":"Offline user session not found"}`, "account session expired at upstream; the account is disabled until re-login"},
-		{"402 hard credit", ErrHardCredit, `{"code":1,"msg":"余额不足"}`, "account credits exhausted at upstream; waiting for daily check-in to restore"},
+		{"402 hard credit", ErrHardCredit, `{"code":1,"msg":"余额不足"}`, "account credits exhausted at upstream; CN accounts recover via the next daily check-in, global accounts need a top-up"},
 		{"11102 model blocked", ErrModelBlocked, `{"code":11102,"msg":"model [glm-4.6v] service info not found"}`, "upstream has no such model on this backend; switch model or retry on another account"},
 		{"content blocked", ErrContentBlocked, `{"code":11128,"msg":"blocked by security policy"}`, "request content was rejected by content policy; adjust the prompt and retry"},
 		// 未覆盖形态 → 空串（不带字段）。

@@ -186,6 +186,11 @@ type entry struct {
 	// 持久化（stateAccount.ModelCosts，P1-anti-monopoly）：重启后成本知识保留；
 	// 落盘/恢复按 modelCostTTL 惰性过滤，陈旧观测不复活（同 modelCooldowns 口径）。
 	modelCost map[string]modelCostEntry
+	// lastCheckinDay 最近一次签到成功的本地日期（"2006-01-02"，CST）。签到成功与
+	// 上游幂等拒绝（"今天已签到"）都算。只服务延后补签的「已签跳过」判定——
+	// 补签是写操作，能少打一次就少打一次。持久化（stateAccount.LastCheckinDay）：
+	// 进程重启后仍能跳过当天已签账号。
+	lastCheckinDay string
 }
 
 // modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。
@@ -408,6 +413,10 @@ type stateAccount struct {
 	// 陈旧价格不复活）；恢复侧剔除非法值（负 per1k/零 LastSeen 的结构破损条目）。
 	// 与运行态 modelCostEntry 字段一一对应（单一表示，内存与落盘同构不搞两套）。
 	ModelCosts map[string]stateModelCost `json:"model_costs,omitempty"`
+	// LastCheckinDay 最近一次签到成功的本地日期（CST，"2006-01-02"，见
+	// entry.lastCheckinDay）。持久化：重启后延后补签仍能跳过当天已签账号，
+	// 不会把写调用重复打一遍。空串 = 从未签过（与「今天没签」同义），省略即可。
+	LastCheckinDay string `json:"last_checkin_day,omitempty"`
 }
 
 // stateModelCooldown 单个 (账号, 模型) 的 6004 独立冷却持久化记录，与运行态

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseNested(t *testing.T) {
@@ -285,9 +286,87 @@ func TestAuthFileGlobUnification(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("files=%v want 2（含不带连字符的 workbuddy_new.json）", files)
 	}
-	// 排序稳定性：与 cmd 工具原 sort.Strings 口径一致。
-	if filepath.Base(files[0]) != "workbuddy-cn1.json" || filepath.Base(files[1]) != "workbuddy_new.json" {
-		t.Errorf("files not sorted: %v", files)
+	// 只断言「两个文件都在」：排序口径是 mtime 升序（见 sortAuthFilesByModTime），
+	// 不再是字典序。同一秒内写入时两者 mtime 相同、退回字典序，但那是 tie-break，
+	// 不该被这条用例锁死——否则换个文件系统粒度就假红。
+	got := map[string]bool{}
+	for _, f := range files {
+		got[filepath.Base(f)] = true
+	}
+	for _, want := range []string{"workbuddy-cn1.json", "workbuddy_new.json"} {
+		if !got[want] {
+			t.Errorf("files 缺 %s: %v", want, files)
+		}
+	}
+}
+
+// TestLoadAuthFilesSortsByModTime 同 uid 多文件时按 mtime 升序载入（最新凭证最后
+// 进池）。字典序会给出相反结果，所以这条用例能区分两种排序口径。
+func TestLoadAuthFilesSortsByModTime(t *testing.T) {
+	dir := t.TempDir()
+	// 字典序：workbuddy-a-old.json < workbuddy-z-new.json，两边一致；
+	// 刻意让**字典序靠后**的文件是**更旧**的，这样字典序与 mtime 序必然相反。
+	older := filepath.Join(dir, "workbuddy-z-old.json")
+	newer := filepath.Join(dir, "workbuddy-a-new.json")
+	doc := `{"auth":{"accessToken":"at","refreshToken":"r","expiresAt":1,"domain":""},"account":{"uid":"u1"}}`
+	if err := os.WriteFile(older, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newer, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 显式把 older 的时间改早一小时，避免依赖两次写入的先后。
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(older, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := LoadAuthFiles(dir)
+	if err != nil {
+		t.Fatalf("LoadAuthFiles: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files=%v want 2", files)
+	}
+	if filepath.Base(files[0]) != "workbuddy-z-old.json" {
+		t.Errorf("第一个应为更旧的 workbuddy-z-old.json，实际 %v（字典序会把它排后面，说明没按 mtime）", files)
+	}
+	if filepath.Base(files[1]) != "workbuddy-a-new.json" {
+		t.Errorf("最后一个应为最新的 workbuddy-a-new.json，实际 %v", files)
+	}
+}
+
+// TestLoadDirNewestCredentialWins 端到端：同 uid 两个文件时，**最后载入**的必须是
+// mtime 最新那份——池层（pool.SyncToDir）是「后载入者覆盖」，所以顺序决定胜出者。
+// 这是本项真正要修的故障形态（陈旧备份把新 token 覆盖掉）。
+func TestLoadDirNewestCredentialWins(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "workbuddy-z-stale.json")
+	fresh := filepath.Join(dir, "workbuddy-a-fresh.json")
+	write := func(path, token string) {
+		doc := `{"auth":{"accessToken":"` + token + `","refreshToken":"r","expiresAt":1,"domain":""},"account":{"uid":"u1"}}`
+		if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(stale, "OLD")
+	write(fresh, "NEW")
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(stale, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("LoadDir 不去重，应返回 2 个条目（去重在 pool 层），实际 %d", len(list))
+	}
+	// 池层「后载入者胜出」→ 最后一个必须是 mtime 最新的那份。
+	last := list[len(list)-1]
+	if got := last.AccessTokenValue(); got != "NEW" {
+		t.Errorf("最后一个应是 mtime 最新的 NEW，实际 %q（陈旧备份胜出 = 本项要修的故障）", got)
 	}
 }
 

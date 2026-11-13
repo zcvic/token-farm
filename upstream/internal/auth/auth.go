@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -413,13 +414,49 @@ const AuthFileGlob = "workbuddy*.json"
 // LoadAuthFiles 返回 dir 下按 AuthFileGlob 匹配的 auth 文件清单（已排序）。
 // 供 cmd 运维工具复用：只列文件、不解析不迁移（LoadDir 才做 backfill 等副作用），
 // 保持 signin/credit/trial 原有的「逐文件 Parse、损坏即跳过/报行错」流程不变。
+//
+// 排序口径是 **mtime 升序**（最旧的在前，最新的最后载入），不是字典序。
+//
+// 为什么：同一 uid 可能出现在多个文件里——个人版与企业版 uid 相同、客户端还会写
+// `<name>.<ts>.<pid>.<uuid>.info` 轮转备份，而池里一个 uid 只有一个槽位，由
+// 「后载入者胜出」。字典序下陈旧备份可能恰好排在后面，把刚刷新的 token 覆盖掉，
+// 表现为那个账号突然「凭证失效」。按 mtime 升序载入保证最新凭证最后进池。
+// mtime 相同时退回字典序做 tie-break，保证结果稳定可测。
 func LoadAuthFiles(dir string) ([]string, error) {
 	files, err := filepath.Glob(filepath.Join(dir, AuthFileGlob))
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(files)
+	sortAuthFilesByModTime(files)
 	return files, nil
+}
+
+// sortAuthFilesByModTime 按 mtime 升序就地排序，mtime 相同或 stat 失败时退回字典序。
+//
+// stat 失败的条目（刚被删/无权限）当作 mtime=0：它们排在最前，随后被 LoadDir
+// 的读取失败分支跳过，不会因为「取不到时间」把一份新凭证排到旧凭证前面。
+func sortAuthFilesByModTime(files []string) {
+	type stamped struct {
+		path string
+		mod  int64
+	}
+	items := make([]stamped, 0, len(files))
+	for _, f := range files {
+		var mod int64
+		if fi, err := os.Stat(f); err == nil {
+			mod = fi.ModTime().UnixNano()
+		}
+		items = append(items, stamped{path: f, mod: mod})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].mod != items[j].mod {
+			return items[i].mod < items[j].mod
+		}
+		return items[i].path < items[j].path
+	})
+	for i := range items {
+		files[i] = items[i].path
+	}
 }
 
 // LoadDir 扫描并解析 dir 下 workbuddy*.json；解析失败的文件静默跳过（启动日志由调用方统计）。

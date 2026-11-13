@@ -672,9 +672,9 @@ func TestApplyErrorPolicyUpstreamQueueDoesNotCool(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
 
-	h.applyErrorPolicy("u1", upstream.ErrUpstreamQueue,
+	h.applyErrorPolicy("u1", upstream.ErrUpstreamBusy,
 		`{"code":6020,"msg":"queue.waiting.title","data":{"queue_position":5580,"retry_after":40}}`,
-		"kimi-k3.1-pro", &upstream.Error{Kind: upstream.ErrUpstreamQueue, Status: 429})
+		"kimi-k3.1-pro", &upstream.Error{Kind: upstream.ErrUpstreamBusy, Status: 429})
 	st, ok := p.Status("u1")
 	if !ok {
 		t.Fatal("u1 missing")

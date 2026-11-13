@@ -41,6 +41,40 @@ b7297e5c7e3d9114fbcd857342463602601c3646
 # ExpiresAt<=0 陷阱，要接的话必须同时改）
 5ce1a2f429bc4871d36384445ace661ae0008383
 
+# ---- 2026-11 低风险九项：基线之后（参考仓 7a48d72e 之后）的一页摘要表里
+#      前 9 项，逐项按本地风格重写落地。与上面「第二批（改流量分布、需灰度）」
+#      不是同一批——那批还没做。标了「部分同步」的只取了列出的那部分。
+
+# 一个 data: 行里塞了多个 JSON 时拆分（sse.go 流式 + Aggregate 两条路径）
+afb5f224404f001d5250075d217f12e00bce6a10
+# 同 uid 多文件按 mtime 最新胜出（Go 侧；Python 侧 tencent.py 的同类排序未动）
+97d3f259a59eb8f07674ca5caf54eed84d2795d1
+# buddyapp_enter_click 的 isFirstPage 改布尔（task_runner.py 两处）
+8818458b899a44fdab3a188b3e82a3986b716487
+# 上游断流补截断终态 finish_reason=length（流式 + Aggregate 同口径）
+84a48d9edbec742ce8b15a578fc53641af740c5f
+# 请求级错误不再解绑会话粘性（failKeepBinding；渠道校验仍走 fail()）
+2b210e92dcbce09cdc5edc78339280e01e8baf4e
+# 11134 供应商过载归上游容量信号（ErrUpstreamQueue 改名 ErrUpstreamBusy，
+# 部分同步：只取 11134 + retry_policy.retry_after + 不解绑；6020 的「不再轮转」
+# 语义本地此前已有，6021 一并归入）
+48306862ff072284e004cfd43b857430e9038f7e
+# 出站补位空 text 段 + reasoning 镜像（部分同步：11151 归请求级本地此前已有，
+# 只取 guardEmptyTextParts + mirrorUpstreamReasoning；镜像放在 sanitize 之后，
+# 参考仓在之前——先镜像会把未净化原文抄进 reasoning）
+f987bacc555d7ef340654be42780673bb6ef5c9c
+# 清洗上游注入的身份指令 + ErrHardCredit 文案去「等签到恢复」（issue #187/#191）
+8f9fa3c550345282b2b7df06522011f648bfe5da
+# /v1/models 透出 promo_factor / promo_credits / promo_label（issue #203；
+# 部分同步：只取 modelPromotions 解析 + 三字段透出；未取同提交里的
+# modelTiers 文案透出与 PromoNote hover 说明）
+b64773e85c4f9dcb1e73cf6d4f2010fa55ff66a8
+# 签到「请稍后重试」的分钟级自动补签（10m/40m 两轮，不阻塞主批；
+# 部分同步：只取 checkin_retry.go + pool 侧签到记账；未取同提交里依赖的
+# GetCheckinActivityStatus / IsTransientBilling / SupportsPersonalEndpoints，
+# 改用本地已有的 checkinRetryable 判据）
+1adfa52099e2606c2519c7dc4f066fe34c0d10b8
+
 # ---- 2026-11 第二批：上游 workbuddy-manager（Go 网关仓）
 #      仓库：https://github.com/ithtelab/workbuddy-manager
 #      范围：80b4b21（v2.11.10）→ 8b5a4df4（v2.11.14），40 个非 merge 提交。

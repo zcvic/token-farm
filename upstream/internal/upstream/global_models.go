@@ -411,5 +411,9 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 	if len(out) == 0 {
 		return nil, nil, nil, nil, fmt.Errorf("global models empty list")
 	}
+	// 挂当前生效的限时优惠（data.modelPromotions，issue #203）：Credits 是牌价，
+	// promo_* 是此刻生效的折扣。放在这里而不是各调用方，是因为 CN FetchModels 与
+	// global 探测都走这条解析、响应同构——两处各写一遍必然漂移。
+	applyPromotionsFromRaw(infos, raw)
 	return out, infos, efforts, defaults, nil
 }

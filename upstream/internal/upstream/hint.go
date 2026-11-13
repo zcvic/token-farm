@@ -59,10 +59,13 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "account session expired at upstream; the account is disabled until re-login"
 	case ErrAuthRejected:
 		return "account credential rejected by upstream (401); the gateway disables this account after repeated hits"
-	case ErrUpstreamQueue:
-		return "upstream model is queueing (peak-hour wait list); switching accounts does not help, retry after the queue clears"
+	case ErrUpstreamBusy:
+		return "upstream capacity signal (queueing or provider overload); switching accounts does not help, retry after the indicated delay"
 	case ErrHardCredit:
-		return "account credits exhausted at upstream; waiting for daily check-in to restore"
+		// 不能说「等签到恢复」：国际版账号**没有签到活动**（本网关日志：国际版签到
+		// 活动未开启，跳过），积分只能靠充值/订阅恢复。旧文案对 global 号的持有者
+		// 是一个永远不会兑现的承诺（issue #191 的延伸）。
+		return "account credits exhausted at upstream; CN accounts recover via the next daily check-in, global accounts need a top-up"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:

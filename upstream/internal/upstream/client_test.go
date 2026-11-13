@@ -109,9 +109,17 @@ func TestClassify(t *testing.T) {
 		// 仍归 hardRule（上方 {200,"quota exceeded"} 语义不变）。
 		// 6020「排队等待」是全局队列，不是账号级限流（issue #416）：429 + queue.waiting
 		// 必须单独分类，账号不冷却；换号不会改变队列位置。
-		{429, `{"code":6020,"msg":"queue.waiting.title","data":{"queue_position":5580,"retry_after":40}}`, ErrUpstreamQueue},
-		{429, `{"code": 6020, "msg": "queue.waiting.title"}`, ErrUpstreamQueue},
+		{429, `{"code":6020,"msg":"queue.waiting.title","data":{"queue_position":5580,"retry_after":40}}`, ErrUpstreamBusy},
+		{429, `{"code": 6020, "msg": "queue.waiting.title"}`, ErrUpstreamBusy},
 		{200, `{"code":6020,"msg":"queue.waiting.title"}`, ErrNone},
+		// 11134「model provider is temporarily unavailable」：供应商侧过载，与账号无关。
+		// 落 ErrServer 会按 5xx 罚号 + 换号，而换号撞同一 provider 且打断账号级前缀缓存
+		// （issue #188）。认结构化 code；只有文案、没有 code 的仍是普通 5xx。
+		{500, `{"code":11134,"msg":"the model provider is temporarily unavailable, please retry later or switch to another model","requestId":"01a1b4d1b3f45f4b99c406eb04d68909","retry_policy":{"retry":true,"retry_after":8}}`, ErrUpstreamBusy},
+		{503, `{"code":11134,"msg":"the model provider is temporarily unavailable"}`, ErrUpstreamBusy},
+		{500, `{"msg":"the model provider is temporarily unavailable"}`, ErrServer},
+		// 6021「queue.full.title」：队列满（无等待口径），与 6020 同族。
+		{429, `{"code":6021,"msg":"queue.full.title","requestId":"b1bc87ea"}`, ErrUpstreamBusy},
 		{429, `quota exceeded`, ErrSoftRate},
 		{429, `{"code":1,"msg":"quota exceeded, please wait"}`, ErrSoftRate},
 		{429, `insufficient credits`, ErrSoftRate},
