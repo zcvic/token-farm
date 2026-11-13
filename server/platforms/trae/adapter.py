@@ -20,6 +20,7 @@ from typing import Any, NamedTuple
 
 from ... import config, db
 from ...services.session_affinity import SessionAffinity, affinity_key
+from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
 from ..limiter import PoolLimiter
 from . import catalog, chat as chatmod, client, desktop, rates, store
@@ -36,7 +37,6 @@ _IMPLICIT_TTL = 600          # 隐式拉取（/v1/models）失败后的冷却，
 _IMPLICIT_TIMEOUT = 10       # 隐式拉取的超时：客户端启动时等 45 秒是不行的
 _REFRESH_BASE = 30           # 刷新失败退避起点（秒）
 _REFRESH_MAX = 1800          # 退避封顶（秒）
-_MAX_ACCOUNTS_TRY = 3        # 单次对话最多换几个账号（仅 401/403 才换）
 _CREDITS_TTL = 60            # 积分缓存（秒）：列表一次拉全部账号，别每刷新一次就打一遍上游
 _CREDITS_TIMEOUT = 20        # 积分接口的超时：它只是状态查询，不该拖住页面
 
@@ -317,7 +317,7 @@ class TraeAdapter(PlatformAdapter):
                                     code='refresh_failed') from exc
             self._clear_failure(uid)
             saved = store.save_account({**fresh_read, **fresh})
-            if saved.get('desktopPath'):
+            if saved.get('desktopPath') and runtime_settings.desktop_sync(self.name):
                 desktop.sync(saved)
             return saved
 
@@ -1016,8 +1016,12 @@ class TraeAdapter(PlatformAdapter):
     async def _chat_accounts(self, model: str, body: dict,
                              realm_hint: str | None = None) -> PlatformChat:
         wrapper_model = f'{self.model_prefix}{model}'
+        runtime = runtime_settings.load(self.name)
         # 同一会话粘同一账号：上游 prompt cache 按账号隔离（见 session_affinity）。
-        affinity = affinity_key(body)
+        # 开关关掉时传空串，选路退回纯加权轮换（仍然是稳定的 SWRR）。
+        affinity = affinity_key(body) if runtime['session_affinity'] else ''
+        if affinity:
+            self._affinity.set_ttl(runtime['session_affinity_ttl'])
         candidates = self._candidates(model, realm_hint, affinity)
         if not candidates:
             where = '（指定区域）' if realm_hint else ''
@@ -1026,7 +1030,7 @@ class TraeAdapter(PlatformAdapter):
                 status=503, code='no_account')
         preferred = self._channel(model)
         last_error: PlatformError | None = None
-        for account in candidates[:_MAX_ACCOUNTS_TRY]:
+        for account in candidates[:runtime['max_accounts_try']]:
             uid = str(account.get('uid') or '')
             # Agent 通道只有国内版有；国际版账号只能走 IDE 数据面。
             order = [preferred]
@@ -1035,8 +1039,10 @@ class TraeAdapter(PlatformAdapter):
             for channel in order:
                 try:
                     ready = await self._ensure_token(account)
-                    result = await self._chat_once(ready, model, body,
-                                                   wrapper_model, channel=channel)
+                    result = await self._chat_once(
+                        ready, model, body, wrapper_model, channel=channel,
+                        request_timeout=runtime['request_timeout'],
+                        idle_timeout=runtime['idle_timeout'])
                 except PlatformError as exc:
                     last_error = exc
                     # 只有「凭据不可用」才换号；429/5xx 换号往往只是把限流扩散到更多账号
@@ -1209,7 +1215,8 @@ class TraeAdapter(PlatformAdapter):
             self._release_meter(str(account.get('uid') or ''), meter.token)
 
     async def _chat_once(self, account: dict, model: str, body: dict,
-                         wrapper_model: str, *, channel: str) -> PlatformChat:
+                         wrapper_model: str, *, channel: str,
+                         request_timeout: float, idle_timeout: float) -> PlatformChat:
         # 这次实际用的是哪个版本的账号：统计/日志必须按它归档，而不是按模型名
         # ——`trae/<model>` 没有 `global:` 前缀，按名字只会永远落到国内版。
         realm = _db_realm(account.get('realm'))
@@ -1232,13 +1239,15 @@ class TraeAdapter(PlatformAdapter):
             if channel == 'solo':
                 payload = client.build_solo_body(model, body.get('messages'), body,
                                                  session_id=session_id)
-                response = await client.open_solo_chat(account, payload)
-                events = client.iter_solo_events(response)
+                response = await client.open_solo_chat(
+                    account, payload, timeout=request_timeout)
+                events = client.iter_solo_events(response, idle_timeout=idle_timeout)
             else:
                 payload = client.build_chat_body(model, body.get('messages'), body,
                                                  session_id=session_id)
-                response = await client.open_chat(account, payload)
-                events = client.iter_events(response)
+                response = await client.open_chat(
+                    account, payload, timeout=request_timeout)
+                events = client.iter_events(response, idle_timeout=idle_timeout)
             stream = bool(body.get('stream'))
 
             # 先读一帧：上游的鉴权/风控错误通常就是第一帧。此时还没向客户端写

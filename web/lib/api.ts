@@ -665,6 +665,12 @@ export const platformApi = {
     checkin_concurrency?: number;
     checkin_delay_min?: number;
     checkin_delay_max?: number;
+    request_timeout?: number;
+    idle_timeout?: number;
+    max_accounts_try?: number;
+    session_affinity?: boolean;
+    session_affinity_ttl?: number;
+    desktop_sync?: boolean;
   }) =>
     put<PlatformSettings>(`${platformPath(name)}/settings`, body),
   /**

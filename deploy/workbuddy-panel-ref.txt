@@ -6,6 +6,8 @@
 # 记录方式：一次同步对应一个提交；后续再同步时追加新行并更新 docs。
 # 尚未同步、但已评估过的候选能力见 docs/upstream-sync-misakano.md（基线之后）
 # 与 docs/upstream-sync-baseline-gaps.md（基线之前一直没移植的）。
+# 参考仓基线已推进到 7a48d72e（2026-11-13），那一份清单按 76 个非 merge 提交
+# 重扫过；本文只记**已经实际同步**的提交，未同步的提交号不要提前写进来。
 # 仓库：https://github.com/misakano7545/workbuddy2api-panel
 49fad282fb0d6d2e8c483bcbc3940a0031dfcb19
 

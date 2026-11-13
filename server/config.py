@@ -190,6 +190,21 @@ TRAE_RESCUE_TAIL_STRICT = _env_bool('TF_TRAE_RESCUE_TAIL_STRICT', True)
 # 要求模型走原生 function calling、不要用 XML/标签/自造语法写调用。弱模型
 # （flash 档）在有长历史时最容易退化成正文调用，这段提示是主要防线。
 TRAE_TOOL_PROTOCOL_HINT = _env_bool('TF_TRAE_TOOL_PROTOCOL_HINT', True)
+# SOLO 通道默认输出预算。思考模型的 reasoning token 与正文共享这个上限，
+# 客户端不传 max_tokens 时上游默认值偏小，经常「思考完就没额度」——只回
+# reasoning、没有正文和工具调用。参考实现恒定发 1000000（trae2api-hub
+# `trae_solo_chat`），这里保持一致；客户端显式传值时以客户端为准。
+TRAE_SOLO_MAX_TOKENS = _env_int('TF_TRAE_SOLO_MAX_TOKENS', 1000000)
+# 思考强度透传：客户端给了 `reasoning_effort` / `reasoning.effort` /
+# `thinking.effort|level` 或 `thinking: false` 时，归一成 Trae 的
+# `reasoning_effort_level`（light / high / extra_high / none）随请求发出。
+# 默认开启；上游字段变化时可用 0 关掉（关掉后请求体与旧版完全一致）。
+TRAE_REASONING_EFFORT = _env_bool('TF_TRAE_REASONING_EFFORT', True)
+# 空产出判错：整轮既没有正文、也没有工具调用时，不再以 `stop` 收尾
+# （Agent 客户端会当成「模型答完了」而静默停住）。开启后流式补一帧错误、
+# 非流式返回 502，让客户端知道该重试。`reasoning_as_content` 开启时，
+# 「只有思考」的回合会先走正文兜底，不会触发这里。
+TRAE_EMPTY_OUTPUT_ERROR = _env_bool('TF_TRAE_EMPTY_OUTPUT_ERROR', True)
 # 思考内容兜底：只在一轮里**既没有正文也没有工具调用**时才把思考原文补成正文。
 # 实测（2026-11-01）正常回合一定会有正文；唯一合法的「无正文」是工具调用轮，
 # 而那种轮次会带工具调用，不会触发兜底。所以这里默认关闭，只作为上游异常

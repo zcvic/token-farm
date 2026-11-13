@@ -359,16 +359,21 @@ class QoderClient:
             headers['X-Session-Id'] = session
         return headers
 
-    async def open_chat(self, body: dict, realm: str | None = None) -> httpx.Response:
+    async def open_chat(self, body: dict, realm: str | None = None, *,
+                        timeout: float | None = None) -> httpx.Response:
         """发起一次流式请求，返回**尚未读取**的响应对象。
 
         调用方负责 `aiter_lines()` / `aread()` 并最终 `aclose()`。这里不
         `async with`，因为响应体要在适配器的生成器里跨多个事件循环 tick 使用。
+
+        `timeout` 是本次请求的读超时；None = 用客户端默认值（环境变量 / 平台
+        设置没配时的兜底）。平台设置里可调，所以不能只在构造时读一次。
         """
         # 首次调用可能触发上游模块导入（~0.6s）：放到线程里，别让一次冷启动
         # 卡住整个网关的事件循环。
         await asyncio.to_thread(embedded.runtime)
-        client = config.http_client(self.timeout, connect=10, proxy='')
+        client = config.http_client(
+            self.timeout if timeout is None else timeout, connect=10, proxy='')
         url = f'{self.base}{_CHAT_PATH}'
         # 真实选号在网关进程里，只把 body 透传过去的话 `prompt_cache_key`
         # 会被厂商丢掉（它只认自己的会话 id / 消息前缀）：显式转成
@@ -394,10 +399,10 @@ class QoderClient:
             raise _platform_error(resp)
         return resp
 
-    async def post_chat(self, body: dict, realm: str | None = None
-                        ) -> tuple[dict, str]:
+    async def post_chat(self, body: dict, realm: str | None = None, *,
+                        timeout: float | None = None) -> tuple[dict, str]:
         """非流式对话；返回 `(响应体, 网关实际使用的 realm)`。"""
-        resp = await self.open_chat(body, realm)
+        resp = await self.open_chat(body, realm, timeout=timeout)
         actual_realm = str(resp.headers.get('x-qoder-realm') or '')
         try:
             raw = await resp.aread()

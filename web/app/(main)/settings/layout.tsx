@@ -32,6 +32,8 @@ import {RichText} from '@/lib/i18n/rich-text';
 import {settingsApi, upstreamApi, errText} from '@/lib/api';
 import {useAsyncAll} from '@/lib/use-async-data';
 import {UpstreamEndpoints} from '@/components/settings/UpstreamEndpoints';
+import {PlatformConfigPanel} from '@/components/settings/PlatformConfigPanel';
+import {usePlatform} from '@/lib/platform-context';
 import {scheduleDelayError} from '@/lib/schedule-validation';
 import {
   DEFAULT_SETTINGS_TAB,
@@ -958,6 +960,15 @@ export default function SettingsLayout({children}: {children: React.ReactNode}) 
   const {t, tp} = useI18n();
   const {isAdmin} = useAuth();
   /**
+   * 顶部平台切换决定「上游配置」Tab 的内容：
+   *   · WorkBuddy —— 原有的上游 `config.json` 表单；
+   *   · Trae / Qoder —— 该平台的池级设置（并发 / 签到节奏 / 超时 / 平台开关）。
+   * 这是同一个心智模型「这台机器的上游长什么样」，只是上游从 WorkBuddy 的
+   * 随包服务换成了平台适配器自己的号池。其余 Tab 仍是全局 / WorkBuddy 数据
+   * （`PlatformScopeNote` 会在那些页面上说明边界）。
+   */
+  const {platform, isWorkbuddy, label: platformLabel} = usePlatform();
+  /**
    * 当前 Tab 只由**路径**决定（`/settings/<tab>`）。
    *
    * 不再用 `Tabs` 的内部状态：那样地址栏不会变，链接分享出去只会落到第一个 Tab。
@@ -1036,6 +1047,14 @@ export default function SettingsLayout({children}: {children: React.ReactNode}) 
   /** 模型列表来源：dynamic = 上游实时拉取，static = 上游内置回退表 */
   const [modelSource, setModelSource] = useState<ModelSource>('unknown');
   const [modelsLoading, setModelsLoading] = useState(false);
+  /**
+   * 顶部「刷新」在**非 WorkBuddy** 平台下也要刷新平台配置。
+   *
+   * 平台配置面板自己管理取数（它在平台切换时加载），而 `reload()` 只重取
+   * WorkBuddy 的上游配置 / 模型映射 / 用户。这个计数就是一个「重新加载」信号：
+   * 点刷新时把它 +1，面板看到变化就再拉一次，用户不用切一次平台才能刷新。
+   */
+  const [platformConfigEpoch, setPlatformConfigEpoch] = useState(0);
 
   /**
    * 「到期积分按天模糊统计」——**界面偏好**，存在浏览器本地而不是上游配置里。
@@ -1349,6 +1368,7 @@ export default function SettingsLayout({children}: {children: React.ReactNode}) 
             onClick={() => {
               reload();
               loadModels(false);
+              setPlatformConfigEpoch((value) => value + 1);
             }}
           >
             <RefreshCw />
@@ -1365,25 +1385,36 @@ export default function SettingsLayout({children}: {children: React.ReactNode}) 
   );
 
   /**
-   * 首屏：配置还没取到（加载中，或它自己失败了）。
+   * 首屏：**WorkBuddy** 的上游配置还没取到（加载中，或它自己失败了）。
+   *
+   * 只在 WorkBuddy 下整页拦截：在 Trae / Qoder 下「上游配置」显示的是平台
+   * 设置，不依赖 WorkBuddy 的 `config.json`；如果这里也拦，一个平台配置读取
+   * 失败就会让本来看得见的平台设置一起变成骨架。
    *
    * **不能**渲染下面的表单——`form` 的初值是 `defaultValues(...)`，那等于把硬编码
    * 默认值当成「你现在的配置」显示出来。而写入路径又都被 `upstreamReady` 禁掉，
    * 用户看到的是一张「能看不能改」的假配置，会据此以为「我的配置就是这样」，
    * 或者以为「面板坏了」。取不到就说取不到，并给「重试」。
+   *
+   * 判据分成两层（`if (!cfg)` 里面再看平台），而不是合成一句
+   * `if (!cfg && isWorkbuddy)`：`if (!cfg)` 是「主数据没到就不往下渲染」的
+   * 统一锚点，源码级不变量测试按它认这一页的首屏守卫；把平台条件并进同一句
+   * 会让那个锚点消失。语义与合并写法完全相同。
    */
   if (!cfg) {
-    return (
-      <div className="flex flex-col gap-4 md:gap-6">
-        {header}
-        {'cfg' in errors ? <LoadError variant="page" onRetry={reload} /> : <SettingsSkeleton />}
-        {/* children 在这个分支里也要渲染：`/settings` 的重定向挂在子路由的 page 上，
-            少了它，「配置取不到」时地址就停在 `/settings` 不再规范化——于是用户
-            刷新一次会再走一遍重定向，而「我现在在哪个 Tab」这件事变成**取决于
-            数据取没取到**。重定向该是路由的性质，不是数据的性质。 */}
-        {children}
-      </div>
-    );
+    if (isWorkbuddy) {
+      return (
+        <div className="flex flex-col gap-4 md:gap-6">
+          {header}
+          {'cfg' in errors ? <LoadError variant="page" onRetry={reload} /> : <SettingsSkeleton />}
+          {/* children 在这个分支里也要渲染：`/settings` 的重定向挂在子路由的 page 上，
+              少了它，「配置取不到」时地址就停在 `/settings` 不再规范化——于是用户
+              刷新一次会再走一遍重定向，而「我现在在哪个 Tab」这件事变成**取决于
+              数据取没取到**。重定向该是路由的性质，不是数据的性质。 */}
+          {children}
+        </div>
+      );
+    }
   }
 
   return (
@@ -1398,8 +1429,13 @@ export default function SettingsLayout({children}: {children: React.ReactNode}) 
           <SectionTabs items={tabItems} active={settingsTabHref(tab)} />
         </div>
 
-        {/* ═══ 上游配置 ═══ */}
+        {/* ═══ 上游配置 / 平台配置 ═══ */}
         <TabsContent value="upstream" className="mt-3 space-y-3">
+          {/* 同一个 Tab，内容随顶部平台切换：WorkBuddy 是上游 config.json 的表单，
+              其它平台是该适配器自己的池级设置。下面这一大段只在 WorkBuddy 下渲染，
+              平台面板自己负责取数与保存。 */}
+          {isWorkbuddy ? (
+            <>
           {/* 多上游（账号池分组）：密钥绑定上游 = 请求只走那个池，见 server/upstreamsvc.py。
               放在 config.json 字段之前：它是「本端接了几个上游」的清单，
               而下面那批字段描述的是**默认上游自身**的配置。 */}
@@ -2011,6 +2047,11 @@ export default function SettingsLayout({children}: {children: React.ReactNode}) 
               </div>
             )}
           </div>
+            </>
+          ) : (
+            <PlatformConfigPanel platform={platform} label={platformLabel}
+                                 reloadSignal={platformConfigEpoch} />
+          )}
         </TabsContent>
 
         {/* ═══ 模型映射 ═══ */}

@@ -33,6 +33,7 @@ import logging
 import time
 from typing import Any
 
+from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
 from ..limiter import PoolLimiter
 from . import embedded, mapping
@@ -55,6 +56,29 @@ def _split_realm_hint(model: str) -> tuple[str | None, str]:
             if rest:
                 return realm, rest
     return None, text
+
+
+async def _iter_lines(response, idle_timeout: float):
+    """逐行读 Qoder 的 SSE，带空闲超时。
+
+    与 Trae 的 `client._iter_lines` 同一套判据：`httpx` 的 read timeout 是
+    「单次读」，上游一直不回包时会空等到请求超时；这里改成「连续 N 秒没有新行
+    就中止」。`idle_timeout <= 0` 关闭该保护。
+    """
+    iterator = response.aiter_lines().__aiter__()
+    while True:
+        try:
+            if idle_timeout and idle_timeout > 0:
+                line = await asyncio.wait_for(iterator.__anext__(), idle_timeout)
+            else:
+                line = await iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            raise PlatformError(
+                f'Qoder 上游 {int(idle_timeout)} 秒无数据', status=502,
+                code='qoder_idle_timeout') from None
+        yield line
 
 
 def _usage(raw: Any) -> dict:
@@ -414,6 +438,11 @@ class QoderAdapter(PlatformAdapter):
         realm, bare = self._realm_for(model, ctx)
         wrapper_model = f'{self.model_prefix}{model}'
         payload_body = {**body, 'model': bare}
+        runtime = runtime_settings.load(self.name)
+        # 没显式设置时传 None，让 QoderClient 沿用 `QODER_TIMEOUT`（运维可能改过）。
+        timeout = (runtime['request_timeout']
+                   if runtime_settings.configured(self.name, 'request_timeout')
+                   else None)
         started = time.time()
         # `account_hint` **不填区域**：它的契约是「本次实际使用的账号」（见
         # `PlatformChat.account_hint`）。区域已经在 `realm` 字段里了，把它写成
@@ -425,7 +454,8 @@ class QoderAdapter(PlatformAdapter):
         # `services/qoderaccountlog` 从 usage.jsonl 回填（见 docs/qoder-usage-*.md）。
         try:
             if not body.get('stream'):
-                data, actual_realm = await self.client.post_chat(payload_body, realm)
+                data, actual_realm = await self.client.post_chat(
+                    payload_body, realm, timeout=timeout)
                 data['model'] = wrapper_model
                 release()
                 return PlatformChat(
@@ -436,7 +466,8 @@ class QoderAdapter(PlatformAdapter):
                     realm=mapping.db_realm(actual_realm or realm)
                     if (actual_realm or realm) else None,
                 )
-            resp = await self.client.open_chat(payload_body, realm)
+            resp = await self.client.open_chat(
+                payload_body, realm, timeout=timeout)
         except BaseException:
             release()
             raise
@@ -450,7 +481,7 @@ class QoderAdapter(PlatformAdapter):
 
         async def stream():
             try:
-                async for line in resp.aiter_lines():
+                async for line in _iter_lines(resp, runtime['idle_timeout']):
                     text = (line or '').strip()
                     if not text or text.startswith(':'):
                         continue

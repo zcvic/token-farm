@@ -70,6 +70,24 @@ _BARE_TAIL = re.compile(
 _MARKERS = ('[tool_call]', '<tool_call>', '[toolcall]', '<toolcall>',
             '</tool_call>', '</toolcall>', '</call>', 'tool_call')
 
+# ── Trae 原生文本工具协议 ─────────────────────────────────────
+#
+# Trae 官方客户端在拿不到结构化 tools 时，会让模型把调用写成：
+#
+#   <|FunctionCallBegin|>[{"name":"bash","parameters":{"command":"ls"}}]<|FunctionCallEnd|>
+#
+# 数组里可以有多条调用。参考实现（trae2api-hub `ToolMarkerStream`）会在
+# 流式翻译时把它转成 `tool_calls`。旧版本项目只认 `tool_call` 家族，整段
+# 标记会被当正文透传，客户端拿到一条普通回复 + `stop`，Agent 循环静默停住。
+#
+# 这里只做**防御性还原**：不在协议提示里教模型写这个格式（原生 tools 通道
+# 正常时教它只会诱导模型退化成文本调用）。
+_TRAE_BEGIN = '<|FunctionCallBegin|>'
+_TRAE_END = '<|FunctionCallEnd|>'
+_TRAE_BEGIN_RE = re.compile(r'<\|FunctionCallBegin\|>', re.I)
+_TRAE_END_RE = re.compile(r'<\|FunctionCallEnd\|>', re.I)
+_TRAE_MARKER_RE = re.compile(r'<\|FunctionCall(?:Begin|End)\|>', re.I)
+
 _NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_.\-]*')
 # 闭合标签的残缺写法：`</tool_call>` / `</toolcall>` / `</call>`。最后一种是
 # 弱模型自造（线上样本 `<tool_call>\n</call>`）：认不出来就会把整段标签当正文
@@ -248,6 +266,9 @@ def _strip_tags(text: str) -> str:
     """删掉空对、孤立闭合标签与孤立的 DSML 开令牌，其余正文一字不动。"""
     if not text:
         return text
+    # Trae 原生标记不能当正文漏出去：完整块会被解析消费，走到这里的只剩
+    # 孤立标记 / 解析失败的残块。
+    text = _TRAE_MARKER_RE.sub('', text)
     text = _EMPTY_PAIR.sub('', text)
     text = _ORPHAN_CLOSE.sub('', text)
     text = _DSML_CLOSE_TAG.sub('', text)
@@ -305,7 +326,8 @@ def _mask_spans(text: str, inside: bool = False) -> tuple[str, bool]:
         position = closing + len(_FENCE)
     masked = ''.join(chars)
     for match in _INLINE_TICK.finditer(masked):
-        if 'tool_call' in match.group(1).lower():
+        inner = match.group(1).lower()
+        if 'tool_call' in inner or 'functioncall' in inner:
             blank(match.start(), match.end())
     return ''.join(chars), False
 
@@ -498,7 +520,13 @@ class _Resolver:
         return args
 
 
+def _trae_at(text: str, index: int) -> bool:
+    return _TRAE_BEGIN_RE.match(text, index) is not None
+
+
 def _marker_at(text: str, index: int) -> str:
+    if _trae_at(text, index):
+        return _TRAE_BEGIN
     for pattern in (_OPEN, _BARE):
         match = pattern.match(text, index)
         if match:
@@ -508,7 +536,7 @@ def _marker_at(text: str, index: int) -> str:
 
 def _next_marker(text: str, start: int) -> int:
     found = -1
-    for pattern in (_OPEN, _BARE):
+    for pattern in (_OPEN, _BARE, _TRAE_BEGIN_RE):
         match = pattern.search(text, start)
         if match and (found < 0 or match.start() < found):
             found = match.start()
@@ -537,7 +565,8 @@ def _marker_tail(text: str, after: int) -> str:
     if _marker_at(text, probe):
         return 'marker'
     tail = text[probe:].lower()
-    if '>' not in tail and any(m.startswith(tail) for m in _MARKERS):
+    prefixes = (*_MARKERS, _TRAE_BEGIN.lower(), _TRAE_END.lower())
+    if '>' not in tail and any(m.startswith(tail) for m in prefixes):
         return 'prefix'
     # 裸标记还没打出「名字(」（`tool_call w` / `tool_call `）：下一帧就可能
     # 变成调用，同样是重复开头的一部分。
@@ -600,7 +629,7 @@ def _next_start(text: str, start: int, resolver: _Resolver | None, *,
 
 def _tail_prefix(text: str) -> int:
     """正文末尾可能有几个字符是 marker 的开头（跨帧被切开），要留住。"""
-    for marker in _MARKERS:
+    for marker in (*_MARKERS, _TRAE_BEGIN, _TRAE_END):
         for size in range(min(len(marker) - 1, len(text)), 0, -1):
             if text.endswith(marker[:size]):
                 return size
@@ -1200,8 +1229,103 @@ def _dsml_incomplete(text: str) -> bool:
         position = close.end()
 
 
+def _trae_payload_calls(payload: str,
+                        resolver: _Resolver | None = None) -> list[dict]:
+    """`<|FunctionCallBegin|>` 里的 JSON → `[{'name','arguments'}]`。
+
+    兼容三种载荷：完整数组、单对象、以及包了一层 `{"tool_calls": [...]}`。
+    参数既认 `parameters`（Trae 官方写法）也认 `arguments`（OpenAI 写法），
+    对象统一序列化成 JSON 字符串。任何一条不合法就跳过那一条，不整块失败。
+    """
+    raw = (payload or '').strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if isinstance(data, dict):
+        nested = data.get('tool_calls')
+        data = nested if isinstance(nested, list) else [data]
+    if not isinstance(data, list):
+        return []
+    calls: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        fn = item.get('function') if isinstance(item.get('function'), dict) else item
+        name = str(fn.get('name') or '').strip()
+        if not name:
+            continue
+        arguments = fn.get('arguments', fn.get('parameters'))
+        if arguments is None:
+            arguments = {}
+        if isinstance(arguments, str):
+            try:
+                json.loads(arguments or '{}')
+            except (ValueError, TypeError):
+                continue
+            text = arguments
+        else:
+            try:
+                text = json.dumps(arguments, ensure_ascii=False)
+            except (TypeError, ValueError):
+                continue
+        if _placeholder_args(text):
+            continue
+        if resolver:
+            name = resolver.resolve_marker(name)
+        calls.append({'name': name, 'arguments': text})
+    return calls
+
+
+def _trae_block(text: str, index: int, resolver: _Resolver | None = None, *,
+                final: bool = False) -> tuple[list[dict], int]:
+    """解析一个 `<|FunctionCallBegin|>…<|FunctionCallEnd|>` 块。
+
+    返回 `(calls, end)`：`end` 是整块结束后的下标；`calls` 为空表示块里
+    没有可执行调用。流式（`final=False`）时还没等到结束标记就返回 `end=0`，
+    由调用方扣住等下一帧；收尾（`final=True`）仍没有结束标记则整段当残块
+    丢掉（`end=len(text)`），绝不当正文漏给客户端。
+    """
+    match = _TRAE_BEGIN_RE.match(text, index)
+    if not match:
+        return [], 0
+    cursor = match.end()
+    # 模型偶尔把开头连写两遍（`<|FunctionCallBegin|><|FunctionCallBegin|>[…]`）：
+    # 多出来的标记是脚手架，跳过即可，不能让它把 JSON 载荷打断。
+    while True:
+        probe = cursor
+        while probe < len(text) and text[probe] in ' \t\r\n':
+            probe += 1
+        again = _TRAE_BEGIN_RE.match(text, probe)
+        if not again:
+            break
+        cursor = again.end()
+    close = _TRAE_END_RE.search(text, cursor)
+    if close is None:
+        if not final:
+            return [], 0
+        payload = text[cursor:].strip()
+        return _trae_payload_calls(payload, resolver), len(text)
+    return _trae_payload_calls(text[cursor:close.start()], resolver), close.end()
+
+
+def _scan_trae(text: str, index: int, resolver: _Resolver | None, *,
+               final: bool = True) -> tuple[str, str, str, int]:
+    calls, end = _trae_block(text, index, resolver, final=final)
+    if not end:
+        return 'need', '', '', 0
+    if not calls:
+        return 'drop', '', '', end
+    first = calls[0]
+    return 'ok', first['name'], first['arguments'], end
+
+
 def _scan_at(text: str, index: int, resolver: _Resolver | None, *,
              final: bool = True) -> tuple[str, str, str, int]:
+    if _trae_at(text, index):
+        return _scan_trae(text, index, resolver, final=final)
     if _dsml_at(text, index):
         return _scan_dsml(text, index, resolver, final=final)
     if _marker_at(text, index):
@@ -1265,6 +1389,18 @@ def _parse_calls_detail(text: str, resolver: _Resolver, *,
             kept.append(text[position:])
             break
         kept.append(text[position:index])
+        if _trae_at(masked, index):
+            # 一个标记块里可以有多条调用，`_scan_at` 只能返回第一条，
+            # 这里整块取出来一次性追加。
+            block_calls, block_end = _trae_block(text, index, resolver,
+                                                 final=True)
+            if block_calls:
+                calls.extend(block_calls)
+            else:
+                # 残块 / 非法 JSON / 占位符示例：整段丢掉，不能当正文。
+                dropped = True
+            position = block_end if block_end > index else index + 1
+            continue
         kind, name, arguments, end = _scan_at(text, index, resolver)
         if kind == 'drop':
             # 没有工具名的调用块：整段丢掉，绝不当正文漏出去。
@@ -1499,6 +1635,9 @@ class Sniffer:
         self._emitted = False
         # 收尾时发现整段缓冲区只有调用脚手架（没有可执行调用/正文）。
         self.degenerate = False
+        # 流式过程中吞掉过「解析不出调用的标记块」：收尾时若什么都没下发，
+        # 同样按退化处理，不能留一个空正文 + stop。
+        self._dropped = False
 
     def _content(self, out: list[tuple[str, Any]], text: str) -> None:
         """放行一段正文；纯空白的尾巴留到确认后面还有内容再发。"""
@@ -1567,6 +1706,20 @@ class Sniffer:
                 break
             if index > 0:
                 self._content(out, self._consume(index))
+                continue
+            if _trae_at(self._buf, 0):
+                calls, end = _trae_block(self._buf, 0, self._resolver,
+                                         final=False)
+                if not end:
+                    break               # 还没等到 <|FunctionCallEnd|>
+                self._consume(end)
+                if calls:
+                    self._flush_pending(out)
+                    for call in calls:
+                        out.append(('tool_calls', [call]))
+                else:
+                    # 残块 / 非法 JSON：整段吞掉，收尾时若没有其它产出就报退化。
+                    self._dropped = True
                 continue
             kind, name, arguments, end = _scan_at(self._buf, 0, self._resolver,
                                                   final=False)
@@ -1679,6 +1832,8 @@ class Sniffer:
 
     def flush(self) -> list[tuple[str, Any]]:
         if not self._buf:
+            if self._dropped and not self._emitted:
+                self.degenerate = True
             return []
         inside = self._fence
         start_line = self._line_start

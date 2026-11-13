@@ -115,8 +115,66 @@ class BodyTest(unittest.TestCase):
         })
         self.assertEqual(body['model_name'], 'glm-5.2')
         self.assertTrue(body['stream'])          # 服务端始终 SSE
-        self.assertEqual(body['temperature'], 0.3)
+        # 采样参数挂在 parameters 下：顶层同名字段上游不读。
+        self.assertEqual(body['parameters']['temperature'], 0.3)
+        self.assertNotIn('temperature', body)
         self.assertNotIn('nonsense', body)
+
+    def test_reasoning_effort_is_forwarded(self) -> None:
+        """客户端档位 → Trae `reasoning_effort_level`（旧版完全不下发）。"""
+        messages = [{'role': 'user', 'content': 'hi'}]
+        low = client.build_chat_body('glm-5.2', messages,
+                                     {'reasoning_effort': 'low'})
+        self.assertEqual(low['parameters']['reasoning_effort_level'], 'light')
+        solo = client.build_solo_body('deepseek-v4.1-flash', messages,
+                                      {'reasoning_effort': 'xhigh'})
+        self.assertEqual(solo['reasoning_effort_level'], 'extra_high')
+        media = client.build_solo_body('deepseek-v4.1-flash', messages,
+                                       {'reasoning': {'effort': 'medium'}})
+        self.assertEqual(media['reasoning_effort_level'], 'high')
+        nested = client.build_solo_body('deepseek-v4.1-flash', messages,
+                                        {'thinking': {'level': 'minimal'}})
+        self.assertEqual(nested['reasoning_effort_level'], 'light')
+        disabled = client.build_solo_body(
+            'deepseek-v4.1-flash', messages,
+            {'thinking': {'type': 'disabled'}})
+        self.assertEqual(disabled['reasoning_effort_level'], 'none')
+
+    def test_thinking_false_requests_off(self) -> None:
+        body = client.build_chat_body(
+            'glm-5.2', [{'role': 'user', 'content': 'hi'}],
+            {'thinking': False})
+        self.assertEqual(body['parameters']['reasoning_effort_level'], 'none')
+
+    def test_effort_can_be_disabled(self) -> None:
+        with mock.patch.object(config, 'TRAE_REASONING_EFFORT', False):
+            body = client.build_chat_body(
+                'glm-5.2', [{'role': 'user', 'content': 'hi'}],
+                {'reasoning_effort': 'low'})
+        self.assertNotIn('reasoning_effort_level', body.get('parameters', {}))
+
+    def test_solo_defaults_max_tokens(self) -> None:
+        """客户端不传时也要给足输出预算，避免思考吃满后没有正文。"""
+        messages = [{'role': 'user', 'content': 'hi'}]
+        body = client.build_solo_body('deepseek-v4.1-flash', messages, {})
+        self.assertEqual(body['max_tokens'], config.TRAE_SOLO_MAX_TOKENS)
+        explicit = client.build_solo_body('deepseek-v4.1-flash', messages,
+                                          {'max_tokens': 123})
+        self.assertEqual(explicit['max_tokens'], 123)
+
+    def test_tool_hint_includes_parameter_schema(self) -> None:
+        """只给工具名不够：模型得知道参数名/类型/必填。"""
+        tools = [{'type': 'function', 'function': {
+            'name': 'bash',
+            'parameters': {'type': 'object',
+                           'properties': {'command': {'type': 'string'}},
+                           'required': ['command']}}}]
+        body = client.build_solo_body(
+            'deepseek-v4.1-flash', [{'role': 'user', 'content': 'hi'}],
+            {'tools': tools})
+        text = ''.join(part.get('text', '')
+                       for part in body['messages'][0]['content'])
+        self.assertIn('bash(command*:string)', text)
 
     def test_tools_parameters_serialized_to_json_string(self) -> None:
         """`parameters` 必须是字符串：传对象会被上游判 4001（实测）。"""
@@ -585,10 +643,15 @@ class ToolCallTranslateTest(unittest.TestCase):
         self.assertTrue(any(c.get('error') for c in chunks))
 
     def test_backfill_can_be_disabled(self) -> None:
+        """关掉兜底后不再伪造正文；整轮只有思考时按空产出报错。"""
         lines = (TranslateTest._sse('output', {'reasoning_content': '只想不说'})
                  + TranslateTest._sse('done', {'finish_reason': 'stop'}))
         chunks = self._chunks(lines, reasoning_as_content=False)
-        self.assertFalse(any(c['choices'][0]['delta'].get('content') for c in chunks))
+        self.assertFalse(any(
+            c['choices'][0]['delta'].get('content')
+            for c in chunks if 'choices' in c))
+        self.assertTrue(any((c.get('error') or {}).get('code') == 'reasoning_only'
+                            for c in chunks))
 
     def test_aggregate_merges_interleaved_arguments(self) -> None:
         """一帧里可能同时出现多个 index，参数也是交叉分片下发的。"""
@@ -1267,6 +1330,72 @@ class _RescueHarness(unittest.TestCase):
 
     def _errors(self, chunks: list[dict]) -> list[str]:
         return [chunk['error']['code'] for chunk in chunks if 'error' in chunk]
+
+
+class TraeMarkerTest(_RescueHarness):
+    """Trae 原生文本工具标记（`<|FunctionCallBegin|>…<|FunctionCallEnd|>`）。
+
+    参考实现 trae2api-hub 的 `ToolMarkerStream`。旧版本项目不认这个格式，
+    整段标记会当正文透传，客户端拿到普通回复 + `stop`，Agent 循环停住。
+    """
+
+    MARKER = ('<|FunctionCallBegin|>[{"name":"bash",'
+              '"parameters":{"command":"ls"}}]<|FunctionCallEnd|>')
+
+    def test_stream_marker_becomes_tool_calls(self) -> None:
+        chunks, _ = self._translate(self.MARKER)
+        text, calls = self._parts(chunks)
+        self.assertEqual(text, '')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]['function']['name'], 'bash')
+        self.assertEqual(json.loads(calls[0]['function']['arguments']),
+                         {'command': 'ls'})
+
+    def test_marker_split_across_frames(self) -> None:
+        chunks, _ = self._translate(
+            '<|FunctionCallBegin|>[{"name":"ba',
+            'sh","parameters":{"command":"ls"}}]<|FunctionCallEnd|>')
+        text, calls = self._parts(chunks)
+        self.assertEqual(text, '')
+        self.assertEqual([c['function']['name'] for c in calls], ['bash'])
+
+    def test_marker_can_hold_multiple_calls(self) -> None:
+        marker = ('<|FunctionCallBegin|>['
+                  '{"name":"bash","parameters":{"command":"ls"}},'
+                  '{"name":"read","parameters":{"path":"a.py"}}'
+                  ']<|FunctionCallEnd|>')
+        chunks, _ = self._translate(marker, tool_names=('bash', 'read'))
+        _text, calls = self._parts(chunks)
+        self.assertEqual([c['function']['name'] for c in calls],
+                         ['bash', 'read'])
+
+    def test_stacked_marker_begin_is_skipped(self) -> None:
+        """模型把开头连写两遍时，不能把 JSON 载荷打断。"""
+        chunks, _ = self._translate(
+            '<|FunctionCallBegin|>\n<|FunctionCallBegin|>[{"name":"bash",'
+            '"parameters":{"command":"ls"}}]<|FunctionCallEnd|>')
+        _text, calls = self._parts(chunks)
+        self.assertEqual([c['function']['name'] for c in calls], ['bash'])
+
+    def test_marker_inside_fence_is_plain_text(self) -> None:
+        """代码块里是在讲解格式，不能执行。"""
+        chunks, _ = self._translate('```\n' + self.MARKER + '\n```')
+        text, calls = self._parts(chunks)
+        self.assertEqual(calls, [])
+        self.assertIn('bash', text)
+
+    def test_truncated_marker_reports_degenerate(self) -> None:
+        chunks, _ = self._translate('<|FunctionCallBegin|>[{"name":"bash"')
+        text, calls = self._parts(chunks)
+        self.assertEqual((text, calls), ('', []))
+        self.assertIn('degenerate_tool_call', self._errors(chunks))
+
+    def test_aggregate_marker_becomes_tool_calls(self) -> None:
+        payload, _ = self._aggregate(self.MARKER)
+        message = payload['choices'][0]['message']
+        self.assertIsNone(message['content'])
+        self.assertEqual(message['tool_calls'][0]['function']['name'], 'bash')
+        self.assertEqual(payload['choices'][0]['finish_reason'], 'tool_calls')
 
 
 class DsmlToolCallTest(_RescueHarness):

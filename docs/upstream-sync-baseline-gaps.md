@@ -79,9 +79,17 @@
 |---|---|
 | 本地 HEAD（本文分析基准） | `24d4014b`（v1.1.0） |
 | 本地已核对到的参考提交 | `49fad282`（记录在 `deploy/workbuddy-panel-ref.txt`） |
-| 参考仓 HEAD | `29e4701f`（2026-11-07） |
-| 参考仓规模 | 447 个 `.go` / 290 个测试文件；去掉 `internal/panel/**` 与非测试后 140 个 |
-| 本地 `upstream/` 规模 | 253 个 `.go` / 178 个测试文件；非测试约 15.5k 行 |
+| 参考仓 HEAD | `7a48d72e`（2026-11-13；上一版按 `29e4701f` / 2026-11-07） |
+| 参考仓规模 | 447 个 `.go` / 290 个测试文件；去掉 `internal/panel/**` 与非测试后 140 个（**上一版基线时的计数**，本次未重数） |
+| 本地 `upstream/` 规模 | 274 个 `.go` / 193 个测试文件；非测试 16,156 行 |
+
+> 参考仓 HEAD 已从 `29e4701f` 推进到 `7a48d72e`，期间新增 76 个非 merge 提交。
+> 那些提交属于「基线之后」，按两份文档的分工**只进
+> [upstream-sync-misakano.md](upstream-sync-misakano.md)**，本文不重复展开；
+> 本文只更新了规模数字，并把新增能力在 P2-9 的索引表里补行。
+>
+> 本文的 P0/P1/P2 条目与「同步状态」表**不受基线推进影响**——它们描述的是
+> `49fad282` 之前就存在、本地一直没移植的缺口，判定依据是「本地缺不缺」。
 
 > 上表是**分析时**的快照。第一批六项落地后（未提交）本地为 274 个 `.go` /
 > 193 个测试文件、非测试 16,156 行——新增的两个包（`safefile`、`cst`）与十二个
@@ -1274,6 +1282,41 @@ allowed 过滤后的结果）。
 | 重启补跑标记 | M-A-15 | `scheduler/runstamps.go` |
 | 账号级摊开 / 分钟级抖动 | M-A-16 / M-A-17 | `scheduler/spread.go`、`humanize.go` |
 | 代理池 | M-B-24 | `internal/proxypool`、`upstream/proxy.go` |
+
+### 基线推进（`7a48d72e`）新增的索引行
+
+以下能力来自 `49fad282` 之后的 76 个非 merge 提交，**展开在 misakano 那份**，
+本文只做索引，避免两处各写一份：
+
+| 能力 | M-位置 | 参考文件 |
+|---|---|---|
+| 签到「请稍后重试」分钟级补签 | M-P0-2 | `scheduler/checkin_retry.go` |
+| 单个 `data:` 行多 JSON 拆分 | M-P0-3 | `upstream/sse_frame_split.go` |
+| `$wbEncrypted` auth 文件解密 / 回写 | M-P0-4 | `auth/wbencrypted.go` |
+| 只发 `user_id` 也派生粘性键 | M-P1-5 | `server/handler.go`（`DeriveCacheKey`） |
+| 请求级错误不解绑粘性 | M-P1-6 | `server/handler.go`（`failKeepBinding`） |
+| 首帧前 SSE 注释帧 | M-P1-7 | `server/headkeepalive.go` |
+| 空 text 段补位 / reasoning 镜像 | M-P1-8 | `upstream/empty_text_part.go`、`reasoning_mirror.go` |
+| `<think:...>` 拆回 thinking 块 | M-P1-9 | `upstream/thinktag.go` |
+| 输出预算下限 | M-P1-10 | `upstream/output_budget.go` |
+| 断流补截断终态 | M-P1-11 | `upstream/sse.go` |
+| 11134 供应商过载 | M-P1-12 | `upstream/client.go`、`server/handler.go` |
+| 签到回执四态 | M-P1-13 | `upstream/checkin_receipt.go` |
+| 清洗上游注入的身份指令 | M-P1-14 | `upstream/sanitize.go` |
+| `/v1/models` 透出 promo 字段 | M-P1-15 | `server/handler.go` |
+| 免费号事前避让 `exclusive` 模型 | M-P2-10 | `pool/pick.go`、`billing_summary.go` |
+| 运营活动批量读进度 / 领奖 | M-P2-11 | `upstream/campaign.go` |
+| 日志落盘 / 劣化告警 / 选号策略 | M-P2-12 | `panel/logstore.go`、`server/upstreamhealth.go`、`pool/strategy.go` |
+| 目录热重载护栏 | M-P2-13 | `panel/reload.go`、`pool/pool.go` |
+| 同 uid 多文件按 mtime 最新胜出 | M-P2-14 | `auth/auth.go` |
+| `isFirstPage` 改布尔 | M-P2-15 | `upstream/desktop.go` |
+| 资料接口空昵称判失败 | M-P2-16 | `upstream/profile.go` |
+| 续写 / 救援链 | M-P2-17 | `server/continue.go`、`narration.go`、`toolonly.go` |
+| `WB2API_PPROF` 独立 pprof | M-P2-18 | `cmd/server/main.go` |
+| 代理出口归属（proxypool） | M-P2-19 | `internal/proxypool/*` |
+
+> 这张表只解决「去哪找」。**不要**在本文再写一遍建议动作——两份文档同一项
+> 只在一处展开，改的时候也只改一处，否则很快就对不上。
 
 ---
 

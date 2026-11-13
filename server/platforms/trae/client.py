@@ -507,6 +507,68 @@ async def fetch_user_info(account: dict, token: str, *, realm: str | None = None
 _TEXT_OPTIONS = ('temperature', 'top_p', 'max_tokens', 'stop',
                  'presence_penalty', 'frequency_penalty')
 
+# 思考强度（reasoning effort）。
+#
+# 客户端常见的传法有四种：`reasoning_effort`、`reasoning.effort`、
+# `thinking.effort|level`，以及 `thinking: false`（要求关闭思考）。Trae 官方
+# 模型认的是 `reasoning_effort_level`，取值 light / high / extra_high / none
+# （见 trae2api-hub `build_trae_body`）。外部档位（low / medium / xhigh …）
+# 统一归一到这三档：客户端不可能精确知道上游有哪些档，强行原样透传只会被
+# 上游按默认值处理，用户看到的就是「设了也没用」。
+_EFFORT_OFF = frozenset({'none', 'off', 'disabled', 'disable', 'false',
+                         'no', '0'})
+_EFFORT_LEVELS = {
+    'minimal': 'light', 'low': 'light', 'light': 'light', 'lite': 'light',
+    'medium': 'high', 'mid': 'high', 'high': 'high', 'default': 'high',
+    'xhigh': 'extra_high', 'extra-high': 'extra_high',
+    'extra_high': 'extra_high', 'max': 'extra_high', 'maximum': 'extra_high',
+}
+
+
+def requested_effort(body: dict) -> str | None:
+    """从请求体里取客户端声明的思考强度（未归一）。"""
+    effort = body.get('reasoning_effort')
+    if not effort and isinstance(body.get('reasoning'), dict):
+        effort = body['reasoning'].get('effort')
+    thinking = body.get('thinking')
+    if not effort and isinstance(thinking, dict):
+        # Anthropic 风格用 `{"type": "disabled"}`，OpenAI 兼容层常混用。
+        effort = (thinking.get('effort') or thinking.get('level')
+                  or thinking.get('type'))
+    if not effort and thinking is False:
+        effort = 'none'
+    if isinstance(effort, str):
+        effort = effort.strip()
+    return str(effort) if effort else None
+
+
+def normalize_effort(effort: object) -> str | None:
+    """外部档位 → Trae `reasoning_effort_level`；认不出就返回 None（不发）。
+
+    认不出的值一律丢弃，不猜：发一个上游不认识的档位等于让模型回默认值，
+    反而掩盖了客户端配置问题。
+    """
+    low = str(effort or '').strip().lower()
+    if not low:
+        return None
+    if low in _EFFORT_OFF:
+        return 'none'
+    return _EFFORT_LEVELS.get(low)
+
+
+def _attach_effort(payload: dict, body: dict, *, nested: bool = False) -> None:
+    """挂思考强度：raw chat 放 `parameters`，solo 是平铺字段。"""
+    if not config.TRAE_REASONING_EFFORT:
+        return
+    level = normalize_effort(requested_effort(body))
+    if not level:
+        return
+    if nested:
+        payload.setdefault('parameters', {})['reasoning_effort_level'] = level
+    else:
+        payload['reasoning_effort_level'] = level
+
+
 _ROLE_ALIASES = {'human': 'user', 'ai': 'assistant', 'model': 'assistant'}
 
 # ── 工具调用（tools / tool_choice）──────────────────────────
@@ -731,7 +793,19 @@ def normalize_messages(messages: object) -> list[dict]:
                 parts.append(_text_part(folded))
         if role not in ('system', 'user', 'assistant'):
             role = 'user'
-        out.append({'role': role, 'content': parts})
+        item: dict[str, Any] = {'role': role, 'content': parts}
+        if role == 'assistant':
+            # 历史里的思考痕迹不能直接丢：DeepSeek 系模型要求 assistant
+            # 历史带 reasoning_content（参考实现 backfill_reasoning_content）。
+            # 上游对未知字段是静默忽略，带上不会破坏非思考模型。
+            reasoning = raw.get('reasoning_content')
+            if reasoning is None:
+                reasoning = raw.get('reasoning')
+            if reasoning:
+                item['reasoning_content'] = (
+                    reasoning if isinstance(reasoning, str)
+                    else str(reasoning))
+        out.append(item)
     return out
 
 
@@ -902,6 +976,39 @@ def normalize_solo_messages(messages: object) -> list[dict]:
 _TOOL_PROTOCOL_HEADER = '[工具调用协议]'
 
 
+def _tool_signature(item: dict) -> str:
+    """把一个工具压成 `name(required*, other:type)` 一行签名。
+
+    上游 raw chat 在部分场景会丢结构化 `tools`，只给名字的提示等于让模型
+    盲猜参数；把必填项和类型写进 system 是最小成本的补偿。
+    """
+    fn = item.get('function') if isinstance(item.get('function'), dict) else {}
+    name = str(fn.get('name') or '').strip()
+    if not name:
+        return ''
+    raw = fn.get('parameters')
+    schema = raw
+    if isinstance(raw, str):
+        try:
+            schema = json.loads(raw)
+        except (ValueError, TypeError):
+            schema = {}
+    if not isinstance(schema, dict):
+        schema = {}
+    properties = schema.get('properties')
+    if not isinstance(properties, dict):
+        properties = {}
+    required = schema.get('required')
+    if not isinstance(required, list):
+        required = []
+    args: list[str] = []
+    for key, spec in properties.items():
+        kind = str(spec.get('type') or '').strip() if isinstance(spec, dict) else ''
+        mark = '*' if key in required else ''
+        args.append(f'{key}{mark}{":" + kind if kind else ""}')
+    return f'{name}({", ".join(args)})'
+
+
 def _tool_protocol_hint(tools: list[dict]) -> str:
     """声明了 tools 时追加的固定说明。
 
@@ -918,11 +1025,13 @@ def _tool_protocol_hint(tools: list[dict]) -> str:
     省略号），正文还原器再把它当成真调用下发，客户端执行一条 `...` 命令
     （2026-11-02 实测）。第一道防线不该教模型写第二道防线要拦的东西。
     """
-    names = [str((item.get('function') or {}).get('name') or '') for item in tools]
-    listed = '、'.join(name for name in names if name)[:400]
+    signatures = [signature for signature in
+                  (_tool_signature(item) for item in tools) if signature]
+    listed = '；'.join(signatures)[:1600]
     return (
         f'{_TOOL_PROTOCOL_HEADER}\n'
         f'本轮可用工具：{listed}。\n'
+        '参数名后的 * 表示必填；调用参数必须符合上述结构。\n'
         '需要调用工具时，必须通过原生 function calling（tools 通道）发起；'
         '不要用 XML/HTML 标签、Markdown 代码块或任何自造语法书写调用。\n'
         '写成正文、标签或代码块的调用都不会被执行。如果无法调用工具，'
@@ -967,10 +1076,24 @@ def build_chat_body(model: str, messages: object, body: dict,
         # 客户端两个字段同名下发，实测都认；只给一个也能落账，但照抄客户端最稳。
         payload['session_id'] = str(session_id)
         payload['chat_session_id'] = str(session_id)
+    # 采样参数必须挂在 `parameters` 下：顶层同名字段上游不读（参考实现
+    # trae2api-hub `build_trae_body` 也是这么发的）。旧版平铺在顶层，实测
+    # temperature / max_tokens 全部无效。
+    parameters: dict[str, Any] = {}
     for key in _TEXT_OPTIONS:
         value = body.get(key)
-        if value is not None:
-            payload[key] = value
+        if key == 'max_tokens' and value is None:
+            # OpenAI 新字段名：网关已经会把它们钳到 int32，这里也要认。
+            value = (body.get('max_completion_tokens')
+                     or body.get('max_output_tokens'))
+        if value is None:
+            continue
+        if key == 'stop' and not isinstance(value, (list, tuple)):
+            value = [value]
+        parameters[key] = value
+    if parameters:
+        payload['parameters'] = parameters
+    _attach_effort(payload, body, nested=True)
     _attach_tools(payload, tools, body)
     return payload
 
@@ -1154,9 +1277,17 @@ def build_solo_body(model: str, messages: object, body: dict,
     if session_id:
         payload['session_id'] = str(session_id)
         payload['chat_session_id'] = str(session_id)
-    max_tokens = body.get('max_tokens')
-    if max_tokens:
+    # 思考 token 与正文共享输出预算。客户端不传时不能空着——空着走上游
+    # 默认值，思考一长就只剩 reasoning，正文和工具调用全被挤掉。
+    max_tokens = (body.get('max_tokens')
+                  or body.get('max_completion_tokens')
+                  or body.get('max_output_tokens')
+                  or config.TRAE_SOLO_MAX_TOKENS)
+    try:
         payload['max_tokens'] = int(max_tokens)
+    except (TypeError, ValueError):
+        payload['max_tokens'] = int(config.TRAE_SOLO_MAX_TOKENS)
+    _attach_effort(payload, body)
     _attach_tools(payload, tools, body)
     return payload
 

@@ -148,6 +148,16 @@ class SessionAffinity:
         self._bindings: dict[str, tuple[str, float]] = {}
         self._lock = threading.Lock()
 
+    def set_ttl(self, ttl: float) -> None:
+        """改绑定的滑动 TTL（秒）。平台设置里可调，下一次请求就生效。
+
+        只影响**之后**的续期 / 新绑定：已存在的绑定在下一次 `get()` 时按新
+        TTL 续期，不会把内存里那条记录的绝对到期时间改掉——那需要遍历整张表，
+        而「最多晚一个 TTL 才收紧」在实际使用中无害。
+        """
+        with self._lock:
+            self.ttl = max(0.0, float(ttl))
+
     def get(self, key: str) -> str | None:
         """取绑定的目标；过期返回 None，命中则续期（滑动窗口）。"""
         if not key:

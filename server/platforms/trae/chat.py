@@ -417,17 +417,9 @@ async def translate(events: AsyncIterator[tuple[str, Any]], *, model: str,
             truncated = True
             state.error = '工具调用参数被截断（不是合法 JSON），本轮已中止，请重试'
 
-    if state.error:
-        # 头已经发出去了，只能补一帧错误对象。客户端会如实报错，而不是把
-        # 半条回复当成完整回答继续往下走。
-        code = ('degenerate_tool_call' if degenerate
-                else 'truncated_tool_call' if broken_call
-                else 'stream_truncated' if truncated else 'upstream_error')
-        yield {'error': {'message': state.error, 'type': 'upstream_error',
-                         'code': code}}
-
-    # 思考兜底：帧序必须是「正文 → finish_reason → usage → [DONE]」——
-    # 补在 finish 之后，很多客户端已经停止累积，等于白补。
+    # 思考兜底：必须先于错误帧判定，否则「只有思考」的回合会先被当成空产出。
+    # 帧序仍是「正文 → finish_reason → usage → [DONE]」——补在 finish 之后，
+    # 很多客户端已经停止累积，等于白补。
     if (reasoning_as_content and reasoning_parts and not state.saw_content
             and not state.error):
         text = ''.join(reasoning_parts)
@@ -436,6 +428,31 @@ async def translate(events: AsyncIterator[tuple[str, Any]], *, model: str,
             state.saw_content = True
             if state.first_token_at is None:
                 state.first_token_at = time.time()
+
+    # 空产出：既没有正文也没有工具调用。旧行为是下发空正文 + `stop`，客户端
+    # 把它当成「模型答完了」，Agent 循环静默停住；这里改成明确错误。
+    empty_output = False
+    if (state.error is None and not state.saw_content and not saw_tools
+            and config.TRAE_EMPTY_OUTPUT_ERROR
+            # 正文还原把整段文字当脚手架吞掉、但退化判错被显式关掉时，
+            # 退回旧行为（空正文 + stop），别让新开关堵死原来的退路。
+            and not (raw_parts and not config.TRAE_DEGENERATE_CALL_ERROR)):
+        empty_output = True
+        state.error = (
+            '模型只返回了思考内容，没有正文或工具调用；本轮已中止，请重试'
+            if reasoning_parts else
+            '上游返回空内容（无正文、无工具调用）；本轮已中止，请重试')
+
+    if state.error:
+        # 头已经发出去了，只能补一帧错误对象。客户端会如实报错，而不是把
+        # 半条回复当成完整回答继续往下走。
+        code = ('reasoning_only' if empty_output and reasoning_parts
+                else 'empty_response' if empty_output
+                else 'degenerate_tool_call' if degenerate
+                else 'truncated_tool_call' if broken_call
+                else 'stream_truncated' if truncated else 'upstream_error')
+        yield {'error': {'message': state.error, 'type': 'upstream_error',
+                         'code': code}}
 
     if state.error:
         # 明确报错用 `error`；纯断流用 `length`（标准里最接近「没说完」的值，
@@ -558,6 +575,18 @@ async def aggregate(events: AsyncIterator[tuple[str, Any]], *, model: str,
             state.saw_content = True
             if state.first_token_at is None:
                 state.first_token_at = time.time()
+
+    # 与流式同口径：空产出不能伪装成正常结束（客户端会静默停住）。
+    if (not body and not tools and not state.error
+            and config.TRAE_EMPTY_OUTPUT_ERROR
+            and not (raw_body and not config.TRAE_DEGENERATE_CALL_ERROR)):
+        only_thinking = bool(thinking.strip())
+        raise PlatformError(
+            '模型只返回了思考内容，没有正文或工具调用；本轮已中止，请重试'
+            if only_thinking else
+            '上游返回空内容（无正文、无工具调用）；本轮已中止，请重试',
+            status=502,
+            code='reasoning_only' if only_thinking else 'empty_response')
 
     message: dict[str, Any] = {'role': 'assistant', 'content': body or None}
     if thinking:

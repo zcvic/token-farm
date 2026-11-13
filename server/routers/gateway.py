@@ -1440,8 +1440,9 @@ async def _chat(request: Request, upstream_path: str):
     # Anthropic source 形态改写成上游认的标准形态；认不出的原样保留。
     normalize_chat_images(body)
 
-    # 思考强度（reasoning_effort）：仅用于日志展示，**不改写请求体**——
-    # 档位归一化/降级由上游网关负责，面板只记录客户端实际传了什么。
+    # 思考强度（reasoning_effort）：这里只展开原始值用于日志展示；
+    # 请求体原样透传，由各平台适配器决定怎么下发（Trae 会归一成
+    # `reasoning_effort_level`，见 platforms/trae/client.py）。
     effort = None
     if isinstance(body, dict):
         raw_effort = body.get('reasoning_effort')

@@ -143,11 +143,11 @@ class _FakeClient:
         return list(self.models)
 
     # 推理
-    async def post_chat(self, body: dict, realm=None):
+    async def post_chat(self, body: dict, realm=None, **kwargs):
         self.calls.append(('post_chat', dict(body), realm))
         return dict(self.chat_response), self.chat_realm
 
-    async def open_chat(self, body: dict, realm=None) -> _FakeResponse:
+    async def open_chat(self, body: dict, realm=None, **kwargs) -> _FakeResponse:
         self.calls.append(('open_chat', dict(body), realm))
         response = self.stream_response or _FakeResponse(self.stream_lines,
                                                          self.chat_realm)

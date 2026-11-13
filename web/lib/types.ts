@@ -2148,6 +2148,29 @@ export interface PlatformSettings {
     delay_min: number;
     delay_max: number;
   };
+  /** 单次上游请求的读超时（秒，默认 300） */
+  request_timeout: number;
+  /** 流式响应连续多久没有新数据就中止（秒，默认 60） */
+  idle_timeout: number;
+  /** 单次对话最多尝试几个账号（仅部分平台支持，默认 3） */
+  max_accounts_try: number;
+  /** 同一会话是否固定到同一账号（仅 Trae，默认开启） */
+  session_affinity: boolean;
+  /** 会话亲和的滑动 TTL（秒，默认 30 分钟） */
+  session_affinity_ttl: number;
+  /** 刷新令牌后是否写回本机客户端（仅 Trae，默认开启） */
+  desktop_sync: boolean;
+  /** 以上数值字段的可填范围 */
+  runtime_limits: Record<
+    'request_timeout' | 'idle_timeout' | 'max_accounts_try' | 'session_affinity_ttl',
+    {min: number; max: number}
+  >;
+  /** 当前平台真正支持的字段；不支持的不要显示，而不是让用户点了才收到 400 */
+  capabilities: Record<
+    'request_timeout' | 'idle_timeout' | 'max_accounts_try'
+    | 'session_affinity' | 'session_affinity_ttl' | 'desktop_sync',
+    boolean
+  >;
 }
 
 /** 跨平台模型目录里的一项（一个平台一份）。 */

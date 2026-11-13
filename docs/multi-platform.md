@@ -167,8 +167,8 @@ registry.register(FooAdapter())
 | GET | `/api/platforms/{name}/accounts/{id}/usage` | 额度快照 |
 | POST | `/api/platforms/{name}/accounts/{id}/checkin` | 单个签到 |
 | POST | `/api/platforms/{name}/checkin-all` | 批量签到（并发与账号间隔按平台设置，默认并发 2、间隔 2–5 秒；单条失败不中断；跳过已冻结账号） |
-| GET | `/api/platforms/{name}/settings` | 平台设置：池级在途上限 + 批量签到节奏 |
-| PUT | `/api/platforms/{name}/settings` | 改上述设置（可只提交要改的字段） |
+| GET | `/api/platforms/{name}/settings` | 平台设置：池级在途上限 + 批量签到节奏 + 请求超时 / 换号次数 / 平台专属开关（会话亲和、桌面端回写） |
+| PUT | `/api/platforms/{name}/settings` | 改上述设置（可只提交要改的字段；不支持的字段会 400） |
 | PATCH | `/api/platforms/{name}/accounts/{id}` | 账号调度参数（`weight` / `disabled`） |
 | POST | `/api/platforms/{name}/accounts/{id}/cooling` | 强制冷却（定时 / 永久） |
 | DELETE | `/api/platforms/{name}/accounts/{id}/cooling` | 立即解除冷却 |
@@ -206,8 +206,13 @@ registry.register(FooAdapter())
 - **会话粘性（提示词缓存亲和）**：上游 prompt cache 按账号隔离，同一段对话每轮
   换号会让前缀缓存作废。第一个请求按权重选出账号后，按会话键（`prompt_cache_key`
   → 会话 id → 首条 user 消息哈希，见 `services/session_affinity.py`）钉住
-  30 分钟；命中绑定**不推进** SWRR，新会话仍按权重分摊。账号被冻结 / 冷却或
+  默认 30 分钟；命中绑定**不推进** SWRR，新会话仍按权重分摊。账号被冻结 / 冷却或
   凭据失败换号成功时改绑。绑定是进程内状态（上限 2048，按到期时间淘汰）。
+  开关与时长在「设置 → 上游配置」随平台切换后可见（Trae 专属）。
+- **请求预算**：`request_timeout`（单次读超时）与 `idle_timeout`（流式响应多久
+  没新数据就中止）同样按平台保存；Trae 另有 `max_accounts_try`（单次对话最多
+  试几个账号）与 `desktop_sync`（刷新令牌后是否写回本机客户端）。这些值默认
+  沿用适配器原来的常量，保存后下一次请求立即生效，不需要重启。
 
 三种状态都只写平台自己的账号文件（`data/platforms/<平台>/accounts/*.json`），
 不会改动 WorkBuddy 的 `auths/`，也不会删除凭据。
@@ -537,6 +542,31 @@ tool_calls` 与 `role: "tool"` 会被静默丢掉。于是折成正文的 `[历�
 `delta.tool_calls` / `message.tool_calls`；只对声明了 tools 的请求生效，参数不是
 合法 JSON 就原样透传。
 
+除了 `tool_call` 家族，还原器也认 Trae 原生文本标记（参考实现叫
+`ToolMarkerStream`）：
+
+```
+<|FunctionCallBegin|>[{"name":"bash","parameters":{"command":"ls"}}]<|FunctionCallEnd|>
+```
+
+数组里可以有多条调用；流式下标记被帧切开会先扣住，收尾仍不完整则按退化调用
+报错，不会把协议标记漏成正文。这里只做**防御性还原**，协议提示里不教模型写
+这个格式——原生 tools 通道正常时教它只会诱导模型退化。
+
+### 采样参数与思考强度
+
+- `llm_raw_chat` 的采样参数（`temperature` / `top_p` / `max_tokens` / `stop` /
+  penalties）必须放在 `parameters` 对象里；平铺在请求体顶层**上游不读**。
+- `reasoning_effort` / `reasoning.effort` / `thinking.effort|level` /
+  `thinking: false` 会归一成 Trae 的 `reasoning_effort_level`：
+  `minimal|low|light → light`、`medium|high → high`、
+  `xhigh|max|extra_high → extra_high`、关闭类取值 → `none`。
+  raw chat 放在 `parameters` 下，solo 通道是平铺字段。开关
+  `TF_TRAE_REASONING_EFFORT=0` 可整体关掉。
+- solo 通道客户端不传 `max_tokens` 时默认发
+  `TF_TRAE_SOLO_MAX_TOKENS`（默认 `1000000`）。思考 token 与正文共享预算，
+  空着走默认值容易出现「思考完就没额度」。
+
 ### 积分消耗倍率（「积分消耗速度」）
 
 Trae 客户端在选择模型时显示的 `{rate} ×` 来自模型条目的
@@ -711,9 +741,14 @@ Trae 事件 → OpenAI chunk：
 唯一合法的「无正文」是**工具调用轮**——此时正文为空、`tool_calls` 非空，OpenAI
 客户端据此执行工具，属于正常语义。因此适配器不干预这类轮次。
 
-兜底开关 `TF_TRAE_REASONING_AS_CONTENT` 默认**关闭**：只有当整轮既没有正文、
-也没有工具调用时（上游截断或异常），才把思考原文补一帧 `delta.content`。
-打开设 `=1`；上游报错时不补，避免把错误伪装成回答。
+异常的空产出不再伪装成 `stop`：默认按错误收尾（流式补 `error` 帧、非流式
+502），`code` 为 `reasoning_only`（只有思考）或 `empty_response`（什么都没有），
+让 Agent 客户端知道该重试而不是静默停住。开关：
+`TF_TRAE_EMPTY_OUTPUT_ERROR=0` 退回旧行为。
+
+`TF_TRAE_REASONING_AS_CONTENT` 默认**关闭**：打开后，整轮既没有正文也没有工具
+调用时，先把思考原文补一帧 `delta.content`，于是不会触发上面的空产出错误。
+上游明确报错时不补，避免把错误伪装成回答。
 
 ---
 

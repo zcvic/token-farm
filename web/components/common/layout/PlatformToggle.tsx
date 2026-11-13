@@ -60,6 +60,8 @@ export function PlatformToggle({compact = false}: {compact?: boolean}) {
  * 不如直接说清楚边界。
  *
  * 账号 / 模型 / 测试台 / 统计 / 日志 / 仪表盘已经按平台取数，不再显示这条。
+ * 「设置 → 上游配置」也随平台切换（WorkBuddy 是上游 `config.json`，Trae /
+ * Qoder 是各自平台的池级设置），因此同样不显示——其余设置 Tab 仍是全局数据。
  */
 export function PlatformScopeNote() {
   const {isWorkbuddy, label} = usePlatform();
@@ -71,7 +73,8 @@ export function PlatformScopeNote() {
   const raw = (pathname || '').replace(/\/+$/, '');
   const prefix = (BASE_PATH || '').replace(/\/+$/, '');
   const path = prefix && raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
-  if (['/accounts', '/models', '/playground', '/stats', '/logs', '/dashboard'].includes(path)) {
+  if (['/accounts', '/models', '/playground', '/stats', '/logs', '/dashboard',
+    '/settings/upstream'].includes(path)) {
     return null;
   }
 

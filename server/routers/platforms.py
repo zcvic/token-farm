@@ -24,7 +24,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from .. import db, security
 from ..platforms import PlatformAdapter, PlatformError, all_adapters, get as get_platform
-from ..platforms import checkinpacing, limiter
+from ..platforms import checkinpacing, limiter, settings as runtime_settings
 
 logger = logging.getLogger('workbuddy.platforms')
 
@@ -151,13 +151,15 @@ def _settings_payload(name: str) -> dict:
         'limits': {'min': limiter.LIMIT_MIN, 'max': limiter.LIMIT_MAX},
         # 批量签到的并发与账号间隔（与上面的推理并发是两个口径）。
         **checkinpacing.load(name),
+        # 单次请求的时间预算与平台专属开关（超时 / 换号 / 会话亲和 / 回写）。
+        **runtime_settings.load(name),
     }
 
 
 @router.get('/{name}/settings')
 def platform_settings(name: str,
                       user: dict = Depends(security.current_user)) -> dict:
-    """平台级设置：在途请求上限（0 = 不限）+ 批量签到节奏。"""
+    """平台级设置：在途请求上限 + 批量签到节奏 + 单次请求预算 / 平台开关。"""
     _adapter(name)
     return _settings_payload(name)
 
@@ -165,11 +167,14 @@ def platform_settings(name: str,
 @router.put('/{name}/settings')
 def save_platform_settings(name: str, body: dict = Body(...),
                            user: dict = Depends(security.require_admin)) -> dict:
-    """改平台设置（池级并发上限 / 签到并发与间隔）。
+    """改平台设置（池级并发 / 签到节奏 / 超时与换号 / 平台专属开关）。
 
-    两个部分可以分开提交：界面改签到节奏时不必把 `max_in_flight` 一起带上。
+    各部分可以分开提交：界面改签到节奏时不必把 `max_in_flight` 一起带上。
     保存后立刻让适配器丢掉缓存的信号量（`invalidate_limit`）：否则新上限要等
     适配器自己的缓存过期才生效，界面会显示「已保存但没变化」。
+
+    `runtime_settings.save` 只认本平台支持的字段：例如 Qoder 没有换号 /
+    会话亲和开关，提交了会明确 400，而不是静默忽略让界面以为保存成功。
     """
     adapter = _adapter(name)
     payload = body if isinstance(body, dict) else {}
@@ -181,10 +186,15 @@ def save_platform_settings(name: str, body: dict = Body(...),
             # 并非所有适配器都用到并发闸门（基类没有这个方法），取不到就跳过。
             getattr(adapter, 'invalidate_limit', lambda: None)()
         pace = checkinpacing.save(name, payload)
+        runtime = runtime_settings.save(name, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     changes.extend(f'{field}={pace[field]}' for field in (
         'checkin_concurrency', 'checkin_delay_min', 'checkin_delay_max')
+        if payload.get(field) is not None)
+    changes.extend(f'{field}={runtime[field]}' for field in (
+        'request_timeout', 'idle_timeout', 'max_accounts_try',
+        'session_affinity', 'session_affinity_ttl', 'desktop_sync')
         if payload.get(field) is not None)
     security.audit(user, 'update_platform_settings', name, ' '.join(changes))
     return _settings_payload(name)
