@@ -73,12 +73,13 @@ export function useTaskRun({
     };
   }, [enabled, load]);
 
-  const run = useCallback(async (mode: TaskRunMode, confirm = false) => {
+  const run = useCallback(async (mode: TaskRunMode, confirm = false, codes: string[] = []) => {
     setBusy(true);
     try {
-      await accountApi.taskRunStart(mode, target, confirm, upstreamId);
+      await accountApi.taskRunStart(mode, target, confirm, upstreamId, codes);
       // 描述用界面的模式名（后端回的是「已开始执行（preview）」这类中文原文）
-      notify.ok(t('tasks.runStarted'), t(`tasks.runMode_${mode}`));
+      const scope = codes.length ? ` · ${codes.length}` : '';
+      notify.ok(t('tasks.runStarted'), t(`tasks.runMode_${mode}`) + scope);
       await load();
     } catch (e) {
       notify.err(errText(e));

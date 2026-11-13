@@ -115,6 +115,126 @@ class CommandBuildTest(unittest.TestCase):
                 taskrun.build_command(bad, 'ALL')  # type: ignore[arg-type]
 
 
+class CodeFilterTest(unittest.TestCase):
+    """按任务码筛选（账号页勾选要执行哪些任务）。
+
+    三条约定必须钉住，否则「勾选」会变成另一种风险：
+      1. 不传/空数组 = 全量 —— 与引入该参数前逐字一致（上游新增任务也会跑到）；
+      2. 传了就落成 `--only <code>` 对，且**不复用上一轮的勾选**（_state 是进程内
+         单例，串了会跑用户没选的任务）；
+      3. 任务码同样做字符白名单 —— 它进 argv，虽然不过 shell，也没必要放奇怪字符。
+    """
+
+    def test_empty_means_all(self) -> None:
+        for codes in (None, [], ['', '  ']):
+            cmd = taskrun.build_command('claim', 'ALL', codes)
+            self.assertNotIn('--only', cmd, f'{codes!r} 不该产生 --only')
+
+    def test_each_code_becomes_flag_pair(self) -> None:
+        cmd = taskrun.build_command('full', 'ALL', ['Sequential_Tasks_6', 'black_cat'])
+        pairs = list(zip(cmd, cmd[1:]))
+        self.assertIn(('--only', 'Sequential_Tasks_6'), pairs)
+        self.assertIn(('--only', 'black_cat'), pairs)
+        self.assertEqual(cmd.count('--only'), 2)
+
+    def test_codes_deduplicated_keeping_order(self) -> None:
+        cmd = taskrun.build_command('claim', 'ALL', ['a_1', 'b_2', 'a_1'])
+        only = [cmd[i + 1] for i, a in enumerate(cmd) if a == '--only']
+        self.assertEqual(only, ['a_1', 'b_2'])
+
+    def test_bad_codes_rejected(self) -> None:
+        for bad in ('a;b', 'a b', '../x', '$(id)', 'a|b', 'x' * 65, 'a/b'):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                taskrun.build_command('claim', 'ALL', [bad])
+
+    def test_too_many_codes_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            taskrun.build_command('claim', 'ALL', [f'c{i}' for i in range(taskrun.MAX_CODES + 1)])
+
+    def test_dotted_code_allowed(self) -> None:
+        """上游有 `Model_chat_GLM5.2` 这种带点号的码，不能被白名单挡掉。"""
+        cmd = taskrun.build_command('claim', 'ALL', ['Model_chat_GLM5.2'])
+        self.assertIn('Model_chat_GLM5.2', cmd)
+
+    def test_state_codes_reset_on_launch(self) -> None:
+        """上一轮的勾选不能串到下一轮（用户会以为又跑了他没选的任务）。"""
+        saved = dict(taskrun._state)
+        saved_task = taskrun._task
+
+        async def noop(*_a, **_k):
+            return None
+
+        async def go():
+            taskrun._state.update({'codes': ['stale_1']})
+            ok, _ = taskrun._launch(
+                {'argv': ['x'], 'auth_dir': '', 'group': '', 'codes': ['fresh_2']},
+                'preview', 'ALL', asyncio.get_running_loop())
+            self.assertTrue(ok)
+            self.assertEqual(taskrun._state['codes'], ['fresh_2'])
+            # 模拟上一轮跑完：running 必须为 False 才会接受下一轮
+            taskrun._state['running'] = False
+            taskrun._task = None
+            # 空勾选 = 全量：必须清空，不能留着上一轮的
+            ok, _ = taskrun._launch(
+                {'argv': ['x'], 'auth_dir': '', 'group': '', 'codes': []},
+                'preview', 'ALL', asyncio.get_running_loop())
+            self.assertTrue(ok)
+            self.assertEqual(taskrun._state['codes'], [])
+
+        try:
+            with mock.patch.object(taskrun, '_run', new=noop):
+                asyncio.run(go())
+        finally:
+            taskrun._state.clear()
+            taskrun._state.update(saved)
+            taskrun._task = saved_task
+
+
+class CatalogTest(unittest.TestCase):
+    """勾选清单来自上游脚本的 `MAPPING`（不 import，只读 AST）。"""
+
+    def setUp(self) -> None:
+        # 测试环境的 `UPSTREAM_DIR` 指向部署路径（本机不存在），这里固定指向
+        # 仓库里那份真实脚本 —— 要验的是**解析逻辑**，不是「本机装没装上游」。
+        self._script = Path(__file__).resolve().parents[2] / 'upstream' / 'scripts' / 'task_runner.py'
+        self._patcher = mock.patch.object(taskrun, '_script_path', return_value=self._script)
+        self._patcher.start()
+        taskrun._catalog_cache.update({'key': None, 'value': []})
+
+    def tearDown(self) -> None:
+        self._patcher.stop()
+        taskrun._catalog_cache.update({'key': None, 'value': []})
+
+    def test_catalog_reads_upstream_mapping(self) -> None:
+        items = taskrun.catalog()
+        self.assertTrue(items, '上游脚本存在时应能解析出任务清单')
+        codes = {i['code'] for i in items}
+        # 抽样：桌面 / 小程序 / 专家体验 / 不可伪造 各取一条
+        for code in ('skill_1', 'Sequential_Tasks_6', 'WorkBuddy_Valorant',
+                     'Expert_Philanthropy'):
+            self.assertIn(code, codes)
+        by_code = {i['code']: i for i in items}
+        self.assertEqual(by_code['Expert_Philanthropy']['group'], 'manual')
+        self.assertTrue(by_code['Expert_Philanthropy']['unforgeable'])
+        self.assertEqual(by_code['Sequential_Tasks_6']['group'], 'mini')
+        self.assertEqual(by_code['Sequential_Tasks_6']['target'], 10)
+        self.assertEqual(by_code['WorkBuddy_Valorant']['group'], 'expert')
+        self.assertEqual(by_code['skill_1']['group'], 'desktop')
+
+    def test_catalog_empty_when_script_missing(self) -> None:
+        """解析不到就返回空数组：界面退化为「全量执行」，不禁止执行。"""
+        with mock.patch.object(taskrun, '_script_path',
+                               return_value=Path('does-not-exist-xyz.py')):
+            taskrun._catalog_cache.update({'key': None, 'value': []})
+            self.assertEqual(taskrun.catalog(), [])
+
+    def test_every_group_is_known(self) -> None:
+        """分组必须是前端认识的那几个，否则会整组不显示。"""
+        known = {'desktop', 'mini', 'school', 'expert', 'manual', 'other'}
+        for item in taskrun.catalog():
+            self.assertIn(item['group'], known, item['code'])
+
+
 class AvailabilityTest(unittest.TestCase):
     def test_reports_reason_when_script_missing(self) -> None:
         """脚本缺失要**说明是什么、怎么办**，而不是只回「失败」。"""
@@ -789,6 +909,49 @@ class EndpointTest(unittest.TestCase):
         bad = self.client.put('/api/task-claim-schedule',
                               json={'enabled': True, 'hours': [25]})
         self.assertEqual(bad.status_code, 400, bad.text)
+
+    def test_codes_passed_through(self) -> None:
+        """勾选的任务码要原样透传到 start_async（不能在中途被丢掉）。"""
+        self._login('admin')
+        fake = mock.AsyncMock(return_value=(True, '已开始'))
+        with mock.patch.object(taskrun, 'start_async', new=fake):
+            r = self.client.post('/api/task-run', json={
+                'mode': 'claim', 'target': '99a07e71',
+                'codes': ['Sequential_Tasks_6', 'black_cat']})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(fake.await_args.kwargs.get('codes'),
+                         ['Sequential_Tasks_6', 'black_cat'])
+
+    def test_codes_type_checked(self) -> None:
+        """类型错要 400（请求本身有错），不能静默转成字符串去跑不存在的任务。"""
+        self._login('admin')
+        for bad in ({'a': 1}, [1, 2], 'black_cat', [None], ['ok', 3]):
+            r = self.client.post('/api/task-run', json={
+                'mode': 'claim', 'target': 'ALL', 'codes': bad})
+            self.assertEqual(r.status_code, 400, f'{bad!r}: {r.text}')
+
+    def test_bad_code_characters_rejected(self) -> None:
+        """任务码走字符白名单，非法值要 400（而不是跑一轮再报「任务不存在」）。"""
+        self._login('admin')
+        r = self.client.post('/api/task-run', json={
+            'mode': 'claim', 'target': 'ALL', 'codes': ['a;b']})
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn('任务码', r.json()['detail'])
+
+    def test_catalog_endpoint(self) -> None:
+        """勾选清单：管理员可读，且形状是 {tasks: [...]}。"""
+        self._login('admin')
+        with mock.patch.object(taskrun, 'catalog_async',
+                               new=mock.AsyncMock(return_value=[{
+                                   'code': 'skill_1', 'kind': 'skill', 'group': 'desktop',
+                                   'target': 1, 'unforgeable': False, 'reason': ''}])):
+            r = self.client.get('/api/task-run/catalog')
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()['tasks'][0]['code'], 'skill_1')
+
+    def test_catalog_requires_admin(self) -> None:
+        self._login('viewer')
+        self.assertEqual(self.client.get('/api/task-run/catalog').status_code, 403)
 
 
 class SchedulerOnlyClaimsTest(unittest.TestCase):

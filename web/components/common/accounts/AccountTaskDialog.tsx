@@ -13,10 +13,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/animate-ui/radix/dialog';
+import {TaskPicker} from '@/components/common/tasks/TaskPicker';
 import {useI18n} from '@/lib/i18n/provider';
 import {RichText} from '@/lib/i18n/rich-text';
 import {translateRunLine} from '@/lib/i18n/taskrun';
 import {taskName} from '@/lib/i18n/taskname';
+import {useAsyncAll} from '@/lib/use-async-data';
+import {accountApi} from '@/lib/api';
 import {useTaskRun, type TaskRunMode} from '@/lib/use-task-run';
 import type {Account} from '@/lib/types';
 
@@ -100,6 +103,19 @@ export function AccountTaskDialog({
   const [confirmFull, setConfirmFull] = useState(false);
   /** 输出视图：按任务（默认）/ 原文。切换只影响展示，不重新拉数据。 */
   const [view, setView] = useState<'tasks' | 'raw'>('tasks');
+  /**
+   * 勾选的任务码；空数组 = 全量（与引入勾选前一致）。
+   *
+   * 清单来自后端解析上游脚本的 `MAPPING`（`/api/task-run/catalog`）——不在这里
+   * 硬编码，上游增删任务时列表自动跟上。
+   */
+  const [picked, setPicked] = useState<string[]>([]);
+  // 弹窗关着时不拉清单：`_script_path()` 在脚本缺失时会尝试从容器提取（最长
+  // 60 秒），账号页只是挂载了这个弹窗，不该因为「打开过账号页」就 fork 一次 docker。
+  const catalogState = useAsyncAll(
+    {catalog: () => (open ? accountApi.taskRunCatalog() : Promise.resolve({tasks: []}))},
+    [open]);
+  const catalog = catalogState.values.catalog?.tasks ?? [];
   const uid = account?.uid ?? '';
   const {status, busy, run: runTask, stop} = useTaskRun({
     target: uid,
@@ -109,7 +125,13 @@ export function AccountTaskDialog({
   });
 
   useEffect(() => {
-    if (open) setConfirmFull(false);
+    if (open) {
+      setConfirmFull(false);
+      // 每次打开都从「全量」开始：勾选是这一轮的范围，不是账号的持久配置。
+      // 留着上次的勾选，下次打开时用户会看到「已选 2 项」却想不起是自己选的，
+      // 点了「领奖」只跑两项还以为功能坏了。
+      setPicked([]);
+    }
   }, [open]);
 
   /** 弹窗关闭时 target 为空，任何按钮都不该发请求。 */
@@ -117,7 +139,7 @@ export function AccountTaskDialog({
     if (!account) return;
     // target 传完整 uid：上游脚本按「uid 前缀」匹配 auths 文件，完整 uid
     // 必然唯一命中该账号（传前 8 位在极端情况下才需要担心碰撞）。
-    await runTask(mode, confirm);
+    await runTask(mode, confirm, picked);
   }
 
   const running = status?.running === true;
@@ -175,12 +197,28 @@ export function AccountTaskDialog({
                   {/* 译文里用 ** 标重点（项目约定），由 RichText 渲染成 <b> */}
                   <RichText text={t('tasks.runFullConfirmBody')} />
                 </p>
+                {/* 二次确认页面里看不到勾选列表，必须在这里复述本轮范围 ——
+                    否则用户无法确认「只做我勾的那两项」是否生效。 */}
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {picked.length > 0
+                    ? t('tasks.runScopePicked', {n: picked.length})
+                    : t('tasks.runPickHint')}
+                </p>
               </>
             ) : (
               <>
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
                   {t('accounts.taskRunDesc')}
                 </p>
+
+                {/* 勾选要执行的任务：空 = 全量（与以前一致）。放在按钮上方，
+                    因为它是「这三个按钮将要做什么」的前置条件，不是附加选项。 */}
+                <TaskPicker
+                  catalog={catalog}
+                  value={picked}
+                  onChange={setPicked}
+                  disabled={busy || running}
+                />
 
                 {/* 跑的是别的任务：说清「谁在跑」，否则用户会以为自己的点击没生效 */}
                 {runningOther && (

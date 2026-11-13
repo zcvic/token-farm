@@ -20,10 +20,11 @@ import {
   DialogTitle,
 } from '@/components/animate-ui/radix/dialog';
 import {useAsyncAll} from '@/lib/use-async-data';
-import {upstreamsApi} from '@/lib/api';
+import {accountApi, upstreamsApi} from '@/lib/api';
 import {useI18n} from '@/lib/i18n/provider';
 import {RichText} from '@/lib/i18n/rich-text';
 import {translateRunLine} from '@/lib/i18n/taskrun';
+import {TaskPicker} from '@/components/common/tasks/TaskPicker';
 import {useTaskRun} from '@/lib/use-task-run';
 
 /**
@@ -50,6 +51,15 @@ export function TaskRunnerPanel() {
   const groupList = useAsyncAll({groups: () => upstreamsApi.list()}, []);
   const groups = groupList.values.groups?.items ?? [];
   const runnableGroups = groups.filter((g) => g.auth_dir);
+  /**
+   * 勾选的任务码；空 = 全量。
+   *
+   * 切分组时**保留**勾选：任务码是全局的（与账号目录无关），用户常常是「先把
+   * A 组的这几项补完，再切 B 组跑同样的几项」。清空会让他每次切组都重勾一遍。
+   */
+  const [picked, setPicked] = useState<string[]>([]);
+  const catalogState = useAsyncAll({catalog: accountApi.taskRunCatalog}, []);
+  const catalog = catalogState.values.catalog?.tasks ?? [];
   const {status, busy, run, stop} = useTaskRun({target: 'ALL', upstreamId: groupId});
 
   const running = status?.running === true;
@@ -92,7 +102,7 @@ export function TaskRunnerPanel() {
           {/* 预览：只读，无风险 */}
           <Button variant="ghost" size="sm" className="h-8 rounded-full"
                   disabled={busy || running || !!unavailable}
-                  onClick={() => run('preview')}>
+                  onClick={() => run('preview', false, picked)}>
             <Eye className="mr-1.5 size-3.5" />
             {t('tasks.runPreview')}
           </Button>
@@ -100,7 +110,7 @@ export function TaskRunnerPanel() {
           <Button variant="ghost" size="sm" className="h-8 rounded-full"
                   disabled={busy || running || !!unavailable}
                   title={t('tasks.runClaimHint')}
-                  onClick={() => run('claim')}>
+                  onClick={() => run('claim', false, picked)}>
             <Gift className="mr-1.5 size-3.5" />
             {t('tasks.runClaim')}
           </Button>
@@ -141,6 +151,16 @@ export function TaskRunnerPanel() {
         {t('tasks.runDesc')}
       </p>
 
+      {/* 勾选要执行的任务：空 = 全量（与以前一致） */}
+      <div className="mb-3">
+        <TaskPicker
+          catalog={catalog}
+          value={picked}
+          onChange={setPicked}
+          disabled={busy || running}
+        />
+      </div>
+
       {/* 输出回显：脚本按行打印进度，等长任务需要看到「跑到哪了」 */}
       {status && status.lines.length > 0 && (
         <div className="max-h-[240px] overflow-auto rounded-xl bg-muted/60 p-3">
@@ -165,6 +185,12 @@ export function TaskRunnerPanel() {
                   直接输出会把星号原样显示出来。 */}
               <RichText text={t('tasks.runFullConfirmBody')} />
             </DialogDescription>
+            {/* 二次确认里看不到勾选列表，复述本轮范围 */}
+            <p className="pt-2 text-[11px] leading-relaxed text-muted-foreground">
+              {picked.length > 0
+                ? t('tasks.runScopePicked', {n: picked.length})
+                : t('tasks.runPickHint')}
+            </p>
           </DialogHeader>
           <DialogFooter>
             <Button variant="ghost" size="sm" className="rounded-full"
@@ -175,7 +201,7 @@ export function TaskRunnerPanel() {
                     disabled={busy}
                     onClick={async () => {
                       setConfirmFull(false);
-                      await run('full', true);
+                      await run('full', true, picked);
                     }}>
               {t('tasks.runFullConfirmOk')}
             </Button>

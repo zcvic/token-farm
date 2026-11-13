@@ -61,6 +61,15 @@
                         chat_request_send + requestModelId=glm-5.2——比 Tasks_1 多
                         模型上下文这一条判据；营地上线 2026-09-25 00:00 CST 前
                         locked，accept 被服务端拒绝）                          100c+5e
+    Sequential_Tasks_6 在小程序内完成 10 次有效对话（判据与 Tasks_3 同形状，
+                        target=10；链式解锁，每日零点放一环）                  500c+5e
+    Sequential_Tasks_7 在小程序内体验「灵感」功能（mp 灵感双事件组：
+                        playbook_cta_click + playbook_prompt_send）            500c+5e
+  专家体验类活动任务（判据与 Expert_lighthouse 同源：召唤三连 + 带 has_expert 的
+  六连 + expert_actual_use(LOCAL)，专家参数见 EXPERT_EXPERIENCE）：
+    WorkBuddy_Valorant  体验「无畏契约拼豆专家」（活动截止 2026-11-15）        100c+5e
+    expert_use_maidehao / douyinyin / shangjia_xuanchuan / bowangwang
+                        在专家页搜索并召唤指定专家完成一次对话（截止 2026-11-20）50c+5e
   仍不可伪造：
     Expert_Philanthropy   真实捐款动作(M8)
 
@@ -85,7 +94,7 @@ linguo2625469/workbuddy2api-panel（autotask.go/desktop.go/report.go/tasks.go �
     machineId/sessionId 由 uid+盐 md5 稳定派生，勿每次随机）；library 走 web 域 web 指纹。
   - 日志前缀 [task_runner]，行为 action ∈ query/accept/report/claim，汇总行 task_runner done: ...
 """
-import sys, os, json, time, argparse, glob, re, urllib.request, urllib.error
+import sys, os, json, time, argparse, glob, re, random, urllib.request, urllib.error
 
 # Windows 中文区域的 stdout 默认按 ANSI 代码页（cp936）编码：账号昵称里带 emoji
 # （🏅）时，打印昵称的那一行会抛 UnicodeEncodeError，整个脚本就死在那儿
@@ -161,9 +170,63 @@ MAPPING = {
     # 注意本任务营地上线时间为 2026-09-25 00:00 CST，解锁前 accept 被服务端拒绝
     # （task locked until 2026-09-25），届时才可实测。
     "Sequential_Tasks_5":     {"kind": "miniglmchat", "target": 1, "src": "无(glm-5.2 模型上下文)"},
+    # Sequential_Tasks_6 = 小程序内完成 10 次有效对话：判据与 Tasks_3 完全同形状
+    # （mp 指纹 chat_request_send 无 activityId），只是 target=10。链式解锁
+    # （Tasks_4..7 每日零点放一环，accept 未解锁时返回 prerequisite not met）。
+    "Sequential_Tasks_6":     {"kind": "minichat", "target": 10, "src": "无(mini 对话×10 无activityId)"},
+    # Sequential_Tasks_7 = 小程序内体验「灵感」功能（+500c+5e，判据待解锁验证）。
+    # 小程序侧发射点是灵感页的两个事件（playbook_cta_click + playbook_prompt_send），
+    # 与桌面 playbook_prompt 任务同源不同域：这里走 mp 指纹双事件组。
+    "Sequential_Tasks_7":     {"kind": "miniplybook", "target": 1, "src": "无(mp 灵感双事件)"},
+    # 「在专家页搜索并召唤『X』，完成一次对话」类活动任务（判据与 Expert_lighthouse
+    # 同源：召唤三连 + 带 has_expert 的六连 + expert_actual_use(mode=LOCAL)）。
+    # 专家 id 全部取自任务自身的 jump_url（与专家市场真实条目一一对应），
+    # 详情见 EXPERT_EXPERIENCE 表。
+    "WorkBuddy_Valorant":     {"kind": "expertx", "target": 1, "src": "固定专家(无畏契约拼豆专家)"},
+    "expert_use_maidehao":    {"kind": "expertx", "target": 1, "src": "固定专家(卖得好)"},
+    "expert_use_douyinyin":   {"kind": "expertx", "target": 1, "src": "固定专家(斗音音)"},
+    "expert_use_shangjia_xuanchuan": {"kind": "expertx", "target": 1,
+                                      "src": "固定专家(商家宣传设计师)"},
+    "expert_use_bowangwang":  {"kind": "expertx", "target": 1, "src": "固定专家(播旺旺)"},
     # 不可伪造（真实业务副作用）
     "Expert_Philanthropy":    {"unforgeable": True, "reason": "真实捐款动作(M8)"},
 }
+
+# 「体验某个专家」类活动任务的固定参数（kind=expertx）。
+#
+# 专家 id 取自任务自身的 jump_url（PC deeplink `experts?expertId=ex_…`、小程序
+# `expert-center/detail?id=ex_…`），与专家市场真实条目一一对应。`name` 是专家的
+# **昵称**（卖得好 / 斗音音 / 播旺旺），`profession` 才是任务标题里的职业名——
+# 判据事件里 name 取昵称、expertTitle 取职业名，两者都参与服务端校验，不能互换。
+#
+# 截止时间（2026-11 活动）：WorkBuddy_Valorant 2026-11-15、其余四项 2026-11-20。
+# 过期后服务端不再下发该任务，脚本按「任务不存在 / locked」如实标注，无需改代码。
+EXPERT_EXPERIENCE = {
+    "WorkBuddy_Valorant": ("ex_xQHHD1u5Jkua", {
+        "name": "无畏契约拼豆专家", "profession": "无畏契约拼豆专家",
+        "expertType": "agent", "version": "1.2.1", "category": "expert-all"}),
+    "expert_use_maidehao": ("ex_GDl31WahyIH0", {
+        "name": "卖得好", "profession": "中国电商运营专家",
+        "expertType": "agent", "version": "1.0.1", "category": "expert-all"}),
+    "expert_use_douyinyin": ("ex_FbY5nlWTqDod", {
+        "name": "斗音音", "profession": "抖音策略师",
+        "expertType": "agent", "version": "1.0.2", "category": "expert-all"}),
+    "expert_use_shangjia_xuanchuan": ("ex_Weo3x2EZuSDm", {
+        "name": "商家宣传设计师", "profession": "商家宣传页与海报设计师",
+        "expertType": "agent", "version": "1.6.0", "category": "expert-all"}),
+    "expert_use_bowangwang": ("ex_WZY136wV5aMt", {
+        "name": "播旺旺", "profession": "直播电商教练",
+        "expertType": "agent", "version": "1.0.2", "category": "expert-all"}),
+}
+
+# mp 对话事件（chat_request_send）的**真人节奏**间隔（秒）。
+#
+# 上游对「N 次有效对话」类任务有反作弊校验：数秒级连发的事件会先被计入进度
+# （回读甚至短暂 completed），随后判定无效整体回滚（进度回落、claim 返回 400
+# "task not completed"）。实测 2s 连发 4 条全灭，45s 间隔逐条上报全存活。
+# 因此 minichat / miniglmchat / miniplybook 三种 mp 事件的上报间隔取
+# max(opts.gap, MINI_CHAT_GAP)，并加 0~10s 抖动（固定周期本身就很好识别）。
+MINI_CHAT_GAP = 45.0
 
 # 夜猫时段（CST）23:00 - 次日 08:00
 def within_night_window():
@@ -513,8 +576,12 @@ def ids_for(kind, auth, need, offset=0):
     if kind == "miniexpert":
         # 专家 id 取自小程序自身的专家市场端点（mp 口径，与 school 段的 school 分类不同源）
         return _dedup_slice(_fetch_market_experts(auth), offset, need)
+    if kind == "expertx":
+        # 「体验某专家」类活动任务：专家 id 是任务自带的固定值（jump_url 里那一个），
+        # 不参与偏移/轮换——同一个专家重复上报多次也不会多计（target 恒为 1）。
+        return [("", {}) for _ in range(need)]
     if kind in ("buddy5", "library", "buddyfirst", "minichat", "schoolseason",
-                "miniautomation", "miniglmchat"):
+                "miniautomation", "miniglmchat", "miniplybook"):
         # history/current 不是顺序语义：buddy5/library/buddyfirst 是固定事件组按需补 1 次（offset 无意义）
         return [("", {}) for _ in range(need)]
     if kind == "school":
@@ -1016,6 +1083,36 @@ def build_event(auth, kind, obj_id, meta, idx):
         # 构造器保证字段与 school 段单一事实源（勿在此手抄第二份形状）。
         return school.mini_chat_event(auth, f"wb-run-{now}-{idx}")
 
+    if kind == "miniplybook":
+        # Sequential_Tasks_7「在小程序内体验灵感功能」的判据事件：
+        # 灵感页点击 CTA → 发送案例 Prompt 两个事件（小程序源码同源发射点，
+        # 与桌面 playbook_prompt 的 web_element_click + playbook_cta_click +
+        # playbook_prompt_send 三连**不同域**：mp 侧没有 web_element_click）。
+        # 一次调用返回两条，由 light_up 的 miniplybook 分支一起上报。
+        case = DEFAULT_CASES[0]
+        cid = f"wb-run-pb-{now}-{idx}"
+        base = {"id": case[0], "name": case[1].get("title") or case[0],
+                "type": "document", "categoryId": "", "categoryName": "",
+                "skills": "", "skillNames": ""}
+        cta = {"eventCode": "playbook_cta_click", "timestamp": now,
+               "reportDelay": 0, "source": "discover", "position": 1,
+               "userId": uid}
+        send = {"eventCode": "playbook_prompt_send", "timestamp": now,
+                "reportDelay": 0, "source": "discover", "promptLength": 96,
+                "isOfficial": 1, "conversationId": cid, "requestId": cid,
+                "userId": uid}
+        for ev in (cta, send):
+            ev.update(base)
+            ev.update(mp_device_fingerprint(auth))
+        return [cta, send]
+
+    if kind == "expertx":
+        # 「体验某专家」类任务（WorkBuddy_Valorant / expert_use_*）：一次调用返回
+        # **整组**事件（召唤三连 + 六连对话 + expert_actual_use），由 light_up 的
+        # expertx 分支走桌面通道一起上报。这里只负责按任务码取专家参数，
+        # 事件形状复用既有 desktop_* 构造器（与 Expert_lighthouse 同一份实现）。
+        raise ValueError("expertx 由 light_up 的专用分支处理，不走 build_event")
+
     raise ValueError(f"unknown kind: {kind}")
 
 
@@ -1313,10 +1410,6 @@ def process_minichat_task(auth, code, opts, stats, uid8):
         print(f"[task_runner] {uid8} {code}: {kind} 无可用对象 id，WARN 跳过点亮")
         stats["pending"] += 1
         return
-    if len(ids) < need:
-        # 对象池不够本轮目标（如专家市场返回数少于 need）：按可用数上报，剩余下次补
-        # （回读会如实报出缺口并记 pending，不伪造 id 凑数）。
-        print(f"[task_runner] {uid8} {code}: 可用对象 id {len(ids)} < 需 {need}，本轮按可用数上报")
 
     # 1) accept（mp 头；缺头实测 task not found）
     if ast == "not_accepted":
@@ -1329,15 +1422,42 @@ def process_minichat_task(auth, code, opts, stats, uid8):
         if st != 200 or res != "accepted":
             stats["fail"] += 1
             return
+        # accept 之前的 progress 是空的（target 下发 0），兜底 target 会让多元任务少报：
+        # Sequential_Tasks_6 首轮实测「accept 后真实 target=10」，只补 1 条就去领奖，
+        # claim 返回 400 task not completed。接受后回读一次拿真实 target/current。
+        t = _mp_task_status(auth, code) or t
+        prog = t.get("progress") or {}
+        cur = prog.get("current") or 0
+        target = prog.get("target") or spec.get("target") or 1
+        need = max(1, target - cur)
+
+    if len(ids) < need:
+        # 对象池不够本轮目标（如专家市场返回数少于 need）：按可用数上报，剩余下次补
+        # （回读会如实报出缺口并记 pending，不伪造 id 凑数）。
+        print(f"[task_runner] {uid8} {code}: 可用对象 id {len(ids)} < 需 {need}，本轮按可用数上报")
 
     # 2) 判据上报：mini 指纹事件（minichat/miniglmchat 无 activityId /
-    #    schoolseason 带 activityId；miniexpert/miniautomation 各自事件码），
+    #    schoolseason 带 activityId；miniexpert/miniautomation/miniplybook 各自事件码），
     #    走 codebuddy.cn 域（report_mp_event → school.report_events 通道）
+    #
+    # 节奏：对话类事件必须按**真人节奏**发（见 MINI_CHAT_GAP）。数秒连发会先被计入
+    # 进度、随后整批被反作弊回滚，claim 400 —— 白跑一轮还留下脏进度。
+    gap = opts.gap
+    if kind in ("minichat", "miniglmchat", "miniplybook"):
+        gap = max(gap, MINI_CHAT_GAP)
     for i, (obj_id, meta) in enumerate(ids):
+        if kind in ("minichat", "miniglmchat") and i > 0:
+            # 首条也等：上一轮残留进度被回滚后立即重报同样无效（实测）。
+            # 抖动 0~10s：固定周期本身就是可识别的机器节奏。
+            time.sleep(gap + random.uniform(0, 10))
         ev = build_event(auth, kind, obj_id, meta, i)
-        st, sc = report_mp_event(auth, ev)
-        print(f"[task_runner] {uid8} {code}: report {i + 1}/{need} {st} code={sc} (mini growth)")
-        time.sleep(opts.gap)
+        # 少数 kind 一次返回事件组（miniplybook：点击 + 发送两条）
+        evs = ev if isinstance(ev, list) else [ev]
+        for one in evs:
+            st, sc = report_mp_event(auth, one)
+            print(f"[task_runner] {uid8} {code}: report {i + 1}/{need} {st} code={sc} (mini growth)")
+        if kind == "miniplybook" or i < len(ids) - 1:
+            time.sleep(gap)
 
     time.sleep(2.0)  # 服务端归账留时
 
@@ -1567,6 +1687,53 @@ def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0):
             if i < len(ids) - 1:
                 time.sleep(opts.gap)
         time.sleep(2.0)  # 服务端归账可能异步
+    elif spec["kind"] == "expertx":
+        # 「体验某专家」类活动任务（WorkBuddy_Valorant / expert_use_*）：判据与
+        # Expert_lighthouse 同源，复用同一条事件链，只按任务码换专家参数：
+        #   召唤三连 → 真实桌面对话（服务端 requestId）→ 带 has_expert 的六连
+        #   → expert_actual_use(mode=LOCAL, type 空, cost=0)。
+        # 为什么不能用通用上报分支：自造 requestId 服务端不计数（issue #221，
+        # 轻量云实测进度恒 0/1），这条任务吃的是同一份判据。
+        picked = EXPERT_EXPERIENCE.get(code)
+        if picked is None:
+            print(f"[task_runner] {uid8} {code}: 未登记的专家体验任务，skip")
+            stats["fail"] += 1
+            return
+        eid, emeta = picked
+        expert = (eid, dict(emeta))
+        # 市场列表若命中真实条目就用它的信息（version/分类以服务端为准）——
+        # 召唤链本身不依赖搜索成功，搜不到继续用表内静态值。
+        try:
+            for cid, cmeta in _fetch_market_experts(auth):
+                if cid == eid:
+                    expert = (eid, {**emeta, **{k: v for k, v in cmeta.items() if v}})
+                    break
+        except Exception as ex:  # noqa: BLE001 —— 仅用于校正元数据
+            print(f"[task_runner] {uid8} {code}: 专家市场校正失败({ex})，用表内静态值")
+        for i in range(need):
+            st_s, sc_s = report_desktop_events(auth, desktop_expert_summon_sequence(expert))
+            print(f"[task_runner] {uid8} {code}: report summon {i + 1}/{need} "
+                  f"{st_s} code={sc_s} id={eid}")
+            conv, req_id, err = _lighthouse_real_chat(auth, eid)
+            if err:
+                print(f"[task_runner] {uid8} {code}: 真实对话失败({err})，本轮跳过")
+                stats["fail"] += 1
+                continue
+            events = desktop_chat_sequence(auth, conv, req_id,
+                                           "msg-" + req_id[-8:], "fast-model", "fast-model")
+            for ev in events:
+                if ev.get("eventCode") == "agent_task_created":
+                    ev["has_expert"] = True
+                    ev["expert_id"] = eid
+                    ev["expert_name"] = expert[1].get("name") or eid
+                    ev["expert_industry_id"] = ""
+            events.append(desktop_expert_actual_use_local(expert, conv, req_id))
+            st_r, sc = report_desktop_events(auth, events)
+            print(f"[task_runner] {uid8} {code}: report {i + 1}/{need} {st_r} "
+                  f"code={sc} expert req={req_id}")
+            if i < need - 1:
+                time.sleep(opts.gap)
+        time.sleep(2.0)  # 服务端归账可能异步
     elif spec["kind"] == "buddy5":
         # 五连「进入 Buddy 应用」事件（fork DesktopBuddyAppSequence，两账号实测点亮）；
         # 上报失败（非 200 / code!=0）降级为单发 buddyapp_enter_click（旧形状兜底）。
@@ -1652,7 +1819,8 @@ def process_account(auth, opts, stats):
     school_in_map = [c for c in MAPPING if MAPPING[c].get("kind") == "school"]
     minichat_in_map = [c for c in MAPPING
                       if MAPPING[c].get("kind") in ("minichat", "schoolseason", "miniexpert",
-                                                    "miniautomation", "miniglmchat")]
+                                                    "miniautomation", "miniglmchat",
+                                                    "miniplybook")]
     special = set(school_in_map) | set(minichat_in_map)
     if opts.only_codes:
         codes = [c for c in opts.only_codes if c not in special]
@@ -1662,7 +1830,7 @@ def process_account(auth, opts, stats):
         codes = [c for c in MAPPING
                  if MAPPING[c].get("kind") not in ("school", "minichat", "schoolseason",
                                                    "miniexpert", "miniautomation",
-                                                   "miniglmchat")]
+                                                   "miniglmchat", "miniplybook")]
         process_school = True
         process_minichat = True
         # 未在映射表但存在于任务列表的（如 Expert_Philanthropy）——只计数展示

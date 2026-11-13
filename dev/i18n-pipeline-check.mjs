@@ -185,6 +185,31 @@ const LINE_CASES = [
    raw: '[task_runner] abcd1234 t011: query locked（解锁 ?）-> 未到上线时间，跳过',
    data: ['abcd1234', 't011', '?']},
   {label: '看护追加：空闲超时（我们自己的行）', raw: '!! 已 300s 无输出，判定卡死并终止', data: ['300']},
+  // 2026-11 补 Tasks_6/7 与专家体验任务时统一的行形状。
+  // 这几条是**纯字段行**（report / 进度 / code / id），本来就没有可翻译的散文，
+  // 输出与简体相同是正确结果 —— 用 fields 标记跳过「必须与简体不同」那条断言，
+  // 而不是为了骗过检查硬塞同义词。
+  {label: '小程序上报（带 mini growth 后缀）', fields: true,
+   raw: '[task_runner] abcd1234 Sequential_Tasks_6: report 3/10 200 code=0 (mini growth)',
+   data: ['[task_runner]', 'abcd1234', 'Sequential_Tasks_6', '3/10', '200', '0']},
+  {label: 'mp 回读（判断服务端记没记住）', fields: true,
+   raw: '[task_runner] abcd1234 Sequential_Tasks_6: query re-read 4/10 accept_status=accepted',
+   data: ['abcd1234', 'Sequential_Tasks_6', '4/10', 'accepted']},
+  {label: '专家召唤三连', fields: true,
+   raw: '[task_runner] abcd1234 WorkBuddy_Valorant: report summon 1/1 200 code=0 id=ex_xQHHD1u5Jkua',
+   data: ['WorkBuddy_Valorant', '1/1', '200', 'ex_xQHHD1u5Jkua']},
+  {label: '专家真实对话失败',
+   raw: '[task_runner] abcd1234 WorkBuddy_Valorant: 真实对话失败(chat http 429)，本轮跳过',
+   data: ['WorkBuddy_Valorant', 'chat http 429']},
+  {label: '专家体验上报（带服务端 requestId）', fields: true,
+   raw: '[task_runner] abcd1234 WorkBuddy_Valorant: report 1/1 200 code=0 expert req=cmb-0123456789abcdef0123456789abcdef',
+   data: ['WorkBuddy_Valorant', '1/1', '200', 'cmb-0123456789abcdef0123456789abcdef']},
+  {label: '专家体验任务未登记',
+   raw: '[task_runner] abcd1234 expert_use_unknown: 未登记的专家体验任务，skip',
+   data: ['expert_use_unknown']},
+  {label: '专家市场校正失败（回落静态值）',
+   raw: '[task_runner] abcd1234 WorkBuddy_Valorant: 专家市场校正失败(http 500)，用表内静态值',
+   data: ['WorkBuddy_Valorant', 'http 500']},
   {label: '未命中的上游新行', raw: '这条上游新加的行没模板，应当原样返回',
    passthrough: ['这条上游新加的行没模板，应当原样返回']},
 ];
@@ -208,7 +233,7 @@ for (const loc of LOCALES.filter((l) => l !== 'zh-CN')) {
     for (const d of c.data ?? []) {
       if (!got.includes(d)) { ok = check(false, label, `丢了数据片段 ${d} → ${got}`); break; }
     }
-    if (ok && !c.passthrough?.length && got === lineZh.get(c.label)) {
+    if (ok && !c.passthrough?.length && !c.fields && got === lineZh.get(c.label)) {
       ok = check(false, label, `与简体输出完全相同，模板没生效: ${got}`);
     }
     if (ok && loc === 'en' && HAN.test(withoutPassthrough(got, c.passthrough))) {

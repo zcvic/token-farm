@@ -27,6 +27,19 @@
 
 定时只跑 `claim`：它是幂等的领奖，不产生任何伪造行为，风险最低。
 
+任务范围（`codes`）
+------------------
+三种模式都是**整批**语义：一次跑脚本映射表里的全部任务。实际使用中常遇到
+「只想补这一项」「这个号只差夜猫」—— 为一项任务把 30 多个动作全跑一遍，
+既慢又平白多出几十次写请求（风控面也更大）。因此允许按任务码筛选，落到脚本
+自己的 `--only <code>`（可多次，上游原生参数）：
+
+  · 不传 / 空数组 = 全量，行为与引入该参数前逐字一致（上游新增任务也会跑到）；
+  · 传了就只跑这几项，脚本对未下发的码打「任务不存在」并记 skip。
+
+筛选**不改变风险分级**：`full` 仍然要 `confirm`，`claim` 仍然只领不点亮。
+任务码只做字符白名单校验（会作为独立 argv 传入），因此同样没有注入面。
+
 安全约束
 --------
   · 一次只跑一个（`_lock`）：并发跑等于把同一账号的写请求叠在一起，
@@ -85,12 +98,24 @@ _MAX_LOG_LINES = 400
 # 因为它会作为独立 argv 传进子进程。
 _ACCOUNT_RE = re.compile(r'^[0-9a-zA-Z_-]{1,64}$')
 
+# 任务码：上游的码里有 `Model_chat_GLM5.2` 这类带点号的，还有下划线/连字符。
+# 只放行「字母数字 + `._-`」，长度设上限——同样是白名单式校验，因为它会作为
+# 独立 argv 传给子进程（不拼 shell，但没必要给脚本塞奇怪字符）。
+_CODE_RE = re.compile(r'^[0-9a-zA-Z_.-]{1,64}$')
+
+# 一次最多筛几项：界面上的勾选列表就几十项，设个上限防止手搓请求把 argv 撑爆
+# （Windows 单条命令行 32K，几百个 --only 也会让脚本日志难读）。
+MAX_CODES = 64
+
 _state: dict = {
     'running': False,
     'mode': '',
     'target': '',
     'group': '',
     'auth_dir': '',
+    # 本次筛选的任务码（空 = 全量）。界面用它回显「这一轮跑的是哪几项」——
+    # 否则用户看到的是上一轮/全量的输出，分不清是不是自己的勾选生效了。
+    'codes': [],
     'started_at': 0,
     'finished_at': 0,
     'exit_code': None,
@@ -333,6 +358,7 @@ def status() -> dict:
     """
     snap = dict(_state)
     snap['lines'] = list(_state['lines'])
+    snap['codes'] = list(_state.get('codes') or [])
     # 按任务聚合（issue #189）：原始行照旧给全，额外给一份「任务 → 状态」的摘要，
     # 界面默认展示它（用户看不出 `Sequential_Tasks_2: query 1/1 -> 可点亮…` 的
     # 要点），原文仍在「原文」页签里可查。
@@ -345,26 +371,149 @@ def status() -> dict:
     return snap
 
 
-def build_command(mode: str, target: str) -> list[str]:
+# kind → 勾选列表里的分组（界面按它分组展示，文案在前端按语言渲染）。
+# 与脚本 MAPPING 的 kind 一一对应；新 kind 忘了登记就落到 `other`，
+# 不会从列表里消失（宁可多一组，不能少一项）。
+_KIND_GROUP = {
+    'canvas': 'desktop', 'template': 'desktop', 'expert': 'desktop',
+    'team': 'desktop', 'skill': 'desktop', 'automation': 'desktop',
+    'playbook': 'desktop', 'lighthouse': 'expert', 'buddy5': 'desktop',
+    'skin': 'desktop', 'chat': 'desktop', 'glmchat': 'desktop',
+    'cat': 'desktop', 'buddyfirst': 'desktop', 'richmeow': 'desktop',
+    'library': 'desktop',
+    'school': 'school',
+    'minichat': 'mini', 'schoolseason': 'mini', 'miniexpert': 'mini',
+    'miniautomation': 'mini', 'miniglmchat': 'mini', 'miniplybook': 'mini',
+    'expertx': 'expert',
+}
+
+# 目录缓存：key = (路径, mtime)。脚本被上游更新后 mtime 变，自然失效。
+_catalog_cache: dict = {'key': None, 'value': []}
+
+
+def catalog() -> list[dict]:
+    """可勾选的任务清单（从上游脚本的 `MAPPING` 读，不另抄一份）。
+
+    为什么不写死在前端：任务码是上游的数据（随时增删，见 issue #189 的
+    `taskName` 表已经为此维护了 20 多个键）。勾选列表要是也硬编码一份，
+    上游加任务时这里就会静默少一项 —— 而「少一项」的表现是用户勾不到、
+    以为功能不支持，比报错更难发现。所以直接解析脚本源码里的 `MAPPING`
+    （**只读 AST，不 import**：import 会执行模块级代码并污染 sys.path，
+    还可能因脚本依赖缺失而炸掉一个只读接口）。
+
+    返回每条：`{code, kind, group, target, unforgeable, reason}`。
+    解析失败（脚本缺失 / 结构变了）返回空数组 —— 界面退化为「全量执行」，
+    与引入勾选前行为一致，不会因为解析不到就禁止执行。
+    """
+    script = _script_path()
+    try:
+        mtime = script.stat().st_mtime
+    except OSError:
+        return []
+    key = (str(script), mtime)
+    if _catalog_cache['key'] == key:
+        return list(_catalog_cache['value'])
+
+    import ast
+
+    try:
+        tree = ast.parse(script.read_text(encoding='utf-8', errors='replace'))
+    except (OSError, SyntaxError):
+        return []
+    table: ast.Dict | None = None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == 'MAPPING' for t in node.targets):
+            if isinstance(node.value, ast.Dict):
+                table = node.value
+                break
+    if table is None:
+        return []
+
+    out: list[dict] = []
+    for k_node, v_node in zip(table.keys, table.values):
+        if not isinstance(k_node, ast.Constant) or not isinstance(k_node.value, str):
+            continue
+        code = k_node.value
+        spec: dict = {}
+        if isinstance(v_node, ast.Dict):
+            for sk, sv in zip(v_node.keys, v_node.values):
+                if isinstance(sk, ast.Constant) and isinstance(sk.value, str):
+                    try:
+                        spec[sk.value] = ast.literal_eval(sv)
+                    except (ValueError, SyntaxError):
+                        continue
+        unforgeable = bool(spec.get('unforgeable'))
+        kind = str(spec.get('kind') or '')
+        out.append({
+            'code': code,
+            'kind': kind,
+            'group': 'manual' if unforgeable else _KIND_GROUP.get(kind, 'other'),
+            'target': int(spec.get('target') or 0),
+            'unforgeable': unforgeable,
+            'reason': str(spec.get('reason') or ''),
+        })
+    _catalog_cache.update({'key': key, 'value': out})
+    return list(out)
+
+
+async def catalog_async() -> list[dict]:
+    """`catalog()` 的线程池版本（解析脚本 + 可能的 docker 提取都是阻塞的）。"""
+    return await asyncio.to_thread(catalog)
+
+
+def clean_codes(codes: list[str] | tuple[str, ...] | None) -> list[str]:
+    """校验并去重任务码（保序）。空 = 全量。
+
+    校验放在**构造 argv 之前**：任务码会作为独立 argv 传给子进程，虽然不经过
+    shell（无注入面），但让非法值在这里就报错，比脚本跑一半才崩清楚得多。
+    去重是为了界面「全选」时不会因为重复勾选把同一个 `--only` 传两遍。
+
+    公开（不带下划线）：路由层也要用它，才能把「任务码不合法」报成 400
+    （请求本身有错），而不是落到 409 的「状态冲突」里 —— 后者会让用户以为
+    「等一会儿重试就好」。
+    """
+    if not codes:
+        return []
+    out: list[str] = []
+    for raw in codes:
+        code = str(raw or '').strip()
+        if not code:
+            continue
+        if not _CODE_RE.match(code):
+            raise ValueError(f'任务码不合法：{code!r}（只允许字母、数字与 _ . -）')
+        if code not in out:
+            out.append(code)
+    if len(out) > MAX_CODES:
+        raise ValueError(f'一次最多筛选 {MAX_CODES} 项任务')
+    return out
+
+
+def build_command(mode: str, target: str, codes: list[str] | None = None) -> list[str]:
     """构造 argv（不经过 shell，因此不做任何转义）。"""
     if mode not in _MODE_ARGS:
         raise ValueError(f'不支持的模式：{mode}')
     if not _ACCOUNT_RE.match(target or ''):
         raise ValueError('账号标识不合法（只允许 uid 前缀或 ALL）')
+    picked = clean_codes(codes)
     # `-u` 必须加：非交互（管道）时 Python 的 stdout 是**块缓冲**，攒满 8KB 才刷。
     # 脚本每行约 80 字节，于是一次全量要跑满约 100 行才会吐出第一批输出——
     # 用户看到的就是「点了做任务，卡半天没有任何输出，然后突然冒出一大段」
     # （线上实测）。加 -u 后每行实时可见，面板才真的能当进度看。
+    only = [arg for code in picked for arg in ('--only', code)]
     return [_python(), '-u', str(_script_path()), target, *_MODE_ARGS[mode],
+            *only,
             *(taskpacing.script_args() if mode in ('claim', 'full') else [])]
 
 
 def _prepare(mode: str, target: str, auth_dir: Path | str | None = None,
-             group_name: str = '') -> tuple[bool, object]:
+             group_name: str = '', codes: list[str] | None = None,
+             ) -> tuple[bool, object]:
     """启动前的**阻塞**准备：校验可用性 + 构造 argv。
 
     返回 (ok, payload)：ok 为 False 时 payload 是给用户的原因说明，否则是
-    执行参数 dict（argv / auth_dir / group）。
+    执行参数 dict（argv / auth_dir / group / codes）。
 
     单独拆出来是这次修 bug 的关键（issue #31）：启动这件事有两半，性质完全不同——
       · **这一半是阻塞的**：`available()` 可能 fork `docker inspect` / `docker cp`
@@ -381,13 +530,14 @@ def _prepare(mode: str, target: str, auth_dir: Path | str | None = None,
     if _state['running']:
         return False, f'已有任务正在执行（{_state["mode"]} / {_state["target"]}），请等它结束'
     try:
-        argv = build_command(mode, target)
+        argv = build_command(mode, target, codes)
     except ValueError as exc:
         return False, str(exc)
     return True, {
         'argv': argv,
         'auth_dir': str(_auth_dir(auth_dir)),
         'group': group_name or '',
+        'codes': clean_codes(codes),
     }
 
 
@@ -405,35 +555,43 @@ def _launch(payload: dict, mode: str, target: str, loop) -> tuple[bool, str]:
         return False, (f'已有任务正在执行（{_state["mode"]} / {_state["target"]}），'
                        f'请等它结束')
     group = str(payload.get('group') or '')
+    codes = list(payload.get('codes') or [])
     _state.update({
         'running': True, 'mode': mode, 'target': target,
         'group': group, 'auth_dir': str(payload.get('auth_dir') or ''),
+        # 必须一并重置：_state 是进程内单例，不清空的话上一轮的勾选会串到
+        # 这一轮的回显上（用户会以为这次又跑了他没选的任务）。
+        'codes': codes,
         'started_at': int(time.time()), 'finished_at': 0,
         'exit_code': None, 'timed_out': False, 'error': '', 'lines': [],
     })
     _task = loop.create_task(_run(
         list(payload['argv']), mode, target,
-        str(payload.get('auth_dir') or ''), group,
+        str(payload.get('auth_dir') or ''), group, codes,
     ))
     where = f'{group} / ' if group else ''
-    return True, f'已开始执行（{where}{mode}）'
+    scope = f'（{len(codes)} 项任务）' if codes else ''
+    return True, f'已开始执行（{where}{mode}{scope}）'
 
 
 async def start_async(mode: str, target: str = 'ALL',
                       auth_dir: Path | str | None = None,
-                      group_name: str = '') -> tuple[bool, str]:
+                      group_name: str = '',
+                      codes: list[str] | None = None) -> tuple[bool, str]:
     """启动一次执行（**不阻塞事件循环**的版本）。
 
     定时领奖循环与启动任务的 async 接口都走这里：把阻塞的准备丢进线程池，
     再回到事件循环线程里调度任务。两半的运行位置不能混（见 `_prepare`）。
 
     `auth_dir` / `group_name` 用于多分组（issue #274）：不传 = 默认分组。
+    `codes` 按任务码筛选（不传 = 全量），见模块注释「任务范围」。
     """
     from . import accountrisk
     paused = await accountrisk.paused_targets(auth_dir)
     if paused and (target == 'ALL' or any(uid.startswith(target) for uid in paused)):
         return False, '账号存在保护性暂停；请改选正常账号单独执行，或检查预警后手动恢复'
-    ok, payload = await asyncio.to_thread(_prepare, mode, target, auth_dir, group_name)
+    ok, payload = await asyncio.to_thread(
+        _prepare, mode, target, auth_dir, group_name, codes)
     if not ok:
         return False, payload  # type: ignore[return-value]
     return _launch(payload, mode, target, asyncio.get_running_loop())  # type: ignore[arg-type]
@@ -441,14 +599,15 @@ async def start_async(mode: str, target: str = 'ALL',
 
 def start(mode: str, target: str = 'ALL',
           auth_dir: Path | str | None = None,
-          group_name: str = '') -> tuple[bool, str]:
+          group_name: str = '',
+          codes: list[str] | None = None) -> tuple[bool, str]:
     """启动一次执行（同步版）。返回 (是否已启动, 说明)。
 
     要求**当前线程有运行中的事件循环**（要 create_task），且会阻塞它 ——
     所以事件循环里的调用方请用 `start_async()`。保留同步版是为了命令行/测试
     这类「本来就在 loop 线程里、且不在意短暂阻塞」的场景。
     """
-    ok, payload = _prepare(mode, target, auth_dir, group_name)
+    ok, payload = _prepare(mode, target, auth_dir, group_name, codes)
     if not ok:
         return False, payload  # type: ignore[return-value]
     try:
@@ -459,7 +618,8 @@ def start(mode: str, target: str = 'ALL',
 
 
 async def _run(argv: list[str], mode: str, target: str,
-               auth_dir: str = '', group: str = '') -> None:
+               auth_dir: str = '', group: str = '',
+               codes: list[str] | None = None) -> None:
     """跑子进程并把输出累积到状态里（尾部保留）。"""
     from . import accountrisk
     paused = await accountrisk.paused_targets(auth_dir)
@@ -556,7 +716,7 @@ async def _run(argv: list[str], mode: str, target: str,
         # 先写历史再置 running=False：多分组串行执行时，下一组会在
         # wait_idle() 看到 False 的瞬间立刻 _launch 并重置 _state ——
         # 顺序反了会把上一组的历史记录写成本组的参数。
-        _record_history(mode, target, group)
+        _record_history(mode, target, group, codes or [])
         _state['running'] = False
 
 
@@ -572,7 +732,8 @@ def _append(line: str) -> None:
         del lines[:len(lines) - _MAX_LOG_LINES]
 
 
-def _record_history(mode: str, target: str, group: str = '') -> None:
+def _record_history(mode: str, target: str, group: str = '',
+                    codes: list[str] | None = None) -> None:
     """把这次执行的结果写进「任务记录」，让它在历史里能查到。
 
     只在**真正可能产生写入**的模式下记录（claim / full），且只记一行结果 ——
@@ -586,6 +747,12 @@ def _record_history(mode: str, target: str, group: str = '') -> None:
     if _state['error'] or _state['timed_out'] or (_state['exit_code'] not in (0, None)):
         level = 'fail'
     scope = f'{group}·{target}' if group else target
+    # 只跑了勾选的几项时把范围写进记录：否则事后翻历史只看到「一键做任务（ALL）」，
+    # 完全不知道当时限定过任务（同一次全量与一次筛选在记录里长得一样）。
+    picked = list(codes or [])
+    if picked:
+        shown = '、'.join(picked[:4]) + ('…' if len(picked) > 4 else '')
+        scope += f' · {len(picked)} 项：{shown}'
     try:
         db.add_task_logs([{
             'ts': _state['finished_at'] or int(time.time()),

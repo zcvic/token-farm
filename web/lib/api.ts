@@ -75,6 +75,7 @@ import type {
   SecurityConfig,
   StatsSummary,
   TaskLogResponse,
+  TaskRunCatalogItem,
   TaskRunStatus,
   UpdateCheck,
   UpdatePackageMeta,
@@ -481,11 +482,14 @@ export const accountApi = {
    * 调用上游自带的 scripts/task_runner.py。full（点亮）会伪造活跃上报，
    * 因此单独要求 confirm，与幂等的 claim 区分开。 */
   taskRunStatus: () => get<TaskRunStatus>('/api/task-run'),
-  /** upstreamId 选分组（issue #274）：null/省略 = 默认分组的账号目录。 */
+  /** 可勾选的任务清单（从上游脚本 MAPPING 解析，见后端 taskrun.catalog）。 */
+  taskRunCatalog: () => get<{tasks: TaskRunCatalogItem[]}>('/api/task-run/catalog'),
+  /** upstreamId 选分组（issue #274）：null/省略 = 默认分组的账号目录。
+   *  codes 勾选要执行的任务码（空数组/省略 = 全量），落到脚本的 `--only`。 */
   taskRunStart: (mode: 'preview' | 'claim' | 'full', target = 'ALL', confirm = false,
-                 upstreamId: number | null = null) =>
+                 upstreamId: number | null = null, codes: string[] = []) =>
     post<{ok: boolean; message: string}>('/api/task-run',
-      {mode, target, confirm, upstream_id: upstreamId}),
+      {mode, target, confirm, upstream_id: upstreamId, codes}),
   taskRunStop: () => post<{ok: boolean; message: string}>('/api/task-run/stop'),
 
   /* ── 定时领奖配置：**后端有、前端有意不做 UI** ───────────────

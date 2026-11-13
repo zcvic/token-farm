@@ -1990,18 +1990,32 @@ def task_run_status(user: dict = Depends(security.require_admin)) -> dict:
     return taskrun.status()
 
 
+@router.get('/task-run/catalog')
+async def task_run_catalog(user: dict = Depends(security.require_admin)) -> dict:
+    """可勾选的任务清单（账号页「活动任务」弹窗的勾选列表）。
+
+    从上游脚本的 `MAPPING` 解析（见 `taskrun.catalog`），不另维护一份：
+    上游增删任务时列表自动跟上，前端只负责翻译任务码。
+    """
+    return {'tasks': await taskrun.catalog_async()}
+
+
 @router.post('/task-run')
 async def task_run_start(
     body: dict = Body(...),
     user: dict = Depends(security.require_admin),
 ) -> dict:
-    """启动一次执行。body: {mode, target, confirm, upstream_id}。
+    """启动一次执行。body: {mode, target, confirm, upstream_id, codes}。
 
     `full`（点亮 + 领奖）会伪造活跃上报，因此要求显式传 `confirm: true` ——
     与「领奖」区分开，避免手滑点到风险最高的那个。
 
     `upstream_id` 选分组（issue #274）：不传 = 默认分组；其他分组要求配置了
     本地账号目录（`_require_dir`），脚本通过 `WB2A_AUTHS` 读那一组账号。
+
+    `codes` 按任务码筛选（账号页勾选要执行的任务）：不传 / 空数组 = 全量，
+    与引入该参数前逐字一致。校验与去重都在 `taskrun` 里做，这里只做类型检查
+    —— 非法值要报 400（请求本身有错），不要落到 409 的「状态冲突」里去。
     """
     mode = str(body.get('mode') or '').strip()
     target = str(body.get('target') or 'ALL').strip() or 'ALL'
@@ -2013,6 +2027,23 @@ async def task_run_start(
             detail='「点亮任务」会向腾讯发送活跃上报（造画布、连发对话等），'
                    '请先确认：该操作有风控风险，建议先用「预览」看清将要做的事。',
         )
+    raw_codes = body.get('codes')
+    if raw_codes is None:
+        codes: list[str] = []
+    elif isinstance(raw_codes, list):
+        # 元素必须是字符串：`[1, 2]` 这种静默转成 "1"/"2" 会去跑一堆不存在的任务，
+        # 用户看到的只是「任务不存在」，查不出是自己传错了类型。
+        if any(not isinstance(c, str) for c in raw_codes):
+            raise HTTPException(status_code=400, detail='codes 必须是任务码字符串数组')
+        codes = [c.strip() for c in raw_codes if c.strip()]
+    else:
+        raise HTTPException(status_code=400, detail='codes 必须是任务码字符串数组')
+    # 字符白名单与上限在这里就校验：非法任务码是**请求有错**（400），不该落到
+    # 409「状态冲突」——后者会让用户以为「等一会儿重试就好」。
+    try:
+        codes = taskrun.clean_codes(codes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     # 分组参数严格解析：字符串 "3" 静默落到默认分组会让用户在 B 组点任务、
     # 实际跑了 A 组的账号（且界面显示成功）——宁可报 400。
     raw_uid = body.get('upstream_id')
@@ -2030,6 +2061,7 @@ async def task_run_start(
     ok, msg = await taskrun.start_async(
         mode, target, auth_dir=auth_dir,
         group_name='' if group.get('is_default') else str(group.get('name') or ''),
+        codes=codes,
     )
     if not ok:
         # 前置拒绝（脚本缺失/已有任务在跑/参数不合法）用 409 表达「状态冲突」，

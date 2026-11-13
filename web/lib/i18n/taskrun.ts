@@ -196,6 +196,35 @@ const RULES: LineRule[] = [
   [/^\[task_runner\] (\S+) (\S+): mp 查询失败: (.*)$/, (m) =>
     tStatic('tasks.runLogMpQueryFailed', {uid: m[1], code: m[2], err: m[3]})],
 
+  // ── 小程序成长任务的上报 / 回读（2026-11 补 Tasks_6/7 时统一了行形状）────
+  // mp 上报带 `(mini growth)` 后缀以区别于桌面通道；`{i}/{need}` 是进度。
+  [runner('report (\\d+)/(\\d+) (\\d+) code=(\\S+) \\(mini growth\\)'), (m) =>
+    tStatic('tasks.runLogMpReport', {
+      uid: m[1], code: m[2], i: m[3], need: m[4], status: m[5], sc: m[6]})],
+  // 回读是判断「服务端到底记没记住」的唯一依据，两种口径（growth / mp）共用这一行。
+  [runner('query re-read (\\d+)/(\\d+) accept_status=(\\S+)'), (m) =>
+    tStatic('tasks.runLogQueryReread', {
+      uid: m[1], code: m[2], cur: m[3], target: m[4], ast: m[5]})],
+
+  // ── 专家体验类任务（判据同 Expert_lighthouse）────────────────────────
+  // 召唤三连 → 真实对话 → 带 has_expert 的六连 → expert_actual_use。
+  // `id` 是专家 id（数据，原样保留），`req` 是服务端返回的 requestId。
+  [runner('report summon (\\d+)/(\\d+) (\\d+) code=(\\S+) id=(\\S+)'), (m) =>
+    tStatic('tasks.runLogExpertSummon', {
+      uid: m[1], code: m[2], i: m[3], need: m[4], status: m[5], sc: m[6], id: m[7]})],
+  [runner('真实对话失败\\((.*)\\)，本轮跳过'), (m) =>
+    tStatic('tasks.runLogExpertChatFailed', {uid: m[1], code: m[2], err: m[3]})],
+  [runner('report (\\d+)/(\\d+) (\\d+) code=(\\S+) lighthouse req=(\\S+)'), (m) =>
+    tStatic('tasks.runLogExpertLighthouseReport', {
+      uid: m[1], code: m[2], i: m[3], need: m[4], status: m[5], sc: m[6], req: m[7]})],
+  [runner('report (\\d+)/(\\d+) (\\d+) code=(\\S+) expert req=(\\S+)'), (m) =>
+    tStatic('tasks.runLogExpertUseReport', {
+      uid: m[1], code: m[2], i: m[3], need: m[4], status: m[5], sc: m[6], req: m[7]})],
+  [runner('未登记的专家体验任务，skip'), (m) =>
+    tStatic('tasks.runLogExpertUnregistered', {uid: m[1], code: m[2]})],
+  [runner('专家市场校正失败\\((.*)\\)，用表内静态值'), (m) =>
+    tStatic('tasks.runLogExpertMarketFallback', {uid: m[1], code: m[2], err: m[3]})],
+
   // ── 后端子进程看护自己追加的行（server/services/taskrun.py）──────
   // 后端保持中文原文（\`test_taskrun.py\` 的卡死用例按「卡死」断言），
   // 翻译只发生在展示层。

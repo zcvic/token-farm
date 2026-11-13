@@ -1138,12 +1138,29 @@ export interface TaskRunSummaryItem {
   count: number;
 }
 
+/** 可勾选的任务（后端从上游脚本 MAPPING 解析，见 server/services/taskrun.catalog）。 */
+export interface TaskRunCatalogItem {
+  /** 上游任务码，如 `Sequential_Tasks_3` */
+  code: string;
+  /** 判据类型（`minichat` / `expertx` …），仅用于分组展示 */
+  kind: string;
+  /** 展示分组：desktop / mini / school / expert / manual / other */
+  group: string;
+  /** 兜底次数（服务端 progress.target 优先）；0 = 由服务端下发 */
+  target: number;
+  /** 不可伪造（真实业务副作用，如捐款）—— 列表里禁用勾选 */
+  unforgeable: boolean;
+  reason: string;
+}
+
 export interface TaskRunStatus {
   running: boolean;
   mode: string;
   target: string;
   /** 执行的分组名（issue #274）；空串 = 默认分组 */
   group?: string;
+  /** 本次筛选的任务码（空 = 全量）：界面用它回显「这一轮跑的是哪几项」 */
+  codes?: string[];
   started_at: number;
   finished_at: number;
   exit_code: number | null;

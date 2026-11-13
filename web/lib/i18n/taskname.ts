@@ -24,6 +24,10 @@ const NAME_KEY: Record<string, string> = {
   black_cat: 'tasks.taskName_blackCat',
   first_buddy: 'tasks.taskName_firstBuddy',
   RichMeow_Chat: 'tasks.taskName_richMeow',
+  // 上游映射表里是两条独立任务码（同一组五连事件同时满足两者）；早期这里写成
+  // 合并的 `Buddy_App/_QQ`，结果两个真实码都查不到名字、界面直接显示码。
+  Buddy_App: 'tasks.taskName_buddyApp',
+  Buddy_App_QQ: 'tasks.taskName_buddyApp',
   'Buddy_App/_QQ': 'tasks.taskName_buddyApp',
   Library_read: 'tasks.taskName_library',
   // 小程序 / 开学季
@@ -37,7 +41,15 @@ const NAME_KEY: Record<string, string> = {
   Sequential_Tasks_3: 'tasks.taskName_seq3',
   Sequential_Tasks_4: 'tasks.taskName_seq4',
   Sequential_Tasks_5: 'tasks.taskName_seq5',
+  Sequential_Tasks_6: 'tasks.taskName_seq6',
+  Sequential_Tasks_7: 'tasks.taskName_seq7',
   school_season: 'tasks.taskName_schoolSeason',
+  // 专家体验类活动任务（判据与 Expert_lighthouse 同源）
+  WorkBuddy_Valorant: 'tasks.taskName_valorant',
+  expert_use_maidehao: 'tasks.taskName_maidehao',
+  expert_use_douyinyin: 'tasks.taskName_douyinyin',
+  expert_use_shangjia_xuanchuan: 'tasks.taskName_shangjia',
+  expert_use_bowangwang: 'tasks.taskName_bowangwang',
 };
 
 /** 任务码 → 当前语言的名字；不认识返回原码。 */

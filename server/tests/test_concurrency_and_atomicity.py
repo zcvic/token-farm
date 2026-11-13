@@ -39,7 +39,7 @@ class TaskRunSingleFlightTest(unittest.TestCase):
     def test_two_concurrent_starts_launch_once(self) -> None:
         started: list[str] = []
 
-        async def fake_run(argv, mode, target, auth_dir='', group=''):  # noqa: ANN001, ANN202
+        async def fake_run(argv, mode, target, auth_dir='', group='', codes=None):  # noqa: ANN001, ANN202
             started.append(mode)
             try:
                 await asyncio.sleep(0.2)
@@ -59,7 +59,7 @@ class TaskRunSingleFlightTest(unittest.TestCase):
     def test_stop_waits_for_cleanup(self) -> None:
         cleaned: list[bool] = []
 
-        async def fake_run(argv, mode, target, auth_dir='', group=''):  # noqa: ANN001, ANN202
+        async def fake_run(argv, mode, target, auth_dir='', group='', codes=None):  # noqa: ANN001, ANN202
             try:
                 await asyncio.sleep(30)
             finally:
