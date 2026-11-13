@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/cst"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/upstream"
 )
@@ -49,13 +50,11 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// cstZone 上游每日重置按自然日 00:00 CST（Asia/Shanghai）。中国无夏令时，固定 +8 即可，
-// 不依赖容器 tzdata。
-var cstZone = time.FixedZone("CST", 8*60*60)
-
 // travelDay 返回 t 所属的上游自然日（CST），格式 2006-01-02。
+// 走 internal/cst 的唯一定义：宿主时区不是 UTC+8 时（NAS / 海外 VPS），
+// 直接用宿主时区算日键会让「今天」整体漂 8 小时。
 func travelDay(t time.Time) string {
-	return t.In(cstZone).Format("2006-01-02")
+	return cst.Day(t)
 }
 
 // RunTravelNow 立即对池内所有可用账号执行一趟旅行巡检（无 ctx 的外部入口：

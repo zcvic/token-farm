@@ -1,7 +1,59 @@
 # 已人工核对过的 workbuddy2api-panel 提交 —— 本次同步的来源。
 #
 # 同步的是「对本项目有益」的能力，不是整套 Go 实现：只移植协议无关的
-# 运维 / 观测能力（请求 ID、Prometheus、隐藏模型、通用 Webhook）。
+# 运维 / 观测 / 调度语义能力（请求 ID、Prometheus、隐藏模型、通用 Webhook、
+# 原子写盘、入站体上限、超时与关停、CST 日界、保活窗口）。
 # 记录方式：一次同步对应一个提交；后续再同步时追加新行并更新 docs。
+# 尚未同步、但已评估过的候选能力见 docs/upstream-sync-misakano.md（基线之后）
+# 与 docs/upstream-sync-baseline-gaps.md（基线之前一直没移植的）。
 # 仓库：https://github.com/misakano7545/workbuddy2api-panel
 49fad282fb0d6d2e8c483bcbc3940a0031dfcb19
+
+# ---- 2026-11 第一批（六项，全部落地；详见 docs/upstream-sync-baseline-gaps.md
+#      的「同步状态」表）。其中 b494426a / c6f953a7 晚于 49fad282（基线之后），
+#      另 7 个早于基线、属于「基线之前一直没移植」的缺口——所以前两个在
+#      misakano 那份的「基线之后」提交索引里，后七个不在。
+#      标了「部分同步」的只取了列出的那部分，不要当成整提交已合入。
+
+# 状态文件落盘掉电安全（safefile）→ internal/safefile + pool/auth 两处接入
+4356a346f8ff156ae987d6391b1f60a191ac4400
+# Go 侧入站请求体上限（部分同步：只取上限与排空；同提交里的 11140 连坐保护未取，
+# 见 docs/upstream-sync-misakano.md 的 M-P0-1）
+b494426abad8c45db08d5ae5b82e55eda6f311cd
+# 慢上传可见性（部分同步：只取 3 秒 WARN；同提交里的在途名额释放回归未取）
+c6f953a7b3c75046cd721598fa6493652b6b7a7c
+# 优雅关停窗口可配且超时不再静默（部分同步：只取 server 段与 Shutdown 错误处理；
+# 同提交里「启动期 Fatal 前落盘池状态」未取）
+1e7a693b0e35e4a6c6c25d2591bba75b91aee7f8
+# 入站读取上限可配（部分同步：只取读取超时；同提交里的 expiring_soon 文档改动未取）
+16f83d753690b50397ec3725619466e6227390d6
+# CST 日界与钟点统一（internal/cst，9 处迁移）
+025cc107ab85300d2aeef517899158cc22bf1111
+# schedule.keepalive_refresh_window（只保留「校验拒绝 <=0」一种口径，
+# 未照抄参考仓运行期把 0 当「不过滤」的历史遗留）
+764293b8bfe74c0d4f48332890046df08c7c6e0a
+# models.hidden 黑名单：列表过滤 + 点名 404（Go 侧）
+b7297e5c7e3d9114fbcd857342463602601c3646
+# models.hidden 生效面补全（部分同步：只取 hidden；同提交里的「静态 API Key
+# 账号接入」与 dns_servers 覆盖未取——API Key 账号会撞 auth.NeedsRefresh 的
+# ExpiresAt<=0 陷阱，要接的话必须同时改）
+5ce1a2f429bc4871d36384445ace661ae0008383
+
+# ---- 2026-11 第二批：上游 workbuddy-manager（Go 网关仓）
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      范围：80b4b21（v2.11.10）→ 8b5a4df4（v2.11.14），40 个非 merge 提交。
+#      这是另一套运行时（Go），与上面的 misakano 面板仓**不是同一来源**；
+#      只移植对本项目有益的部分，不整段合并。
+#      已取：
+#        · Go 网关补丁 0051–0056（sanitize tools/description、配置热重载、429
+#          最早重置、HTTP/2 transport、排队等待、模型冷却 reset_at 保留）；
+#        · 面板侧：余额公开接口与版本域、积分礼包口径、账号日志回填 tie-break、
+#          模型目录裁剪、Docker 更新守护（auths 持久化 / PID1 等待）、reload
+#          状态自愈、代理探测提示、多分组任务日志采集、reset_at 展示、按 uid
+#          复用凭据文件、重登目标锁定、调度归属（#375）与 reload 待处理保护
+#          （#419）、统计自定义日期范围与按账号/账号×模型聚合、成功请求趋势线、
+#          弹窗打开时隐藏 dock。
+#      未取：
+#        · Trace Tap（调用抓包）整段：新表、所有转发路径的采集点、/traces 页面
+#          与导航、tap 测试与文档；与本地定位不符，收益不足以覆盖维护面。
+8b5a4df412b86d29b92c4740d0c9adc1f6750b99

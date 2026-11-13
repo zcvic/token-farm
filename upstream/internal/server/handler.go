@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -39,9 +38,18 @@ type Config struct {
 	LargeRequestMode string
 	// CreditFloor 保底积分（issue #364）：低于该值的账号只作最后候选；0 = 关闭。
 	CreditFloor int64
-	Upstream    *upstream.Client
-	APIKey      string // 空 = 不鉴权
-	MaxRotate   int    // 单请求最多换号次数，默认 3
+	// MaxPayloadBytes 入站 chat 请求体上限（server.max_payload_bytes）。0 = 缺省 64 MiB。
+	// 只挂 chat 主链路；/v1/models、/status 的 body 都很小，不值得加。
+	MaxPayloadBytes int64
+	// HiddenModels 返回当前全局隐藏名单（config.json 的 models.hidden）。
+	// nil = 不隐藏（零配置行为与引入前逐字一致）。每次调用都读，实现方负责缓存。
+	//
+	// 用回调而不是 []string：名单会随面板保存变化，构造时快照一份会让「面板上藏掉
+	// 了但直连端口仍看得到」成为常态。
+	HiddenModels func() []string
+	Upstream     *upstream.Client
+	APIKey       string // 空 = 不鉴权
+	MaxRotate    int    // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -321,8 +329,16 @@ const (
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   filterHidden(h.modelList(), h.hiddenModels()),
 	})
+}
+
+// hiddenModels 当前隐藏名单；未接线时返回 nil（不隐藏）。
+func (h *Handler) hiddenModels() []string {
+	if h.cfg.HiddenModels == nil {
+		return nil
+	}
+	return h.cfg.HiddenModels()
 }
 
 // globalModels 国际版（global realm）模型名名单（PLAN §7.2 附录 21 名）——已删。
@@ -593,13 +609,16 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	// 请求体无大小上限（max_body_mb 已移除）：完整读入，超限类问题交由上游自然返回
-	// 错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断防御语义保留在
-	// 读错误路径——移除预拦截后，截断只可能来自客户端自己断流，读 body 出错就地 400，
-	// 不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+	// 入站请求体护栏（server.max_payload_bytes，缺省 64 MiB）：io.ReadAll 无界，
+	// 一次几百 MB 的 body 就能把进程读成 OOM。上限刻意远高于真实会话（长会话多图
+	// base64 实测在几 MB 量级），只当护栏不当内容策略；真正的请求体策略在上游。
+	// 超限时 readBody 先排空有限字节再回 413——直接 return 会让 net/http 关连接，
+	// 客户端只看得到 connection reset，看不到 413。
+	// 读体超过 3s 会打一条 WARN（方法/路径/字节数/耗时/Content-Length），不含 body。
+	// 读错误就地 400，不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
+	body, berr := h.readBody(w, r)
+	if berr != nil {
+		h.writeBodyError(w, berr)
 		return
 	}
 	// 调试开关：设置 WB2A_DUMP_REQ 即把上游侧收到的原始请求体落盘，供离线二分定位指纹命中行。
@@ -622,12 +641,33 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
 
+	// 全局隐藏名单第二道闸：点名调用直接拒绝。
+	//
+	// 只过滤 /v1/models 等于没藏——客户端存下 id 后照样能调。返回 404 而不是 403：
+	// 对调用方来说它与「模型不存在」没有区别，不额外暴露这是一条策略。
+	// 必须在选号之前拦：一旦进入轮转就会真的打到上游，藏了也没意义。
+	if modelHidden(peek.Model, h.hiddenModels()) {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error": map[string]any{
+				"message": "模型不存在: " + peek.Model,
+				"type":    "invalid_request_error",
+				"code":    "model_not_found",
+			},
+		})
+		return
+	}
+
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
 	defer st.done()
 
 	tried := map[string]bool{}
 	var lastErr error
+	// 多号同时限流时，整池恢复时刻是**最早**那个重置墙钟（issue #403）。记录
+	// 最早的一条 6004 原文，末端若整体仍以限流收场就用它，而不是最后轮到的号
+	// 的（会更晚，让客户端白等一整个周期）。
+	var earliestRateBody string
+	var earliestRateAt time.Time
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// 按模型解析：同一个会话可能换模型，绑定号若在当前模型上被 6004 限额（对其他模型
@@ -1066,6 +1106,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			if kind == upstream.ErrSoftRate {
+				if at, ok := upstream.ParseRateReset(string(respBody)); ok &&
+					(earliestRateAt.IsZero() || at.Before(earliestRateAt)) {
+					earliestRateAt = at
+					earliestRateBody = string(respBody)
+				}
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -1198,6 +1245,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrUpstreamQueue:
+			// 排队是全局队列，不是账号问题；仍返回 429 让客户端等待。
+			status = http.StatusTooManyRequests
+			code = "rate_limit_exceeded"
+			msg = "upstream model is queueing: peak-hour wait list, please retry later"
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：空 body 时给出明确可读文案——
@@ -1210,6 +1262,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
 			msg = s
+		}
+		// 限流收场：用**最早**恢复的那个号的上游原文（issue #403）。「更晚」的
+		// 那条会让客户端按错误的时间等待，而池子在更早就已能服务。
+		if ue.Kind == upstream.ErrSoftRate && strings.TrimSpace(earliestRateBody) != "" {
+			msg = strings.TrimSpace(earliestRateBody)
+			hint = h.hintOf(ue.Kind, earliestRateBody, bareModel, reqHasImage, ue)
 		}
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
@@ -1352,6 +1410,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
+	case upstream.ErrUpstreamQueue:
+		// 排队是全局队列，与账号无关：不冷却、不计数、不禁用。本次请求仍由调用方
+		// 继续轮转（MaxRotate 兜住总次数），最终映射为 429 让客户端等待。
 	case upstream.ErrAuthRejected:
 		// 纯 401（无 12153、无业务信封）：凭证被上游拒绝，但单次可能是网关抖动
 		// 或 token 轮换竞态 —— 不直接 Disable（chat 路径误判一次就是永久杀号），

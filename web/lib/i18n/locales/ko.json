@@ -287,6 +287,15 @@
     "creditsExpiryDaily": "가장 가까운 만료일({time})에 {amount} 포인트 만료"
   },
   "stats": {
+    "customRange": "사용자 지정",
+    "startDate": "시작일",
+    "endDate": "종료일",
+    "byAccount": "계정별",
+    "byAccountModel": "계정 × 모델",
+    "successRequests": "성공 요청",
+    "account": "계정",
+    "model": "모델",
+    "date": "날짜",
     "costTitle": "DeepSeek 공식가 기준 추정",
     "costPriceLink": "가격 및 설명 →",
     "costToday": "오늘",
@@ -1236,7 +1245,15 @@
     "stateSkipped": "건너뜀",
     "stateFailed": "실패",
     "viewByTask": "작업별",
-    "viewRaw": "원문"
+    "viewRaw": "원문",
+    "keepaliveHint": "업스트림 스케줄러도 “자동 연결 유지” 시각에 토큰을 갱신합니다(기본 매일 22:00). 중지하려면 설정 → 업스트림 → 예약 작업에서 “자동 연결 유지”를 끄거나 시각을 바꾸세요. 너무 잦은 갱신은 HTTP 429를 유발할 수 있습니다.",
+    "schedulerConflictDesc": "업스트림 스케줄러와 패널 계획 모두 {tasks}을(를) 켜 두었습니다. 둘 다 실행되며(멱등이지만 불필요), 하나만 남기세요.",
+    "schedulerConflictTitle": "두 스케줄러가 동시에 실행 중입니다",
+    "schedulerKeepPanel": "패널만 유지",
+    "schedulerKeepUpstream": "업스트림만 유지",
+    "schedulerKeptPanel": "중복 작업을 패널 계획으로 통일했습니다(업스트림 체크인/활동 꺼짐)",
+    "schedulerKeptUpstream": "중복 작업을 업스트림 스케줄러로 통일했습니다(패널 체크인/보상 꺼짐)",
+    "schedulerReloadPending": "업스트림 재로드 대기 중"
   },
   "addAccount": {
     "title": "Tencent 계정 추가 · {realm}",
@@ -1259,6 +1276,12 @@
     "shareText": "이 링크를 열어 인증하세요(브라우저 로그인 또는 스캔). 이후 자동으로 출석 체크되고 계정 풀에 등록됩니다",
     "retry": "다시 받기",
     "stateLost": "인증이 무효가 되었습니다(대기 중 서버가 재시작됨). 다시 받아주세요",
+    "reloginTitle": "다시 로그인: {name}",
+    "reloginDesc": "이번 로그인은 해당 계정의 자격 증명({realm})만 갱신합니다. 다른 계정을 스캔해도 기록되지 않습니다.",
+    "reloginPanelDisabled": "이 계정은 패널에서 일시 중지되어 있습니다. 다시 로그인해도 자격 증명만 갱신되고 활성화되지는 않습니다.",
+    "accountMismatch": "스캔한 계정은 “{got}”이며 다시 로그인할 “{want}”가 아닙니다. 아무것도 기록하지 않았으니 대상 계정으로 다시 스캔하세요.",
+    "reviveStillDisabled": "자격 증명은 갱신되었지만 업스트림은 여전히 이 계정을 비활성으로 표시합니다: {reason}",
+    "revivePending": "자격 증명은 갱신되었습니다. 업스트림이 아직 계정 복귀를 확인하지 못해 백그라운드에서 비활성 해제를 계속합니다. 곧 자동으로 새로 고칩니다.",
     "realmMismatch": "이 QR 코드는 다른 에디션(국내 / 글로벌)의 것입니다. 다시 받아주세요"
   },
   "region": {

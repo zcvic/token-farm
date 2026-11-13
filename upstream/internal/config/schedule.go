@@ -6,7 +6,11 @@
 // 两个命令共用同一份定义，消除漂移源头。
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // Schedule 排程配置段（对应 config.json 的 "schedule" 对象）。
 //
@@ -43,6 +47,13 @@ type Schedule struct {
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
+	// KeepaliveRefreshWindow 周期保活只刷新「剩余有效期 <= 该窗口」的凭证（如 "168h"）。
+	//
+	// 空 = 默认 168h（7 天）；非法或 <= 0 **fail fast**——一个写错的值（例如 "168"，
+	// 少写单位）会让保活全量刷新或全不刷新，两种都是静默错误。要「不过滤」请显式
+	// 配一个很大的值（如 "876000h"），不要用 0 表意：0 在运行期被解释为「不过滤」，
+	// 在配置校验里却要求 > 0，两处口径不一致正是参考仓的历史遗留，本地不复制。
+	KeepaliveRefreshWindow string `json:"keepalive_refresh_window"`
 	// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
 	// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 }
@@ -67,6 +78,9 @@ func DefaultSchedule() Schedule {
 		SchoolEnabled:       true,
 		CatEnabled:          true,
 		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		// 默认 7 天：官方活动奖励积分多在两周内过期，token 有效期通常更短，
+		// 7 天窗口既能覆盖临期凭证，又不会每天全量轮换。
+		KeepaliveRefreshWindow: "168h",
 	}
 }
 
@@ -107,6 +121,20 @@ func (s *Schedule) Normalize() error {
 	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
+	}
+	// keepalive_refresh_window：空回落默认 168h；非法或 <= 0 fail fast。
+	// 不用 0 表意「不过滤」——那会让「少写单位」（"168" 之类）静默变成全量刷新，
+	// 而全量刷新每天都轮换一遍 refresh token，是无谓风险。要不过滤请配大值。
+	if strings.TrimSpace(s.KeepaliveRefreshWindow) == "" {
+		s.KeepaliveRefreshWindow = "168h"
+	}
+	d, err := time.ParseDuration(s.KeepaliveRefreshWindow)
+	if err != nil {
+		return fmt.Errorf("schedule.keepalive_refresh_window: %w", err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("schedule.keepalive_refresh_window: 必须是正时长（got %q）；要不过滤请配大值而不是 0",
+			s.KeepaliveRefreshWindow)
 	}
 	return s.validateHours()
 }

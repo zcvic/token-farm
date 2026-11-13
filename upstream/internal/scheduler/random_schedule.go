@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math/rand"
 	"time"
+
+	"workbuddy2api/internal/cst"
 )
 
 type scheduledAccountKey struct{}
@@ -36,8 +38,11 @@ func (s *Scheduler) accountScriptArgs(ctx context.Context, args []string) []stri
 // scheduledSlot derives a daily random offset from a stable private seed. The
 // same slot keeps its time after a restart, while each date, hour, task kind and
 // deployment gets its own draw. There is no mutable random state to lose.
+//
+// 钟点按 CST 解释（cst.At），不跟随 day.Location()：排程小时是上游自然日的小时，
+// 宿主时区一换，同一份配置就落到不同时刻。
 func (s *Scheduler) scheduledSlot(day time.Time, hour int, kind taskKind) time.Time {
-	at := time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, day.Location())
+	at := cst.At(day, hour, 0, 0)
 	minutes := s.cfg.RandomDelayMinutes
 	if minutes <= 0 {
 		return at
@@ -63,7 +68,8 @@ func (s *Scheduler) nextScheduledFire(now time.Time, sch schedule) time.Time {
 		return nextFire(now, sch.hours)
 	}
 	var earliest time.Time
-	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	// 日起点按 CST：否则「今天」的边界随宿主时区漂，跨日的两个槽位会被算到同一天。
+	day := cst.At(now, 0, 0, 0)
 	for i := 0; i < 2; i++ {
 		for _, hour := range sch.hours {
 			at := s.scheduledSlot(day.AddDate(0, 0, i), hour, sch.kind)

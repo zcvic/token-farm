@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle, Server} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle, Server, CalendarDays, UserRound} from 'lucide-react';
 import {
   Area,
   Bar,
@@ -16,8 +16,10 @@ import {
 } from 'recharts';
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {useAsyncAll} from '@/lib/use-async-data';
-import {statsApi, errText} from '@/lib/api';
+import {statsApi, errText, type StatsRange} from '@/lib/api';
 import type {
+  AccountModelUsageRow,
+  AccountUsageRow,
   StatsSummary,
   UpstreamStats,
   UsageBreakdown,
@@ -43,6 +45,7 @@ import {useAuth} from '@/lib/auth-context';
 import {useRealm} from '@/lib/realm-context';
 import {usePlatform} from '@/lib/platform-context';
 import {Button} from '@/components/ui/button';
+import {Input} from '@/components/ui/input';
 import {
   Select,
   SelectContent,
@@ -133,7 +136,19 @@ export default function StatsPage() {
    * 与选择器天然同一口径，不需要各自翻译一遍。
    */
   const [days, setDays] = useState('1');
-  const d = Number(days) || 1;
+  /** 自定义日期（issue #257）：两端都含；只有选「自定义」且两格都填了才生效。 */
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
+  const isCustom = days === 'custom';
+  const range: StatsRange | undefined =
+    isCustom && customStart && customEnd ? {start: customStart, end: customEnd} : undefined;
+  const spanDays = (() => {
+    if (!isCustom || !customStart || !customEnd) return Number(days) || 1;
+    const a = Date.parse(customStart), b = Date.parse(customEnd);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return 30;
+    return Math.min(3650, Math.max(1, Math.round(Math.abs(b - a) / 86400000) + 1));
+  })();
+  const d = spanDays;
 
   /**
    * 本页四份统计。
@@ -152,15 +167,20 @@ export default function StatsPage() {
   } = useAsyncAll(
     {
       summary: () => statsApi.summary(statsRealm, platform),
-      daily: () => statsApi.daily(d, statsRealm, platform),
-      // 「今日」的图按小时画（见 lib/usage-chart.ts 的说明）：只有这个范围需要
-      // 小时数据，其它范围直接给空数组，省一次请求。
-      hourly: () => (days === '1' ? statsApi.hourly(undefined, statsRealm, platform)
-                                  : Promise.resolve([] as UsageHourPoint[])),
-      byModel: () => statsApi.byModel(d, statsRealm, platform),
-      byKey: () => statsApi.byKey(d, statsRealm, platform),
+      daily: () => statsApi.daily(d, statsRealm, platform, range),
+      // 「今日」的图按小时画（见 lib/usage-chart.ts 的说明）：只有单日范围需要
+      // 小时数据，其它范围直接给空数组，省一次请求。自定义范围也可能只有一天，
+      // 这时必须把那一天传给后端，否则图会拿今天的桶去配旧的按天数据。
+      hourly: () => (d === 1
+        ? statsApi.hourly(isCustom ? customStart || undefined : undefined,
+                          statsRealm, platform)
+        : Promise.resolve([] as UsageHourPoint[])),
+      byModel: () => statsApi.byModel(d, statsRealm, platform, range),
+      byKey: () => statsApi.byKey(d, statsRealm, platform, range),
+      byAccount: () => statsApi.byAccount(d, statsRealm, platform, range),
+      byAccountModel: () => statsApi.byAccountModel(d, statsRealm, platform, range),
     },
-    [statsRealm, platform, days],
+    [statsRealm, platform, days, customStart, customEnd],
   );
 
   /**
@@ -199,6 +219,8 @@ export default function StatsPage() {
   const daily: UsagePoint[] = values.daily ?? EMPTY_POINTS;
   const byModel: UsageBreakdown[] = values.byModel ?? EMPTY_BREAKDOWN;
   const byKey: UsageBreakdown[] = values.byKey ?? EMPTY_BREAKDOWN;
+  const byAccount: AccountUsageRow[] = values.byAccount?.items ?? [];
+  const byAccountModel: AccountModelUsageRow[] = values.byAccountModel?.items ?? [];
   const upstream: UpstreamStats | null = upstreamValues.upstream ?? null;
 
   const failedCount = Object.keys(errors).length;
@@ -219,9 +241,14 @@ export default function StatsPage() {
    *  · 今日 → 24 个小时桶（后端已补零；这里只做标签与「当前小时」标记）；
    *  · 多日 → 按天并补齐到窗口长度（缺的那天不再是「凭空消失」而是画成 0）。
    */
+  // 自定义区间的锚点是**用户选的止日**，不是今天：按今天兜底会把整段历史
+  // 数据丢出窗口（dailySeries 只保留窗口内的点），图上变成一片空。
+  const chartEnd = isCustom && customEnd ? customEnd : todayKeyLocal();
+  // 历史日期不标「现在这一小时」；只有看今天时才给 isNow 标记。
+  const nowHour = chartEnd === todayKeyLocal() ? new Date().getHours() : -1;
   const chartData: ChartPoint[] = spec.granularity === 'hour'
-    ? hourlySeries(hourly, new Date().getHours())
-    : dailySeries(daily, d, todayKeyLocal());
+    ? hourlySeries(hourly, nowHour)
+    : dailySeries(daily, d, chartEnd);
 
   /** 今日失败总数（4xx + 5xx）。单独来自请求日志——用量汇总只含成功请求。 */
   const todayFailed =
@@ -247,8 +274,23 @@ export default function StatsPage() {
               <SelectItem value="7">{t('stats.last7')}</SelectItem>
               <SelectItem value="30">{t('stats.last30')}</SelectItem>
               <SelectItem value="90">{t('stats.last90')}</SelectItem>
+              <SelectItem value="custom">{t('stats.customRange')}</SelectItem>
             </SelectContent>
           </Select>
+          {isCustom && (
+            <div className="flex items-center gap-1.5">
+              <CalendarDays className="h-3.5 w-3.5 text-muted-foreground" />
+              <Input type="date" value={customStart} max={customEnd || undefined}
+                     aria-label={t('stats.startDate')}
+                     onChange={(e) => setCustomStart(e.target.value)}
+                     className="h-8 w-[140px] rounded-full text-xs" />
+              <span className="text-xs text-muted-foreground">–</span>
+              <Input type="date" value={customEnd} min={customStart || undefined}
+                     aria-label={t('stats.endDate')}
+                     onChange={(e) => setCustomEnd(e.target.value)}
+                     className="h-8 w-[140px] rounded-full text-xs" />
+            </div>
+          )}
           {isAdmin && (
             <ConfirmDialog
               title={t('stats.repairTitle')}
@@ -490,7 +532,12 @@ export default function StatsPage() {
                   /* 24 个小时（或 90 天）标签全画出来会糊成一片，按 spec 抽稀。 */
                   interval={Math.max(0, spec.tickEvery - 1)}
                 />
-                <YAxis tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" tickFormatter={(v) => fmtCompact(Number(v))} />
+                <YAxis yAxisId="tok" tickLine={false} axisLine={false} fontSize={11}
+                       stroke="var(--muted-foreground)" tickFormatter={(v) => fmtCompact(Number(v))} />
+                {/* 成功 / 失败是「次数」，与 token 差好几个数量级；放右轴才看得见。 */}
+                <YAxis yAxisId="cnt" orientation="right" tickLine={false} axisLine={false}
+                       fontSize={11} stroke="var(--muted-foreground)" allowDecimals={false}
+                       width={40} />
                 <Tooltip
                   cursor={{fill: 'var(--accent)'}}
                   contentStyle={{
@@ -505,11 +552,15 @@ export default function StatsPage() {
                     if (label === 'failed') {
                       return [fmtNumber(Number(value)), t('dashboard.failedRequests')];
                     }
+                    if (label === 'success') {
+                      return [fmtNumber(Number(value)), t('stats.successRequests')];
+                    }
                     return [fmtNumber(Number(value)), t('metric.requests')];
                   }}
                 />
                 {spec.shape === 'bar' ? (
                   <Bar
+                    yAxisId="tok"
                     dataKey="tokens"
                     name="tokens"
                     fill="var(--chart-1)"
@@ -530,6 +581,7 @@ export default function StatsPage() {
                   /* 30 / 90 天用面积：柱子细得看不清起伏，而面积图的形状对
                      「总量趋势」更直观（尖峰一眼可见）。 */
                   <Area
+                    yAxisId="tok"
                     type="monotone"
                     dataKey="tokens"
                     name="tokens"
@@ -539,10 +591,22 @@ export default function StatsPage() {
                     strokeWidth={2}
                   />
                 )}
+                {/* 成功数（issue #369 第 3 点）：与失败同一根右轴，量级可比；
+                    左轴 token 不会被次数压扁。 */}
+                <Line
+                  yAxisId="cnt"
+                  type="monotone"
+                  dataKey="success"
+                  name="success"
+                  stroke="var(--chart-2)"
+                  strokeWidth={1.5}
+                  dot={false}
+                />
                 {/* 失败数用一条线叠在同一张图上：它与 token 柱不同量级，做成柱子
                     会把柱形压扁。线只作「那天出过事」的信号，具体数值看悬停。
                     没有失败时贴着 0，不干扰读数。 */}
                 <Line
+                  yAxisId="cnt"
                   type="monotone"
                   dataKey="failed"
                   name="failed"
@@ -563,6 +627,10 @@ export default function StatsPage() {
         <BreakdownPanel title={t('stats.byModel')} icon={Cpu} items={byModel} throughput showCost={isWorkbuddy} />
         <BreakdownPanel title={t('stats.byKey')} icon={KeyRound} items={byKey} showCost={isWorkbuddy} />
       </section>
+
+      {/* 按「日期 × 账号」聚合（issue #402）：看每个号每天用了多少、扣了多少积分。 */}
+      <AccountUsagePanel items={byAccount} showCost={isWorkbuddy} />
+      <AccountModelUsagePanel items={byAccountModel} showCost={isWorkbuddy} />
 
       {/* 上游自己那份统计（issue #59）。**单独一段、口径写明**：它含直连上游的
           调用、且自上游进程启动累计，与上面的时段选择器无关——混着看会得出
@@ -631,6 +699,106 @@ export default function StatsPage() {
       </section>
       )}
     </div>
+  );
+}
+
+/** 按「账号 × 模型」的用量表（issue #369 第 2 点）。 */
+function AccountModelUsagePanel({items, showCost}: {items: AccountModelUsageRow[]; showCost: boolean}) {
+  const t = useT();
+  return (
+    <section className="rounded-[20px] bg-muted p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+        <Cpu className="h-4 w-4" />
+        {t('stats.byAccountModel')}
+      </div>
+      {items.length ? (
+        <div className="max-h-[420px] overflow-auto">
+          <Table>
+            <TableHeader>
+              <TableRow className="border-b border-border/60 hover:bg-transparent">
+                <TableHead className="text-[11px] text-muted-foreground">{t('stats.account')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('stats.model')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
+                {showCost && (
+                  <TableHead className="text-[11px] text-muted-foreground">{t('stats.colCost')}</TableHead>
+                )}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {items.map((row, i) => (
+                <TableRow key={`${row.account}-${row.model}-${i}`} className="border-b border-border/40">
+                  <TableCell className="max-w-[220px] truncate text-xs" title={row.account}>
+                    {row.nickname || row.uid8 || row.account}
+                  </TableCell>
+                  <TableCell className="max-w-[240px] truncate text-xs font-mono" title={row.model}>
+                    {row.model}
+                  </TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtNumber(row.requests)}</TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtCompact(row.tokens)}</TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtCredit(row.credit)}</TableCell>
+                  {showCost && (
+                    <TableCell className="text-xs tabular-nums">{fmtMoney(row.cost)}</TableCell>
+                  )}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <div className="text-xs text-muted-foreground">{t('stats.noUsageData')}</div>
+      )}
+    </section>
+  );
+}
+
+/** 按「日期 × 账号」的用量表（issue #402）。 */
+function AccountUsagePanel({items, showCost}: {items: AccountUsageRow[]; showCost: boolean}) {
+  const t = useT();
+  return (
+    <section className="rounded-[20px] bg-muted p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+        <UserRound className="h-4 w-4" />
+        {t('stats.byAccount')}
+      </div>
+      {items.length ? (
+        <div className="max-h-[420px] overflow-auto">
+          <Table>
+            <TableHeader>
+              <TableRow className="border-b border-border/60 hover:bg-transparent">
+                <TableHead className="text-[11px] text-muted-foreground">{t('stats.date')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('stats.account')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
+                {showCost && (
+                  <TableHead className="text-[11px] text-muted-foreground">{t('stats.colCost')}</TableHead>
+                )}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {items.map((row, i) => (
+                <TableRow key={`${row.day}-${row.account}-${i}`} className="border-b border-border/40">
+                  <TableCell className="whitespace-nowrap text-xs tabular-nums">{row.day}</TableCell>
+                  <TableCell className="max-w-[240px] truncate text-xs" title={row.account}>
+                    {row.nickname || row.uid8 || row.account}
+                  </TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtNumber(row.requests)}</TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtCompact(row.tokens)}</TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtCredit(row.credit)}</TableCell>
+                  {showCost && (
+                    <TableCell className="text-xs tabular-nums">{fmtMoney(row.cost)}</TableCell>
+                  )}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <div className="text-xs text-muted-foreground">{t('stats.noUsageData')}</div>
+      )}
+    </section>
   );
 }
 

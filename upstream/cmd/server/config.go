@@ -38,7 +38,25 @@ type Config struct {
 	// WB2A_REASONING_AS_CONTENT=0。指针类型用于区分「没写」与「显式 false」。
 	ReasoningAsContent *bool `json:"reasoning_as_content"`
 
-	Server struct{} `json:"server"` // 已退役段：max_body_mb 移除后无字段；旧配置该段下任意键因 JSON 未知字段而自然忽略
+	// Server 入站服务端参数（此前是已退役的空段：max_body_mb 移除后无字段）。
+	//
+	// 三个键的共同点：都是「本进程与客户端/编排系统之间」的边界，不是上游策略，
+	// 因此都不该写死在代码里——不同部署（反代链、容器编排、Windows 原生）合理值不同。
+	Server struct {
+		// MaxPayloadBytes chat 入站请求体上限（字节）。默认 64 MiB，允许 8–512 MiB。
+		// 越界 fail fast 而不是静默钳：一个被悄悄改小的上限会在长会话上误杀正常请求，
+		// 且现象是「偶发 413」，极难归因。
+		//
+		// 与 Python 侧 WB_GATEWAY_MAX_BODY_MB（默认 32 MB）不要强行统一：Go 侧是最后
+		// 一道护栏，宜宽不宜窄；两边同时收紧会让长会话先撞 Python 再撞 Go。
+		MaxPayloadBytes int64 `json:"max_payload_bytes"`
+		// ReadTimeout 入站请求读 body 的总时长上限（如 "300s"）。空 = 默认 300s；
+		// 显式 "0" = 不限（慢连接可以长期占一个 goroutine，只在完全可信的内网用）。
+		ReadTimeout string `json:"read_timeout"`
+		// ShutdownTimeout 收到 SIGTERM / 更新重启时等在途请求排干的窗口（如 "30s"）。
+		// 空 = 默认 30s；显式 "0" = 不等待，直接 Close（在途 SSE 会被立刻掐断）。
+		ShutdownTimeout string `json:"shutdown_timeout"`
+	} `json:"server"`
 
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
@@ -62,6 +80,18 @@ type Config struct {
 	Admin struct {
 		Enabled bool `json:"enabled"` // 默认 false
 	} `json:"admin"`
+
+	// Models 模型策略段。
+	Models struct {
+		// Hidden 全局隐藏名单：裸名 = 两个域都藏，`cn:` / `global:` 前缀只藏对应域。
+		//
+		// 两份闸都要：列表过滤 + 点名调用直接拒绝。只藏列表等于没藏——客户端存下
+		// id 后照样能调。
+		//
+		// 这份配置是 Python 面板「模型可见性」设置的**单向镜像**：面板把名单写进
+		// config.json 的 models.hidden，Go 只读不写。两者不能各存一份——那必然漂移。
+		Hidden []string `json:"hidden"`
+	} `json:"models"`
 
 	Global struct {
 		// Enabled global realm 路由开关。缺省 true：Realm() 正常把 realm=global/
@@ -116,6 +146,9 @@ type Config struct {
 		// 缺省 true：服务器出口带宽窄时（实测 1Mbps）3MB 上下文可省 20s+ 首字节；
 		// 小于阈值（64KB）的请求不压缩，短对话零开销。排障可显式配 false。
 		GzipBody bool `json:"gzip_body"`
+		// HTTP2 出站启用 HTTP/2（issue #392）。默认 false：现行 HTTP/1.1 路径经过
+		// 长流/代理/WAF 验证；开启前请确认 SSE 长流与线路代理在目标网络可用。
+		HTTP2 bool `json:"http2"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -202,8 +235,14 @@ type Config struct {
 	LargeRequestCooldownDur time.Duration `json:"-"`
 	SessionGCInterval       time.Duration `json:"-"`
 	ExpiringSoonDur         time.Duration `json:"-"`
+	// KeepaliveRefreshWindowDur 解析后的 schedule.keepalive_refresh_window（config.Normalize 已校验 > 0）。
+	KeepaliveRefreshWindowDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// Server 段解析后的时长（0 是合法值：ReadTimeout=不限 / ShutdownTimeout=立即退出，
+	// 所以用指针以外的额外布尔区分「显式 0」与「没写」，见 normalize）。
+	ReadTimeoutDur     time.Duration `json:"-"`
+	ShutdownTimeoutDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -256,6 +295,14 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// server 段默认值：64 MiB / 300s / 30s。
+	// ReadTimeout 从旧硬编码的 60s 放宽到 300s——反代链上传大 body 超过 60 秒会被
+	// 掐成 "read body: i/o timeout"，客户端看到的是「请求没到」而不是「上传太慢」。
+	// ShutdownTimeout 从旧硬编码的 5s 放宽到 30s——5 秒必然掐断在途 SSE，长流式
+	// 响应合法时长可达分钟级，容器每次重启都会留下「内容正常但连接被重置」。
+	c.Server.MaxPayloadBytes = 64 << 20
+	c.Server.ReadTimeout = "300s"
+	c.Server.ShutdownTimeout = "30s"
 	return c
 }
 
@@ -351,6 +398,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_GZIP_BODY"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.GzipBody = b
+		}
+	}
+	if v := os.Getenv("WB2A_HTTP2"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.HTTP2 = b
 		}
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
@@ -533,6 +585,9 @@ func (c *Config) normalize() error {
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}
+	if err := c.normalizeServer(); err != nil {
+		return err
+	}
 	// fail-fast（设计 supplement §4.1）：admin.enabled=true 且 api_key 为空 = 未鉴权的
 	// mutation 端点（disable/revive 是可用性操作，风险高于 /status 读泄漏），拒绝启动。
 	// 校验放 applyEnv 之后：env 覆盖（WB2A_ADMIN_ENABLED / WB2A_API_KEY）与 config
@@ -545,11 +600,62 @@ func (c *Config) normalize() error {
 	if err := c.Schedule.Normalize(); err != nil {
 		return err
 	}
+	// 保活窗口：Normalize 已校验并归一为 > 0，这里只做解析。
+	// 不复制参考仓「运行期 0 = 不过滤 / 配置校验拒绝 0」的两套口径——两处各说一套
+	// 正是它的历史遗留，本地只保留「校验拒绝」这一种，要不过滤请配大值。
+	if c.KeepaliveRefreshWindowDur, err = time.ParseDuration(c.Schedule.KeepaliveRefreshWindow); err != nil {
+		return fmt.Errorf("schedule.keepalive_refresh_window: %w", err)
+	}
 	return c.normalizePrompt()
 }
 
-// normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。
+// normalizeServer 校验并解析 server 段。
 //
+// 三条边界各自 fail fast，不做静默钳制：
+//   - max_payload_bytes 允许 8–512 MiB。写错一个数量级（例如把 MiB 当字节填 64）
+//     会让所有长会话 413，而现象是「偶发拒绝」，极难归因；
+//   - read_timeout / shutdown_timeout 是时长字符串，显式 "0" 是合法值（不限 / 立即
+//     退出），空串才回落默认。两者的区别必须保留——把 "0" 当空处理会让「不限」
+//     变成 300s，语义反转且没人会发现。
+func (c *Config) normalizeServer() error {
+	const (
+		minPayload = 8 << 20
+		maxPayload = 512 << 20
+	)
+	if v := c.Server.MaxPayloadBytes; v != 0 {
+		if v < minPayload || v > maxPayload {
+			return fmt.Errorf("server.max_payload_bytes: %d 超出允许范围 %d–%d（字节）",
+				v, minPayload, maxPayload)
+		}
+	} else {
+		c.Server.MaxPayloadBytes = 64 << 20
+	}
+	var err error
+	if c.ReadTimeoutDur, err = parseServerDur("server.read_timeout", c.Server.ReadTimeout, 300*time.Second); err != nil {
+		return err
+	}
+	if c.ShutdownTimeoutDur, err = parseServerDur("server.shutdown_timeout", c.Server.ShutdownTimeout, 30*time.Second); err != nil {
+		return err
+	}
+	return nil
+}
+
+// parseServerDur 解析 server 段的时长键：空串回落 def，显式 "0" 保留为 0。
+func parseServerDur(key, raw string, def time.Duration) (time.Duration, error) {
+	if strings.TrimSpace(raw) == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s: 不能为负（%q），不限/立即退出请显式写 \"0\"", key, raw)
+	}
+	return d, nil
+}
+
+// normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。
 // mode 非法（非 custom/append/passthrough）启动报错，避免静默回落到某一分支；
 // custom/append 模式下 file 非空但不可读 → 报错（fail fast），file 空 → 用内置默认
 // （两模式共用同一加载路径，PromptText 均非空）。

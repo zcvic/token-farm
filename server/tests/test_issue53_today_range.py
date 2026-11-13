@@ -60,14 +60,19 @@ class TodayOptionTest(unittest.TestCase):
         # 并一并带上当前平台（顶部下拉切换后统计口径跟着变）。
         # 版本走 `statsRealm`：平台模式下它归一成 undefined（平台流量只落在 cn，
         # 带着「国际版」会把该平台的用量全过滤掉，见 test_dashboard_platform_scope）。
-        for call in ('statsApi.daily(d, statsRealm, platform)',
-                     'statsApi.byModel(d, statsRealm, platform)',
-                     'statsApi.byKey(d, statsRealm, platform)'):
+        for call in ('statsApi.daily(d, statsRealm, platform, range)',
+                     'statsApi.byModel(d, statsRealm, platform, range)',
+                     'statsApi.byKey(d, statsRealm, platform, range)'):
             self.assertIn(call, self.src, f'{call} 没有跟随时段')
 
     def test_fallback_matches_default(self) -> None:
-        """`Number(days) || X` 的兜底值要与默认值一致，否则非法值时口径会跳变。"""
-        m = re.search(r'const d = Number\(days\) \|\| (\d+);', self.src)
+        """`Number(days) || X` 的兜底值要与默认值一致，否则非法值时口径会跳变。
+
+        自定义日期（issue #257）把 `d` 改成从 `spanDays` 派生；非自定义时仍走
+        `Number(days) || 1`，兜底值必须还是「今日」。
+        """
+        self.assertIn('const d = spanDays;', self.src)
+        m = re.search(r'return Number\(days\) \|\| (\d+);', self.src)
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1), '1')
 

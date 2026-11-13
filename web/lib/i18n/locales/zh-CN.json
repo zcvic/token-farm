@@ -287,6 +287,15 @@
     "creditsExpiryDaily": "最近一天（{time}）共 {amount} 积分到期"
   },
   "stats": {
+    "customRange": "自定义",
+    "startDate": "开始日期",
+    "endDate": "结束日期",
+    "byAccount": "按账号",
+    "byAccountModel": "账号 × 模型",
+    "successRequests": "成功请求",
+    "account": "账号",
+    "model": "模型",
+    "date": "日期",
     "costTitle": "按 DeepSeek 官方价估算",
     "costPriceLink": "价目与说明 →",
     "costToday": "今日",
@@ -1236,7 +1245,15 @@
     "stateSkipped": "跳过",
     "stateFailed": "失败",
     "viewByTask": "按任务",
-    "viewRaw": "原文"
+    "viewRaw": "原文",
+    "keepaliveHint": "上游调度器还会在「保活时刻」刷新令牌（默认每天 22:00）。不想让它刷新，可在 设置 → 上游 → 定时任务 关闭「自动保活」或改时刻；刷新过于频繁容易触发 429。",
+    "schedulerConflictDesc": "上游调度器和面板计划同时开启了 {tasks}。两套都会执行（幂等，但没必要），建议只保留一套。",
+    "schedulerConflictTitle": "两套调度都在跑",
+    "schedulerKeepPanel": "只保留面板",
+    "schedulerKeepUpstream": "只保留上游",
+    "schedulerKeptPanel": "已改为面板计划（上游的签到/活跃上报已关闭）",
+    "schedulerKeptUpstream": "已改为上游调度（面板的签到/领取补偿已关闭）",
+    "schedulerReloadPending": "上游重载未完成"
   },
   "addAccount": {
     "title": "添加腾讯账号 · {realm}",
@@ -1259,6 +1276,12 @@
     "shareText": "打开这个链接完成授权（浏览器里登录即可，也可扫码），之后会自动签到并纳入账号池",
     "retry": "重新获取",
     "stateLost": "授权已失效（服务端在等待期间重启过），请重新获取",
+    "reloginTitle": "重登账号「{name}」",
+    "reloginDesc": "这次登录只刷新该账号的凭证（{realm}）；扫到其他账号不会写入。",
+    "reloginPanelDisabled": "该账号在本面板被「临时停用」：重登只刷新凭证，不会自动启用它。",
+    "accountMismatch": "扫到的是「{got}」，不是要重登的「{want}」；本次没有写入任何账号，请用目标账号重新扫码。",
+    "reviveStillDisabled": "凭证已更新，但上游仍标着「已停用」：{reason}",
+    "revivePending": "凭证已更新；上游还没确认该账号入池，已在后台继续解除停用，稍后会自动刷新。",
     "realmMismatch": "这个二维码是另一个版本（国内 / 国际）的，请重新获取"
   },
   "region": {

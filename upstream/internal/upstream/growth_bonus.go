@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/cst"
 )
 
 // 补签/礼包路径（panel 实测口径）。
@@ -102,9 +103,9 @@ func (c *Client) UseMakeupCard(a *auth.Auth, targetDate string) error {
 	return err
 }
 
-// cstShanghai 上游自然日口径：CST（Asia/Shanghai），固定 +8，不依赖容器 tzdata
-// （与 scheduler.travelDay 同一口径，此处独立定义避免跨包依赖）。
-var cstShanghai = time.FixedZone("CST", 8*60*60)
+// cstShanghai 上游自然日口径：CST（Asia/Shanghai），固定 +8，不依赖容器 tzdata。
+// 统一走 internal/cst：日界散落多处定义时，改一处忘一处会静默少拿积分。
+var cstShanghai = cst.Loc
 
 // GrowthYesterdayDate 昨日的 CST 自然日（2006-01-02）。补签判据固定盯昨日：
 // 连登断档只可能发生在「上一个自然日」（今日尚未结算）。

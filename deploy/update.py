@@ -843,6 +843,15 @@ def rebuild_upstream(rep: Reporter) -> None:
             '  宿主机部署请安装 docker compose 插件或 docker-compose。\n'
             '  自查：容器内执行 `docker compose version` 与 `ls /usr/local/lib/docker/cli-plugins/`。'
         )
+    # 重建前确认账号目录有持久化来源（issue #400）：没有挂载时 force-recreate 会把
+    # 容器层里的 auths 一起删掉，账号全部丢失（面板 data 还在，能登录但没号）。
+    auths_ok = _auths_persisted()
+    if auths_ok is False:
+        rep.log('上游容器的 auths 没有挂载到宿主机或命名卷：重建会丢失全部账号，'
+                '已跳过本次上游重建。请先在 docker-compose.yml 的上游服务里挂载 '
+                './auths:/app/auths（或把整个上游目录挂到 /opt/workbuddy2api），'
+                '再重新执行更新。当前容器与账号保持不变。', 'error')
+        return
     # `--force-recreate` 不是可选项（issue #334）：只改源码时 compose 判定
     # 「配置没变」，可能直接打出 `Container workbuddy2api  Running` 而**不换容器**。
     # 于是构建出来的新镜像躺在一边，跑着的还是旧代码：界面继续提示「随包上游与
@@ -1114,6 +1123,45 @@ def _health_ok(url: str, timeout: int = 3) -> bool:
             return resp.status == 200
     except Exception:  # noqa: BLE001
         return False
+
+
+def _auths_persisted() -> bool | None:
+    """上游容器的 auths 是否有持久化来源（挂载/卷）。
+
+    True = 有；False = 明确没有；None = 容器不存在或读不到（不据此拦截）。
+
+    为什么要有这道闸（issue #400）：`compose up --force-recreate` 会删掉旧容器。
+    如果部署方没给上游的 auths 挂卷/绑定目录，账号文件只存在容器层里，重建后
+    全部消失——面板还能登录（data 卷在），但账号列表空了。这里在重建前检查
+    inspect 的 Mounts；明确没挂时**跳过重建**并给出修法，保住现有容器与账号。
+    """
+    try:
+        proc = subprocess.run(
+            ['docker', 'inspect', '--format', '{{json .Mounts}}', UPSTREAM_CONTAINER],
+            capture_output=True, text=True, timeout=10)
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        mounts = json.loads(proc.stdout or '[]')
+    except ValueError:
+        return None
+    if not isinstance(mounts, list):
+        return None
+    destinations = []
+    for item in mounts:
+        if isinstance(item, dict):
+            destinations.append(str(item.get('Destination') or '').rstrip('/'))
+    if not destinations:
+        return False
+    for dest in destinations:
+        # 上游 compose 默认 ./auths:/app/auths；本项目的整目录挂载是 /opt/workbuddy2api。
+        if (dest == '/app/auths' or dest == '/app'
+                or dest == '/opt/workbuddy2api'
+                or dest.startswith('/opt/workbuddy2api/')):
+            return True
+    return False
 
 
 def _container_id(name: str) -> str:
@@ -1854,6 +1902,11 @@ def restart_service(rep: Reporter) -> None:
     rep.log('服务已重启')
 
 
+# 等待 PID 1 退出的上限。uvicorn 的 --timeout-graceful-shutdown 设为 20 秒，
+# 比它再留一点余量；超时后强杀并提示手动重启。
+_GRACEFUL_EXIT_SECONDS = 30
+
+
 def _exit_for_restart(rep: Reporter) -> None:
     """容器形态下：结束**整个容器**使新代码生效。
 
@@ -1867,13 +1920,40 @@ def _exit_for_restart(rep: Reporter) -> None:
     """
     try:
         os.kill(1, signal.SIGTERM)
-        rep.log('已向主进程发送终止信号，容器即将在新代码下重启')
+        rep.log('已向主进程发送终止信号，等待容器用新代码重启')
     except Exception as exc:  # noqa: BLE001
         rep.log(f'发送终止信号失败（{exc}）—— 请手动重启容器：'
                 'docker compose restart token-farm', 'warn')
         return
-    # 给接收方一点时间优雅退出；随后本进程也退出（容器本该随之结束）
-    time.sleep(2)
+    # 必须**等 PID 1 真的退出**再结束本进程（issue #398）。旧实现固定 sleep 2 秒就
+    # 走人：uvicorn 没有优雅退出超时（Dockerfile 的 --timeout-graceful-shutdown）时
+    # 会一直等连接关闭，容器既不退出也不重启 —— 用户看到的就是更新后卡死 502。
+    deadline = time.time() + _GRACEFUL_EXIT_SECONDS
+    while time.time() < deadline:
+        if not _pid1_alive():
+            rep.log('主进程已退出，容器将按 restart 策略用新代码拉起')
+            return
+        time.sleep(0.5)
+    rep.log(f'主进程在 {_GRACEFUL_EXIT_SECONDS} 秒内未退出，发送 SIGKILL；'
+            '若容器仍未重启，请手动执行 docker compose restart token-farm', 'warn')
+    try:
+        # Windows 没有 SIGKILL（容器场景不会走到这里，但导入/测试要能跑）。
+        os.kill(1, getattr(signal, 'SIGKILL', signal.SIGTERM))
+    except Exception as exc:  # noqa: BLE001
+        rep.log(f'强制结束主进程失败（{exc}）', 'warn')
+
+
+def _pid1_alive() -> bool:
+    """容器主进程是否还活着；没有权限探测时按「活着」处理（宁可等/强杀，不误判）。"""
+    try:
+        os.kill(1, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def read_local_version() -> str:

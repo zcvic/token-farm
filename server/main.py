@@ -17,15 +17,16 @@ from . import config, db, redpacket, security
 from .iputil import client_ip
 from .stdio_utf8 import force_utf8_stdio
 from .routers import (
-    accounts, accountrisk as accountrisk_router, anthropic, auth, gateway, keys,
-    logs, metrics as metrics_router, models, playground,
+    accounts, accountrisk as accountrisk_router, anthropic, auth, balance, gateway,
+    keys, logs, metrics as metrics_router, models, playground,
     pgsync as pgsync_router, platforms as platforms_router, redpackets,
     responses, security as security_router,
     proxies, settings, stats, system, tokens, upstreams, watchdog as watchdog_router,
 )
 from .services import (
-    accountlog, accountrisk, autoupdate, cooling, dailyplan, modelrecovery,
-    pgsync, qoderaccountlog, renew, requestctx, tasklog, taskrun, watchdog,
+    accountlog, accountrisk, autoupdate, cooling, dailyplan, modelpolicy,
+    modelrecovery, pgsync, qoderaccountlog, renew, requestctx, tasklog, taskrun,
+    watchdog,
 )
 
 # 最早时刻把标准输出/错误钉成 UTF-8：Windows 中文区域默认按 cp936 编码，日志里
@@ -49,6 +50,14 @@ async def lifespan(app: FastAPI):
                      '、'.join(weak_admins))
     _warn_if_exposed()
     _warn_weak_upstream_key()
+    # 隐藏名单的存量镜像（幂等）：这次同步之前名单只存在数据库里，Go 侧看不到。
+    # 启动时补写一次，让「升级后直连上游端口」立刻与面板一致；写失败只 WARN。
+    try:
+        _hidden = modelpolicy.load().get('hidden') or []
+        if _hidden:
+            modelpolicy.mirror_to_upstream(_hidden)
+    except Exception as exc:  # noqa: BLE001 —— 旁路同步，失败不影响启动
+        logger.warning('隐藏名单镜像到上游 config.json 失败: %s', exc)
     # 给「抽奖码」这一列上线之前建的红包补码（幂等）：没有码就拼不出抽奖链接，
     # 等于那些红包只能自己发 key、没法让大家抽。
     filled = redpacket.backfill_codes()
@@ -330,6 +339,8 @@ app.include_router(playground.router)
 # 多平台（Trae 等）：账号 / 签到 / 额度 / 模型目录，见 docs/multi-platform.md
 app.include_router(platforms_router.router)
 app.include_router(gateway.router)
+# 余额协议（/api/usage/token/ 与 /api/status）：客户端面板据此显示剩余额度
+app.include_router(balance.router)
 # Anthropic Messages API 兼容层（/v1/messages）——给只认该协议的客户端用
 app.include_router(anthropic.router)
 # OpenAI Responses API 兼容层（/v1/responses、/responses）——给 Codex /

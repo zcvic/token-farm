@@ -7,6 +7,14 @@
     "soft_rate": "600s",
     "soft_rate_max": "2h"
   },
+  "server": {
+    "max_payload_bytes": 67108864,
+    "read_timeout": "300s",
+    "shutdown_timeout": "30s"
+  },
+  "models": {
+    "hidden": []
+  },
   "schedule": {
     "checkin_hours": [
       9,
@@ -22,6 +30,7 @@
     "keepalive_hours": [
       22
     ],
+    "keepalive_refresh_window": "168h",
     "school_hours": [
       12
     ],
@@ -53,7 +62,9 @@
     "device_token": "",
     "device_token_file": "",
     "client_name": "WorkBuddy",
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "gzip_body": true,
+    "http2": false
   },
   "features": {
     "sanitize_blacklist_fingerprints": true,

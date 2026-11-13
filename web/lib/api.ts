@@ -8,7 +8,11 @@ import type {
   RefreshPlan,
   DailyPlan,
   DailyTask,
+  TaskSchedulerStatus,
+  TaskSchedulerApply,
   CreditsFlow,
+  AccountUsageResponse,
+  AccountModelUsageResponse,
   ApiKey,
   ApiToken,
   AuditLogPage,
@@ -212,6 +216,26 @@ export const accountRiskApi = {
   acknowledge: (id: string) => post<{ok: boolean}>(`/api/account-risk/${encodeURIComponent(id)}/acknowledge`),
 };
 
+/**
+ * `POST /api/auth/start` 的响应。
+ *
+ * `target` 只有**重登**（请求里带了 `uid`）时才有：后端据此回显「这次到底在给
+ * 哪个账号换凭证」，界面拿它显示标题与版本，并在扫错号时继续显示目标是谁。
+ */
+export interface AuthStartResult {
+  state: string;
+  authUrl: string;
+  realm: Realm;
+  target?: {
+    uid: string;
+    nickname: string;
+    realm: Realm;
+    file: string;
+    /** 面板里被「临时停用」：重登只刷凭证，不会自动启用它 */
+    panel_disabled: boolean;
+  };
+}
+
 export const accountApi = {
   proxies: () => get<{routes: string[]; default: string}>('/api/proxies'),
   /** 上游「账号管理接口」（admin.enabled）开关状态；供解禁队列判断能否真的解封。
@@ -268,13 +292,21 @@ export const accountApi = {
    * （国际版新号聊天报 14017）。用户在弹窗里改地区会重新发码，所以这里带的
    * 总是当前这张码对应的地区。
    */
-  start: (realm: Realm = 'cn', upstreamId?: number | null, region?: string, proxy?: string) =>
-    post<{state: string; authUrl: string; realm: Realm}>(
-      '/api/auth/start' + groupQs(upstreamId), {realm, region, proxy}),
+  /**
+   * 发起扫码登录。
+   *
+   * `uid` 非空 = **重登这个账号**（见后端 `auth_start` 的说明）：版本会跟随该
+   * 账号、扫到的账号必须就是它、落盘就地写它已有的那份文件。不传 = 添加新账号。
+   */
+  start: (realm: Realm = 'cn', upstreamId?: number | null, region?: string,
+          proxy?: string, uid?: string) =>
+    post<AuthStartResult>(
+      '/api/auth/start' + groupQs(upstreamId), {realm, region, proxy, uid}),
   /** 轮询扫码结果。region 仅国际版需要（新号必须先做地区注册） */
   poll: (state: string, realm?: Realm, region?: string, upstreamId?: number | null) =>
     get<{
-      status: 'waiting' | 'success' | 'expired' | 'invalid' | 'realm_mismatch';
+      status: 'waiting' | 'success' | 'expired' | 'invalid' | 'realm_mismatch'
+        | 'account_mismatch';
       uid?: string;
       nickname?: string;
       updated?: boolean;
@@ -282,6 +314,21 @@ export const accountApi = {
       region_note?: string;
       expected?: Realm;
       got?: Realm;
+      /** account_mismatch：要重登的是谁、扫到的又是谁 */
+      expected_uid?: string;
+      expected_name?: string;
+      /**
+       * 重登成功后**当场**解除上游系统禁用的结果。没有这个字段 = 不是重登。
+       * `ok=false` 时 `message` 就是要给用户看的原因（管理接口没开 / api_key
+       * 不对 / 账号被封禁）；`pending=true` = 还在后台尝试。
+       */
+      revive?: {
+        attempted: boolean;
+        ok: boolean;
+        still_disabled?: boolean | null;
+        pending?: boolean;
+        message?: string;
+      };
     }>('/api/auth/poll', {state, realm, region, upstream_id: upstreamId ?? undefined}),
   remove: (file: string, upstreamId?: number | null) =>
     del<{success: boolean}>(`/api/accounts/${encodeURIComponent(file)}${groupQs(upstreamId)}`),
@@ -399,6 +446,10 @@ export const accountApi = {
   runDailyTask: (task: DailyTask) =>
     post<{ok: boolean; message: string; task: string; plan: DailyPlan}>(
       '/api/accounts/daily-plan/run', {task}),
+  /** 上游与面板两套调度的重叠状态（issue #375） */
+  taskScheduler: () => get<TaskSchedulerStatus>('/api/accounts/task-scheduler'),
+  keepTaskScheduler: (keep: 'upstream' | 'panel') =>
+    put<TaskSchedulerApply>('/api/accounts/task-scheduler', {keep}),
   /** 强制清除账号级冷却、熔断/降权与模型级限流（会重启一次上游）。 */
   clearCooling: (file: string, upstreamId?: number | null) =>
     post<{ok: boolean; message: string; uid?: string; backup?: string}>(
@@ -459,7 +510,7 @@ export const accountApi = {
 export const upstreamApi = {
   /** 上游运行状态。upstreamId 非空时查**该分组**的实例（多账号池）。 */
   status: (upstreamId?: number | null) =>
-    get<UpstreamStatus>('/api/status',
+    get<UpstreamStatus>('/api/upstream/status',
                         upstreamId == null ? undefined : {upstream_id: upstreamId}),
   /** 上游模型简表；realm 非空时只返回该版本的条目 */
   models: (realm?: Realm) => get<ModelListResponse>('/api/models', {realm}),
@@ -841,12 +892,18 @@ export const logApi = {
 };
 
 /* ── 用量统计 ───────────────────────────────────────── */
+/** 自定义日期范围（issue #257）：两端都含；与 days 同时传时后端优先用日期。 */
+export interface StatsRange {
+  start?: string;
+  end?: string;
+}
+
 export const statsApi = {
   /** realm 非空时只统计该版本；platform 非空时只统计该平台（见平台下拉） */
   summary: (realm?: Realm, platform?: string) =>
     get<StatsSummary>('/api/stats/summary', {realm, platform}),
-  daily: (days = 30, realm?: Realm, platform?: string) =>
-    get<UsagePoint[]>('/api/stats/daily', {days, realm, platform}),
+  daily: (days = 30, realm?: Realm, platform?: string, range?: StatsRange) =>
+    get<UsagePoint[]>('/api/stats/daily', {days, realm, platform, ...range}),
   /**
    * 某天**按小时**的用量（默认今天）。「今日」趋势图用它 —— 范围只有一天时
    * 按天聚合只有一根柱子。后端固定返回 24 个桶（补零），前端不必再补。
@@ -855,12 +912,20 @@ export const statsApi = {
     get<UsageHourPoint[]>('/api/stats/hourly', {day, realm, platform}),
 
   /** 积分收支（收入 / 支出）按天聚合 + 今日 / 近 7 天合计 */
-  creditsFlow: (days = 30, realm?: Realm, platform?: string) =>
-    get<CreditsFlow>('/api/stats/credits', {days, realm, platform}),
-  byModel: (days = 30, realm?: Realm, platform?: string) =>
-    get<UsageBreakdown[]>('/api/stats/by-model', {days, realm, platform}),
-  byKey: (days = 30, realm?: Realm, platform?: string) =>
-    get<UsageBreakdown[]>('/api/stats/by-key', {days, realm, platform}),
+  creditsFlow: (days = 30, realm?: Realm, platform?: string, range?: StatsRange) =>
+    get<CreditsFlow>('/api/stats/credits', {days, realm, platform, ...range}),
+  byModel: (days = 30, realm?: Realm, platform?: string, range?: StatsRange) =>
+    get<UsageBreakdown[]>('/api/stats/by-model', {days, realm, platform, ...range}),
+  byKey: (days = 30, realm?: Realm, platform?: string, range?: StatsRange) =>
+    get<UsageBreakdown[]>('/api/stats/by-key', {days, realm, platform, ...range}),
+  /** 按「日期 × 账号」聚合（issue #402）；同一范围解析规则 */
+  byAccount: (days = 30, realm?: Realm, platform?: string, range?: StatsRange) =>
+    get<AccountUsageResponse>('/api/stats/by-account',
+      {days, realm, platform, ...range}),
+  /** 按「账号 × 模型」聚合（issue #369） */
+  byAccountModel: (days = 30, realm?: Realm, platform?: string, range?: StatsRange) =>
+    get<AccountModelUsageResponse>('/api/stats/by-account-model',
+      {days, realm, platform, ...range}),
   /**
    * 上游自己那份统计（issue #59）。口径与本页其它数字不同：含**直连上游**的调用，
    * 且是自上游进程启动以来的累计（没有时段概念）。

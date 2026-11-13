@@ -373,5 +373,16 @@ class DockGroupsInvariantTest(unittest.TestCase):
         )
 
 
+class DockDialogVisibilityTest(unittest.TestCase):
+    """issue #406：弹窗打开时 dock 必须让位，避免叠在遮罩上。"""
+
+    def test_dock_hidden_while_dialogs_open(self) -> None:
+        src = (_ROOT / 'web' / 'components' / 'common' / 'layout' / 'ManagementBar.tsx'
+               ).read_text(encoding='utf-8')
+        self.assertIn('profileOpen || addOpen', src,
+                      '个人信息/添加账号的弹窗打开时没有隐藏 dock')
+        self.assertIn("{visibility: 'hidden'}", src)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/cst"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
@@ -42,6 +43,16 @@ type Config struct {
 	// 套餐余额标记为"快过期"（pool 据此优先消耗，见 entry.creditsExpiring）。
 	// <=0 时禁用分桶（全部归长期，行为与引入前一致）。默认建议 7*24h。
 	ExpiringSoonWindow time.Duration
+
+	// KeepaliveRefreshWindow 周期保活只刷新「剩余有效期 <= 该窗口」或已过期的凭证
+	// （schedule.keepalive_refresh_window，默认 168h）。<=0 表示不过滤（等价全量刷新）。
+	//
+	// 为什么需要它：全量保活每天轮换一遍全池的 refresh token，无谓轮换等于无谓风险
+	// （上游对 refresh 有频次限制，轮换出来的新 token 还要多写一次盘）。窗口过滤让
+	// 大多数号在窗口外直接跳过。
+	//
+	// 手动「全部保活」（RunKeepaliveNow）**不受**该窗口影响：人点了按钮就是要全刷。
+	KeepaliveRefreshWindow time.Duration
 
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
 	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
@@ -130,14 +141,14 @@ type CheckinOutcome struct {
 // ErrBusy 已有一次签到正在执行（手动入口与定时撞车）。
 var ErrBusy = errors.New("checkin already running")
 
-// nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
+// nextFire 返回 now 之后最近的一个整点触发时间；hours 为 CST 小时（0-23）。
+//
+// 钟点按 CST 解释：排程小时是上游自然日的小时，宿主时区一换（NAS / 海外 VPS），
+// 同一份配置就落到不同时刻——UTC 主机上配 [10] 实际是 CST 18:00 跑。
 func nextFire(now time.Time, hours []int) time.Time {
 	var earliest time.Time
 	for _, h := range hours {
-		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
-		if !t.After(now) {
-			t = t.Add(24 * time.Hour)
-		}
+		t := cst.NextAt(now, h, 0, 0)
 		if earliest.IsZero() || t.Before(earliest) {
 			earliest = t
 		}
@@ -292,9 +303,11 @@ func (s *Scheduler) dueSlots(cursor, now time.Time) []dueSlot {
 	if !start.Before(now) {
 		return nil
 	}
-	loc := now.Location()
+	// 日界按 CST：day 只作为「哪一天」的载体传给 scheduledSlot，而 scheduledSlot
+	// 内部用 cst.At 重新解释小时。这里必须同样按 CST 取日起点，否则宿主时区不是
+	// UTC+8 时，枚举出的 day 序列与槽位实际所属的日期错位一天。
 	var out []dueSlot
-	for day := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc); !day.After(now); day = day.AddDate(0, 0, 1) {
+	for day := cst.At(start, 0, 0, 0); !day.After(now); day = day.AddDate(0, 0, 1) {
 		for _, sch := range s.schedules() {
 			if sch.disabled {
 				continue
@@ -410,7 +423,9 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
 	case taskActivity:
 		s.runActivity(ctx)
 	case taskKeepalive:
-		s.runKeepalive(ctx)
+		// 排程路径传 selective=true：只刷临期，避免每天全量轮换 refresh token
+		// （无谓轮换 = 无谓风险，且上游对 refresh 有频次限制）。
+		s.runKeepalive(ctx, true)
 	case taskSchool:
 		s.runSchool(ctx)
 	case taskCat:
@@ -939,17 +954,28 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 	s.rewardClaimed[uid] = travelDay(time.Now())
 }
 
-// RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。
+// RunKeepaliveNow 立即对所有账号刷新 token（**全量**，不看临期窗口）。
+// 面板「全部保活」手动入口走这里：人点了按钮就是要立刻全刷一遍。
+func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(context.Background(), false) }
+
+// runKeepalive 周期保活。selective=true 时只刷新「剩余有效期 <= KeepaliveRefreshWindow」
+// 或已过期的凭证（排程路径）；selective=false 时全量刷新（手动路径）。
+//
+// 用参数而不是「配置值 + 一个全局 bool」表达这个差别：两条路径的意图完全不同，
+// 参数化后调用点一眼能看出走的是哪条语义，也不会出现「手动入口被窗口意外过滤」。
+//
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
-func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(context.Background()) }
-
-func (s *Scheduler) runKeepalive(ctx context.Context) {
-	checked, okN, failed, skipped := 0, 0, 0, 0
+func (s *Scheduler) runKeepalive(ctx context.Context, selective bool) {
+	checked, okN, failed, skipped, fresh := 0, 0, 0, 0, 0
 	defer func() {
-		log.Printf("keepalive done: checked=%d ok=%d failed=%d skipped=%d", checked, okN, failed, skipped)
+		// fresh 与 skipped 分开计数：否则日志里看不出「只刷了 2 个号」是窗口在起作用
+		// 还是池里本来就没号。
+		log.Printf("keepalive done: checked=%d ok=%d failed=%d skipped=%d not_due=%d",
+			checked, okN, failed, skipped, fresh)
 	}()
+	window := s.cfg.KeepaliveRefreshWindow
 	first := true
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
@@ -959,6 +985,12 @@ func (s *Scheduler) runKeepalive(ctx context.Context) {
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
 			skipped++
+			continue
+		}
+		// 窗口过滤只作用于排程路径。window <= 0 表示不过滤（等价全量），
+		// 与「配置校验要求 > 0」是两回事：前者是运行期归一，后者是启动校验。
+		if selective && window > 0 && !a.NeedsRefresh(window) {
+			fresh++
 			continue
 		}
 		if !first && !sleepCtx(ctx, s.accountGap(ctx, 0)) {

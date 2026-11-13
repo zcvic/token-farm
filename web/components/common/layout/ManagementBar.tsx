@@ -938,9 +938,14 @@ export function ManagementBar() {
         onPointerCancel={handleDockPointerEnd}
         onClickCapture={handleDockClickCapture}
         style={
-          dockPosition ?
-            {left: dockPosition.x, top: dockPosition.y, transform: 'translateX(-50%)'} :
-            {visibility: 'hidden'}
+          // 个人信息 / 添加账号的弹窗打开时把 dock 藏起来（issue #406）：弹窗的
+          // 半透明遮罩挡不住它，指针事件还会落到底下的放大镜上，导致拖拽/定位
+          // 行为诡异。与「未定位时隐藏」复用同一分支，样式表现统一。
+          profileOpen || addOpen ?
+            {visibility: 'hidden'} :
+            dockPosition ?
+              {left: dockPosition.x, top: dockPosition.y, transform: 'translateX(-50%)'} :
+              {visibility: 'hidden'}
         }
       >
         {showDockTip && (

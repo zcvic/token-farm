@@ -197,6 +197,27 @@ export interface DailyPlan {
   platform_checkin: DailyTaskConfig;
 }
 
+/** 上游与面板两套调度的重叠状态（issue #375）。 */
+export interface TaskSchedulerStatus {
+  upstream: {
+    available: boolean;
+    /** 上游 config.json 的 schedule.checkin_enabled */
+    checkin: boolean;
+    /** 上游 schedule.activity_enabled（内部含领取补偿） */
+    activity: boolean;
+  };
+  panel: Record<DailyTask, boolean>;
+  /** 两套都开的重叠任务：checkin / compensation */
+  conflicts: string[];
+}
+
+export interface TaskSchedulerApply {
+  plan: DailyPlan;
+  scheduler: TaskSchedulerStatus;
+  reload_scheduled: boolean | null;
+  reload_hint?: string;
+}
+
 /** 上游为一组账号给出的计数（`/status` 的顶层汇总与 realm_totals 同构） */
 export interface PoolCounts {
   total: number;
@@ -286,6 +307,8 @@ export interface ProxyProbe {
   exit_ip?: string;
   exit_info?: string;
   error?: string;
+  /** 失败时的可行动提示（协议/端口/认证/规则），原始 error 仍保留 */
+  hint?: string;
 }
 
 export interface ProxySettings {
@@ -726,6 +749,8 @@ export interface UsagePoint {
    * 可选：老版本后端不返回该字段，界面按 0 处理（不显示失败）。
    */
   failed?: number;
+  /** 当日成功请求数（2xx）；与 `failed` 同源（请求日志）。旧后端不返回。 */
+  success?: number;
 }
 
 /**
@@ -750,6 +775,8 @@ export interface UsageHourPoint {
   unpriced_requests?: number;
   /** 该小时的失败请求数（来自请求日志，与 `UsagePoint.failed` 同一口径） */
   failed: number;
+  /** 该小时的成功请求数（2xx）；与 `failed` 对称。旧后端不返回。 */
+  success?: number;
 }
 
 /** 一天的积分收入 / 支出（`/api/stats/credits` 的 daily 项） */
@@ -806,6 +833,46 @@ export interface CreditsFlow {
   granularity?: 'day' | 'hour';
   /** 24 个小时桶；仅 granularity === 'hour' 时存在。 */
   hourly?: CreditsFlowHourPoint[];
+}
+
+/** 按「日期 × 账号」的一行（`/api/stats/by-account`，issue #402）。 */
+export interface AccountUsageRow {
+  day: string;
+  account: string;
+  nickname: string;
+  uid8: string;
+  requests: number;
+  tokens: number;
+  credit: number;
+  cost: number | null;
+}
+
+/** 按「账号 × 模型」的一行（`/api/stats/by-account-model`，issue #369）。 */
+export interface AccountModelUsageRow {
+  account: string;
+  nickname: string;
+  uid8: string;
+  model: string;
+  requests: number;
+  tokens: number;
+  credit: number;
+  cost: number | null;
+}
+
+export interface AccountModelUsageResponse {
+  items: AccountModelUsageRow[];
+  total: number;
+  truncated: boolean;
+  from: string;
+  to: string;
+}
+
+export interface AccountUsageResponse {
+  items: AccountUsageRow[];
+  total: number;
+  truncated: boolean;
+  from: string;
+  to: string;
 }
 
 export interface UsageBreakdown {

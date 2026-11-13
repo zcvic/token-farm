@@ -3,6 +3,8 @@ package server
 import (
 	"sync"
 	"time"
+
+	"workbuddy2api/internal/cst"
 )
 
 // degradeGate 降级状态机：passthrough 模式下请求被上游内容策略拦截时，
@@ -36,18 +38,16 @@ func (g *degradeGate) Trigger() {
 	}
 }
 
-// nextMidnightCST 返回 now 之后最近的 Asia/Shanghai 00:00 时刻（纯函数，方便单测）。
+// nextMidnightCST 返回 now 之后最近的 CST 00:00 时刻（纯函数，方便单测）。
 //
 // 边界语义：
 //   - 23:59 → 次日 00:00（几秒后）
 //   - 00:00 → 次日 00:00（刚过 00:00，下个零点是次日）
 //
-// 用固定 +08:00 偏移计算，避免依赖系统时区配置（容器/宿主机时区不确定）。
+// 走 internal/cst 的唯一定义：宿主时区不是 UTC+8 时（NAS / 海外 VPS），
+// 这里算出的「零点」会落在 CST 08:00，夜间降级窗口整体错位。
 func nextMidnightCST(now time.Time) time.Time {
-	cst := time.FixedZone("CST", 8*60*60)
-	// 把 now 转到 CST 视角取当天 00:00，再加一天；若该 00:00 <= now 则再加一天。
-	y, m, d := now.In(cst).Date()
-	midnight := time.Date(y, m, d, 0, 0, 0, 0, cst)
+	midnight := cst.At(now, 0, 0, 0)
 	for !midnight.After(now) {
 		midnight = midnight.Add(24 * time.Hour)
 	}

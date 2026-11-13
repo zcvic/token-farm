@@ -48,6 +48,10 @@ func main() {
 		}
 	}
 
+	// 全局隐藏名单热加载器（config.json 的 models.hidden）。
+	// 用配置文件路径而不是启动时的快照：面板保存后直连上游端口也要立刻生效。
+	hidden := newHiddenProvider(*cfgPath)
+
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
 		log.Fatalf("load auths: %v", err)
@@ -86,6 +90,11 @@ func main() {
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	// 账号级出口线路（issue #210）：面板绑在线路名上，这里把名字解析成地址。
 	upstream.ConfigureProxies(cfg.Proxies)
+	// 出站 HTTP/2（issue #392）：默认关闭，开启后由标准库按 ALPN 协商。
+	upstream.ConfigureHTTP2(cfg.Upstream.HTTP2)
+	if cfg.Upstream.HTTP2 {
+		log.Printf("出站 HTTP/2 已启用（upstream.http2=true）——请确认 SSE 长流与代理线路可用")
+	}
 	// 思考通道兜底（issue #135）：默认开启；显式关掉时打一行日志，免得"为什么
 	// 只看 content 的客户端又空了"变成悬案。
 	upstream.ConfigureReasoningFallback(cfg.ReasoningAsContent == nil || *cfg.ReasoningAsContent)
@@ -153,6 +162,12 @@ func main() {
 	// 上游逐词扩充黑名单时改 config.json 重启即可，不必重编译镜像。
 	// 空表 = 只用内置静态表（行为与旧版一致）。
 	upstream.ConfigureSanitize(cfg.Features.SanitizeExtraFeatures, cfg.Features.SanitizeExtraRewrites)
+	// 配置变更时热重载词表（issue #396）：重启会断在途请求，而词表是整体替换语义。
+	if *cfgPath != "" {
+		stopSanitizeWatch := make(chan struct{})
+		defer close(stopSanitizeWatch)
+		go watchSanitizeConfig(*cfgPath, stopSanitizeWatch)
+	}
 	if n := len(cfg.Features.SanitizeExtraFeatures); n > 0 {
 		log.Printf("净化额外特征词表已加载：%d 条（config.json features.sanitize_extra_features）", n)
 	}
@@ -197,6 +212,7 @@ func main() {
 		CatHours:               cfg.Schedule.CatHours,
 		ActivityReportCount:    cfg.Schedule.ActivityReportCount,
 		ExpiringSoonWindow:     cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
+		KeepaliveRefreshWindow: cfg.KeepaliveRefreshWindowDur,
 		CheckinDisabled:        !cfg.Schedule.CheckinEnabled,
 		TravelDisabled:         !cfg.Schedule.TravelEnabled,
 		ActivityDisabled:       !cfg.Schedule.ActivityEnabled,
@@ -250,8 +266,13 @@ func main() {
 		LargeRequestCooldown: cfg.LargeRequestCooldownDur,
 		LargeRequestMode:     cfg.Pool.LargeRequestMode,
 		CreditFloor:          cfg.Pool.CreditFloor,
-		PromptMode:           cfg.Prompt.Mode,
-		PromptText:           cfg.PromptText,
+		// 入站 chat 请求体上限（server.max_payload_bytes，normalize 已保证 > 0）。
+		MaxPayloadBytes: cfg.Server.MaxPayloadBytes,
+		// 全局隐藏名单（config.json 的 models.hidden，10s 热加载）：
+		// 列表过滤 + 点名调用拒绝。名单由 Python 面板单向写入。
+		HiddenModels: hidden.Hidden,
+		PromptMode:   cfg.Prompt.Mode,
+		PromptText:   cfg.PromptText,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
 		// 运维管理端点开关（config admin.enabled，默认 false）。
@@ -268,10 +289,11 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
-		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
-		// max_body_mb 已移除（请求体无上限，交由上游自然响应），超大 body 成为
-		// 唯一的自然约束：60s 内传不完会得到连接错误（read timeout）而非 413。
-		ReadTimeout: 60 * time.Second,
+		// ReadTimeout 覆盖整个请求读取（含 body），防慢速 body 拖死连接。
+		// 可配（server.read_timeout，默认 300s，显式 "0" = 不限）：反代链上传大 body
+		// 超过旧硬编码的 60s 会被掐成 "read body: i/o timeout"，客户端看到的是
+		// 「请求没到」而不是「上传太慢」。
+		ReadTimeout: cfg.ReadTimeoutDur,
 		// IdleTimeout keep-alive 空闲连接回收：配合 ctx 传播（FIX-2）防连接泄漏堆积。
 		// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
@@ -286,9 +308,19 @@ func main() {
 		if cErr := store.Close(); cErr != nil {
 			log.Printf("WARN: [server] redisstore close: %v", cErr)
 		}
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeoutDur)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		// 超时不再静默：旧写法 `_ = srv.Shutdown(...)` 把 DeadlineExceeded 完全吞掉，
+		// 日志里看不出「有请求没排干」。显式 "0" = 不等待，直接 Close（在途 SSE 会被
+		// 立刻掐断，只在确定无长连接时用）。
+		if cfg.ShutdownTimeoutDur <= 0 {
+			log.Printf("WARN: [server] shutdown_timeout=0：不等待在途请求，直接关闭连接")
+			_ = srv.Close()
+			return
+		}
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("WARN: [server] 优雅关停未排干（窗口 %s）: %v", cfg.ShutdownTimeoutDur, err)
+		}
 	}()
 
 	if cfg.Global.Enabled {

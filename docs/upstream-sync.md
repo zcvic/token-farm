@@ -82,6 +82,29 @@ git commit -m "upstream: 说清这次改了什么"
 **只挑需要的提交，不整仓 merge**。它的内嵌面板、配置结构与账号池语义都和我们
 不同，整仓合并会冲掉本项目的改动。
 
+基线之后还有哪些能力值得同步、哪些不建议同步，见
+[upstream-sync-misakano.md](upstream-sync-misakano.md)（按 P0/P1/P2 分级，
+每项带来源提交与本地落点）。
+
+基线**之前**一直没移植的能力单独放在
+[upstream-sync-baseline-gaps.md](upstream-sync-baseline-gaps.md)。两份清单互补：
+前者按「新提交」组织，后者按「从未移植的能力」组织，同一项只在一处展开。
+
+> 两份清单都用裸编号（`P0-1`、`P2-8` …），但**同名条目不是同一件事**
+> （例如两边的 `P2-8` 分别指「10105 会话自救」与「模型目录指纹监控」）。
+> 跨文档引用一律带前缀：`M-P0-1` 指 misakano 那份，`G-P0-1` 指 baseline-gaps
+> 那份。第一批六项的落地情况与三处有意偏离，见 baseline-gaps 开头的
+> 「同步状态」表。
+
+除 misakano 面板仓外，2026-11 还有第二个参考源：
+[`ithtelab/workbuddy-manager`](https://github.com/ithtelab/workbuddy-manager)
+（Go 网关 + 面板一体，本文简称「上游 manager 仓」）。已核对的范围是
+`80b4b21`（v2.11.10）→ `8b5a4df4`（v2.11.14）。这一批**只取对本项目有益的
+部分**：Go 侧补丁 0051–0056、面板侧余额 / 积分 / 账号 / 统计 / 调度等修复；
+Trace Tap（调用抓包）整段未取。逐项清单与「未取原因」记录在
+`deploy/workbuddy-panel-ref.txt` 的第二批段落里。两个来源的仓库布局与运行时
+都不同，**不要互相 cherry-pick**，按能力在本项目对应文件重写。
+
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）
 git format-patch -1 <commit> -o /tmp/sync

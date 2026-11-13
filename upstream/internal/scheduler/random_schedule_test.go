@@ -5,7 +5,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/cst"
 )
 
 func TestScheduledAccountGapBoundsAndManualBypass(t *testing.T) {
@@ -107,16 +109,16 @@ func jitterScheduler(minutes int) *Scheduler {
 
 func TestRandomScheduleZeroPreservesExactHour(t *testing.T) {
 	s := jitterScheduler(0)
-	now := time.Date(2026, 10, 14, 8, 30, 0, 0, cstZone)
+	now := time.Date(2026, 10, 14, 8, 30, 0, 0, cst.Loc)
 	at, kinds := s.nextWake(now)
-	want := time.Date(2026, 10, 14, 9, 0, 0, 0, cstZone)
+	want := time.Date(2026, 10, 14, 9, 0, 0, 0, cst.Loc)
 	if !at.Equal(want) || len(kinds) != 1 || kinds[0] != taskCheckin {
 		t.Fatalf("zero jitter: at=%s kinds=%v", at, kinds)
 	}
 }
 
 func TestRandomScheduleStableAcrossRestartAndCatchup(t *testing.T) {
-	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cstZone)
+	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cst.Loc)
 	s := jitterScheduler(60)
 	at := s.scheduledSlot(day, 9, taskCheckin)
 	if !at.Equal(jitterScheduler(60).scheduledSlot(day, 9, taskCheckin)) {
@@ -133,7 +135,7 @@ func TestRandomScheduleStableAcrossRestartAndCatchup(t *testing.T) {
 }
 
 func TestRandomScheduleBoundsStayInOriginalHourAndDay(t *testing.T) {
-	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cstZone)
+	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cst.Loc)
 	for _, minutes := range []int{1, 30, 60, 1000000} {
 		s := jitterScheduler(minutes)
 		for d := 0; d < 30; d++ {
@@ -144,7 +146,7 @@ func TestRandomScheduleBoundsStayInOriginalHourAndDay(t *testing.T) {
 					if at.Hour() != hour || at.Format("2006-01-02") != date.Format("2006-01-02") {
 						t.Fatalf("crossed slot/day: minutes=%d date=%s at=%s", minutes, date, at)
 					}
-					base := time.Date(date.Year(), date.Month(), date.Day(), hour, 0, 0, 0, cstZone)
+					base := time.Date(date.Year(), date.Month(), date.Day(), hour, 0, 0, 0, cst.Loc)
 					limit := time.Duration(minutes) * time.Minute
 					if minutes >= 60 {
 						limit = time.Hour - time.Second
@@ -159,7 +161,7 @@ func TestRandomScheduleBoundsStayInOriginalHourAndDay(t *testing.T) {
 }
 
 func TestRandomScheduleNewDateTaskAndDeploymentDrawIndependently(t *testing.T) {
-	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cstZone)
+	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cst.Loc)
 	s := jitterScheduler(60)
 	at := s.scheduledSlot(day, 9, taskCheckin)
 	other := jitterScheduler(60)
@@ -177,7 +179,7 @@ func TestRandomScheduleNewDateTaskAndDeploymentDrawIndependently(t *testing.T) {
 
 func TestRandomScheduleRestartWithinHourStillFindsPendingSlot(t *testing.T) {
 	s := jitterScheduler(60)
-	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cstZone)
+	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cst.Loc)
 	at := s.scheduledSlot(day, 9, taskCheckin)
 	if !at.After(day.Add(9 * time.Hour)) {
 		t.Fatal("fixture must have a positive delay")
@@ -195,7 +197,7 @@ func TestRandomScheduleRestartWithinHourStillFindsPendingSlot(t *testing.T) {
 func TestRandomScheduleDisabledTaskAndMultipleHours(t *testing.T) {
 	s := jitterScheduler(60)
 	s.cfg.CheckinDisabled = true
-	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cstZone)
+	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cst.Loc)
 	if at, kinds := s.nextWake(day); !at.IsZero() || len(kinds) != 0 {
 		t.Fatal("disabled task was scheduled")
 	}

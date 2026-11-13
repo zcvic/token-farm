@@ -482,7 +482,10 @@ def client_channel(ua: str | None) -> str:
         return 'unknown'
     if 'codex' in text:
         return 'codex'
-    if 'claude-code' in text or 'claude code' in text:
+    if 'claude' in text or 'anthropic' in text:
+        # UA 实际有 `claude-code/…`、`claude-cli/2.0.1 (external, cli)`、
+        # `claude_cli/…` 几种写法；早先只认前两种，于是**真正的 Claude Code CLI**
+        # 在请求日志里被记成 other（轨迹页的同类守卫实测发现）。
         return 'claude-code'
     if 'deepseek' in text or 'dsh' in text:
         return 'dsh'
@@ -1094,7 +1097,7 @@ def _filter_catalog_models(payload: object, key: dict | None,
         if not isinstance(m, dict) or not m.get('id'):
             kept.append(m)
             continue
-        if _model_realm_of(m) != realm:
+        if realm and _model_realm_of(m) != realm:
             kept.append(m)
             continue
         mid = _catalog_model_key(m.get('id'))
@@ -1113,17 +1116,23 @@ async def _drop_models_outside_catalog(payload: object, key: dict | None) -> obj
     if not isinstance(payload, dict):
         return payload
     realm = keysvc._norm_realm((key or {}).get('realm'))
-    if realm not in ('cn', 'global'):
+    # 未限定版本的密钥同样要裁（issue #407）：它看到的是上游全部条目，下架模型
+    # 混在里面，客户端选中才失败。两个版本的目录都取到「腾讯直连」这一权威来源时
+    # 取并集比对；任一版本取不到就不裁，避免把另一版的模型误删。
+    realms = [realm] if realm in ('cn', 'global') else ['cn', 'global']
+    ids: set[str] = set()
+    for r in realms:
+        try:
+            cat = await asyncio.wait_for(modelcatalog.catalog(r), timeout=5)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug('模型目录裁剪跳过：%s', exc)
+            return payload
+        if cat.get('source') != 'tencent':
+            return payload
+        ids |= {_catalog_model_key(m.get('id')) for m in (cat.get('models') or [])
+                if isinstance(m, dict) and m.get('id')}
+    if not ids:
         return payload
-    try:
-        cat = await asyncio.wait_for(modelcatalog.catalog(realm), timeout=5)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug('模型目录裁剪跳过：%s', exc)
-        return payload
-    if cat.get('source') != 'tencent':
-        return payload
-    ids = {_catalog_model_key(m.get('id')) for m in (cat.get('models') or [])
-           if isinstance(m, dict) and m.get('id')}
     return _filter_catalog_models(payload, key, realm, ids)
 
 

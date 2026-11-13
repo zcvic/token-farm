@@ -4,10 +4,11 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"math"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/safefile"
 )
 
 // Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或手写扁平形）。
@@ -395,11 +397,10 @@ func (a *Auth) SaveAtomic() error {
 	if err != nil {
 		return err
 	}
-	tmp := a.FilePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, a.FilePath)
+	// WriteKeep 而非 tmp+rename：auth 文件被读坏时 LoadDir 会静默跳过该号（等于凭空
+	// 消失），随后 SyncToDir 把池里对应 uid delete 并立刻落盘，把「坏」固化成定局。
+	// .bak 是唯一退路；fsync 保证掉电后文件内容不会只留长度正确的全 0 块。
+	return safefile.WriteKeep(a.FilePath, raw, 0o600)
 }
 
 // AuthFileGlob auth 文件的统一 glob 模式（宽侧：workbuddy*.json）。
@@ -435,12 +436,18 @@ func LoadDir(dir string) ([]*Auth, error) {
 	seenUID := make(map[string]string, len(files))
 	var out []*Auth
 	for _, f := range files {
-		raw, err := os.ReadFile(f)
+		// Read 而非裸 os.ReadFile：文件被截断/掉电写坏时回退 <f>.bak，避免
+		// 「读坏 → Parse 失败 → continue」把该账号静默丢出池。
+		raw, err := safefile.Read(f, nil)
 		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				log.Printf("WARN: auth 文件不可用，跳过 %s: %v", f, err)
+			}
 			continue
 		}
 		a, err := Parse(raw)
 		if err != nil {
+			log.Printf("WARN: auth 文件解析失败，跳过 %s: %v", f, err)
 			continue
 		}
 		a.FilePath = f

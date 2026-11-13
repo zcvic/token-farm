@@ -665,6 +665,28 @@ func TestApplyErrorPolicyConversationIDMissingCools(t *testing.T) {
 // 保留有界冷却，但**冷却中的兜底探测不得翻倍**（这正是旧实现「越重试越冷」的根因，
 // 全池被推到 2h 封顶的元凶）。时长断言全部取自注入值，不依赖真实等待。
 // Classify→applyErrorPolicy 的接线由 TestChatSoftCoolsOnRateLimitBody 端到端覆盖。
+// TestApplyErrorPolicyUpstreamQueueDoesNotCool 6020 排队不是账号限流：不得冷却/
+// 计数/禁用（issue #416）。换号不会改变全局队列位置，罚号只会扩大伤害。
+func TestApplyErrorPolicyUpstreamQueueDoesNotCool(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
+
+	h.applyErrorPolicy("u1", upstream.ErrUpstreamQueue,
+		`{"code":6020,"msg":"queue.waiting.title","data":{"queue_position":5580,"retry_after":40}}`,
+		"kimi-k3.1-pro", &upstream.Error{Kind: upstream.ErrUpstreamQueue, Status: 429})
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("u1 missing")
+	}
+	if st.Cooling || st.Disabled {
+		t.Fatalf("排队不应冷却/禁用账号: %+v", st)
+	}
+	if st.SoftStreak != 0 {
+		t.Errorf("排队不应推进 soft_streak: %d", st.SoftStreak)
+	}
+}
+
 func TestApplyErrorPolicySoftRateNoDoubleWhenCooling(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -1020,6 +1042,43 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	diff := p.PickExcludingForRealm(nil, "hy3-x", "")
 	if diff == nil || diff.UID != "bad" {
 		t.Fatalf("different-model pick should bypass bad soft cooling, got %+v", diff)
+	}
+}
+
+// TestChat429ReportsEarliestReset 多号同时限流时返回**最早**恢复的那条原文（issue #403）。
+//
+// 整池在最早那个号重置时就能服务；用最后轮到的号的时间会让客户端白等一整个周期。
+func TestChat429ReportsEarliestReset(t *testing.T) {
+	early := time.Now().Add(5 * time.Minute)
+	late := time.Now().Add(2 * time.Hour)
+	fmtTS := func(at time.Time) string {
+		return at.In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
+	}
+	earlyTS, lateTS := fmtTS(early), fmtTS(late)
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-a" {
+			return 429, `{"code":6004,"msg":"将在 ` + earlyTS + ` UTC+8 重置","requestId":"a"}`, false
+		}
+		return 429, `{"code":6004,"msg":"将在 ` + lateTS + ` UTC+8 重置","requestId":"b"}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "b", AccessToken: "at-b", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s (want 429)", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, earlyTS) {
+		t.Errorf("429 文案应给最早恢复时间 %s，got %s", earlyTS, body)
+	}
+	if strings.Contains(body, lateTS) {
+		t.Errorf("429 文案不该给更晚的重置时间 %s，got %s", lateTS, body)
 	}
 }
 
@@ -2460,7 +2519,7 @@ func TestContentBlockedCustomIgnoresActiveDegrade(t *testing.T) {
 }
 
 // TestStaleSnapshotBoundedByPickGate 粘性快照陈旧被 Pick 闸兜底的契约锚
-//（pr134-watchlist-analysis.md #10）：
+// （pr134-watchlist-analysis.md #10）：
 // session.ResolveForModel 在取任何锁之前拿 pool 可用性快照——若快照后、Pick 前
 // 粘性号 A 被冷却（快照陈旧判 available），Session 层仍会返回 A 作为建议 uid；
 // 但真正的可用性权威闸是 handler 的 Pool.PickByUIDForModel（锁内新鲜判定

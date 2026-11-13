@@ -103,8 +103,9 @@ class StatsAndLogsPlatformScopeTest(unittest.TestCase):
         calls = _calls(src)
         self.assertIn('summary', calls, '没扫到统计页的 statsApi.summary')
         for args in calls['summary'] + calls['daily'] + calls['byModel'] + calls['byKey']:
-            self.assertTrue(args.endswith('platform'), f'统计页没传 platform：{args}')
-            self.assertIn('statsRealm', args, f'统计页应传 statsRealm：{args}')
+            parts = [p.strip() for p in args.split(',')]
+            self.assertIn('platform', parts, f'统计页没传 platform：{args}')
+            self.assertIn('statsRealm', parts, f'统计页应传 statsRealm：{args}')
         self.assertRegex(src, _NORMALIZED)
 
     def test_logs_page_carries_platform_and_scopes_realm(self) -> None:

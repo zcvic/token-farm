@@ -6,6 +6,8 @@ package pool
 import (
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/cst"
 )
 
 // SetCredits 只更新账号余额总量，不动快过架子集（creditsExpiring）——
@@ -57,10 +59,9 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
-		// 非模型级冷却入口：清空 6004 模型级独立冷却表（modelCooldowns），
-		// 避免上一次模型级限流的模型豁免泄漏到本次**账号级**限流上
-		// （否则换模型请求会错误绕过本次冷却）。
-		e.modelCooldowns = nil
+		// healthyForModel 优先判定账号级 healthy(now)，账号级冷却期间全模型天然不可选。
+		// 模型级限流（6004/11102）未到恢复时间前继续保留，账号级冷却过后恢复拦截。
+		e.pruneExpiredModelCooldowns(time.Now())
 		p.dirty.Store(true)
 	}
 }
@@ -245,7 +246,8 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 		}
 		e.coolKind = CoolSoft
 		e.reason = reason
-		e.modelCooldowns = nil // 账号级软冷却：清空模型豁免（切模型不绕过）
+		// 账号级软冷却期间 healthy 整体短路，保留活跃的模型级限流直至其恢复时刻
+		e.pruneExpiredModelCooldowns(now)
 		p.dirty.Store(true)
 	}
 }
@@ -336,16 +338,17 @@ func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
 	p.Cooldown(uid, CoolHard, nextDay4AM(now).Sub(now), reason)
 }
 
-// nextDay4AM 返回 now 之后最近的一个 04:00（与 now 同一时区）。
-// now 在当天 04:00 之前（凌晨 00:00~04:00）时返回当天 04:00——此时签到尚未执行，
+// nextDay4AM 返回 now 之后最近的一个 CST 04:00。
+//
+// now 在当天 04:00 之前（CST 00:00~04:00）时返回当天 04:00——此时签到尚未执行，
 // 该窗内触发的硬冷却等当天签到即可恢复；返回次日会白冷约一天。
-// 04:00 整及之后返回次日 04:00。
-// time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），天然覆盖跨日/跨月/跨年。
+// 04:00 整及之后返回次日 04:00。time.Date 对日溢出自动进位（月末→下月 1 号、
+// 年末→下年 1 号），天然覆盖跨日/跨月/跨年。
+//
+// 必须走 CST 而不是 now.Location()：网关可能跑在 UTC 主机上，那时「次日 04:00」
+// 会落在 CST 12:00——签到早已结束，硬冷却白等半天，且不报错。
 func nextDay4AM(now time.Time) time.Time {
-	if now.Hour() < 4 {
-		return time.Date(now.Year(), now.Month(), now.Day(), 4, 0, 0, 0, now.Location())
-	}
-	return time.Date(now.Year(), now.Month(), now.Day()+1, 4, 0, 0, 0, now.Location())
+	return cst.NextAt(now, 4, 0, 0)
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却（余额恢复）。

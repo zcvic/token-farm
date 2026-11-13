@@ -287,6 +287,15 @@
     "creditsExpiryDaily": "最近一天（{time}）共 {amount} 積分到期"
   },
   "stats": {
+    "customRange": "自訂",
+    "startDate": "開始日期",
+    "endDate": "結束日期",
+    "byAccount": "按帳號",
+    "byAccountModel": "帳號 × 模型",
+    "successRequests": "成功請求",
+    "account": "帳號",
+    "model": "模型",
+    "date": "日期",
     "costTitle": "按 DeepSeek 官方價估算",
     "costPriceLink": "價目與說明 →",
     "costToday": "今日",
@@ -1236,7 +1245,15 @@
     "stateSkipped": "跳過",
     "stateFailed": "失敗",
     "viewByTask": "按任務",
-    "viewRaw": "原文"
+    "viewRaw": "原文",
+    "keepaliveHint": "上游排程器還會在「保活時刻」重新整理權杖（預設每天 22:00）。不想讓它更新，可在 設定 → 上游 → 定時任務 關閉「自動保活」或改時刻；更新過於頻繁容易觸發 429。",
+    "schedulerConflictDesc": "上游排程器與面板計畫同時開啟了 {tasks}。兩套都會執行（冪等，但沒必要），建議只保留一套。",
+    "schedulerConflictTitle": "兩套排程都在跑",
+    "schedulerKeepPanel": "只保留面板",
+    "schedulerKeepUpstream": "只保留上游",
+    "schedulerKeptPanel": "已改為面板計畫（上游的簽到/活躍回報已關閉）",
+    "schedulerKeptUpstream": "已改為上游排程（面板的簽到/領取補償已關閉）",
+    "schedulerReloadPending": "上游重新載入未完成"
   },
   "addAccount": {
     "title": "新增騰訊帳號 · {realm}",
@@ -1259,6 +1276,12 @@
     "shareText": "打開這個連結完成授權（瀏覽器裡登入即可，也可掃碼），之後會自動簽到並納入帳號池",
     "retry": "重新取得",
     "stateLost": "授權已失效（伺服端在等待期間重啟過），請重新取得",
+    "reloginTitle": "重登帳號「{name}」",
+    "reloginDesc": "這次登入只更新該帳號的憑證（{realm}）；掃到其他帳號不會寫入。",
+    "reloginPanelDisabled": "該帳號在本面板被「暫時停用」：重登只更新憑證，不會自動啟用它。",
+    "accountMismatch": "掃到的是「{got}」，不是要重登的「{want}」；本次沒有寫入任何帳號，請用目標帳號重新掃碼。",
+    "reviveStillDisabled": "憑證已更新，但上游仍標示「已停用」：{reason}",
+    "revivePending": "憑證已更新；上游還沒確認該帳號入池，已在後台繼續解除停用，稍後會自動重新整理。",
     "realmMismatch": "這個二維碼是另一個版本（國內 / 國際）的，請重新取得"
   },
   "region": {

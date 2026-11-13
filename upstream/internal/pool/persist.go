@@ -4,7 +4,9 @@ package pool
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/safefile"
 )
 
 var flushInterval = 5 * time.Second
@@ -129,15 +132,29 @@ func (p *Pool) Flush() {
 	p.mu.Unlock()
 }
 
-// load 从本地 state.json 读回持久化状态（无文件/解析失败静默跳过，零状态启动）。
+// load 从本地 state.json 读回持久化状态。
+//
+// 三种情形分别处理（见 safefile 的三条规则）：
+//   - 文件不存在：用户特意删的，零状态启动，不打日志；
+//   - 内容损坏但 .bak 可用：用 .bak（safefile.Read 内部已打 WARN），**保留**原损坏
+//     文件不动，等下一次 saveLocked 的 WriteKeep 把它另存 .bad-*；
+//   - 两边都坏：打 ERR 并零状态启动——不能静默，否则下一次写入会把坏状态变成定局。
+//
 // New 构造时调用；恢复用 placeholder 凭证，Add/SyncToDir 时换全。
 func (p *Pool) load() {
-	raw, err := os.ReadFile(p.stateFp)
+	raw, err := safefile.Read(p.stateFp, nil)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// 读不出来（损坏且无可用备份 / 权限问题）：必须留痕。
+			// 零状态启动是既有行为，但绝不能悄悄发生。
+			log.Printf("ERR: [pool] state.json 不可用，按零状态启动（既有状态不会被删除，下次落盘前请检查）: %v", err)
+		}
 		return
 	}
 	var sf stateFile
 	if json.Unmarshal(raw, &sf) != nil {
+		// safefile 只做 json.Valid 粗筛，结构不匹配（如 Accounts 类型错）到这里才暴露。
+		log.Printf("ERR: [pool] state.json 结构无法解析，按零状态启动: %v", err)
 		return
 	}
 	p.applyAccountsLocked(sf.Accounts)
@@ -197,19 +214,20 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		if s.DegradeUntil != nil && !s.DegradeUntil.IsZero() && now.Before(*s.DegradeUntil) {
 			e.degradeUntil = *s.DegradeUntil
 		}
-		// 恢复 modelCooldowns，惰性过滤已过期条目（Until 在未来才恢复）。
+		// 恢复 modelCooldowns，惰性过滤已过期条目（ResetAt 或 Until 在未来才恢复）。
 		// 防止重启后残留已过期的模型级冷却条目（与 pick 路径的 pruneExpiredModelCooldowns 同口径）。
 		if len(s.ModelCooldowns) > 0 {
 			e.modelCooldowns = make(map[string]modelCooldown, len(s.ModelCooldowns))
 			for m, smc := range s.ModelCooldowns {
-				if smc.Until.IsZero() || !now.Before(smc.Until) {
-					continue // 过期/零值丢弃
-				}
-				e.modelCooldowns[m] = modelCooldown{
+				mc := modelCooldown{
 					Until:   smc.Until,
 					ResetAt: smc.ResetAt,
 					Reason:  smc.Reason,
 				}
+				if !mc.active(now) {
+					continue // 过期/零值丢弃
+				}
+				e.modelCooldowns[m] = mc
 			}
 			if len(e.modelCooldowns) == 0 {
 				e.modelCooldowns = nil
@@ -257,8 +275,9 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.applyAccountsLocked(s.Accounts)
 }
 
-// saveLocked 把内存状态原子落盘（tmp + rename），并 fire-and-forget 镜像一份快照
-// 到 Redis（择新恢复备份）。失败走 notePersistFail 节流日志。调用方必须已持 p.mu。
+// saveLocked 把内存状态原子落盘（tmp + fsync + rename + 上一份有效内容留 .bak），
+// 并 fire-and-forget 镜像一份快照到 Redis（择新恢复备份）。
+// 失败走 notePersistFail 节流日志。调用方必须已持 p.mu。
 func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
@@ -272,12 +291,9 @@ func (p *Pool) saveLocked() {
 	if dir := filepath.Dir(p.stateFp); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		p.notePersistFail(err)
-		return
-	}
-	if err := os.Rename(tmp, p.stateFp); err != nil {
+	// WriteKeep 而非 Write：状态文件是「读坏了就会把坏内容固化成定局」的典型场景，
+	// .bak 是唯一退路。tmp+fsync+rename 的细节在 safefile 里，这里只管调用。
+	if err := safefile.WriteKeep(p.stateFp, raw, 0o600); err != nil {
 		p.notePersistFail(err)
 		return
 	}
@@ -356,7 +372,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		if len(e.modelCooldowns) > 0 {
 			mcs = make(map[string]stateModelCooldown, len(e.modelCooldowns))
 			for m, mc := range e.modelCooldowns {
-				if mc.Until.IsZero() || !now.Before(mc.Until) {
+				if !mc.active(now) {
 					continue // 已过期：不落盘（惰性清理）
 				}
 				mcs[m] = stateModelCooldown{
