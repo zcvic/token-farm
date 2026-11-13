@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/cst"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
@@ -493,8 +494,8 @@ func TestNextWakeTravelIndependent(t *testing.T) {
 		ActivityHours:  []int{10},
 		KeepaliveHours: []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, cst.Loc))
+	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v（旅行 09:00 独立时点）", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskTravel {
@@ -510,8 +511,8 @@ func TestNextWakeActivityIndependent(t *testing.T) {
 		ActivityHours:  []int{10},
 		KeepaliveHours: []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, cst.Loc))
+	if want := time.Date(2026, 9, 11, 10, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v（活跃 10:00 独立时点）", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskActivity {
@@ -527,9 +528,9 @@ func TestNextWakeTravelDisabled(t *testing.T) {
 		TravelDisabled: true,
 		KeepaliveHours: []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, cst.Loc))
 	// 旅行禁用 → 09:00 旅行时点不应出现，最近的是 09:00 签到（同小时但签到未禁用）。
-	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
+	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if !hasKind(kinds, taskCheckin) {
@@ -550,8 +551,8 @@ func TestNextWakeActivityDisabled(t *testing.T) {
 		SchoolDisabled:   true,
 		CatDisabled:      true,
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, cst.Loc))
+	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v（活跃禁用 → 跳过 10:00）", at, want)
 	}
 	if hasKind(kinds, taskActivity) {
@@ -568,8 +569,8 @@ func TestCheckinDisabledTravelStillRuns(t *testing.T) {
 		ActivityHours:   []int{10},
 		KeepaliveHours:  []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, cst.Loc))
+	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v（签到禁用，旅行 09:00 照跑）", at, want)
 	}
 	if hasKind(kinds, taskCheckin) {
@@ -608,8 +609,8 @@ func TestNextWakeSameHourTravelAndCheckin(t *testing.T) {
 		ActivityHours:  []int{10},
 		KeepaliveHours: []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, cst.Loc))
+	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if !hasKind(kinds, taskCheckin) || !hasKind(kinds, taskTravel) {

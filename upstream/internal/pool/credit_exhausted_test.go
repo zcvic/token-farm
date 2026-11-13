@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/cst"
 )
 
 // 默认（没有 cooldown.credit_exhausted）必须保持旧行为：硬冷却到次日 04:00。
@@ -21,8 +22,10 @@ func TestCreditExhaustedDefaultKeepsHardCooldown(t *testing.T) {
 	if !st.Cooling {
 		t.Fatalf("should be cooling: %+v", st)
 	}
-	if st.Until.Hour() != 4 {
-		t.Errorf("until hour=%d want 4（旧行为是硬冷却到次日 04:00）", st.Until.Hour())
+	// 判据按 CST 取小时：until 的绝对时刻正确，但它的 Location 是 time.Local
+	// （Cooldown 用 time.Now().Add 组装），宿主跑在 UTC 时直接 Hour() 会读到 20。
+	if st.Until.In(cst.Loc).Hour() != 4 {
+		t.Errorf("until CST hour=%d want 4（旧行为是硬冷却到次日 04:00）", st.Until.In(cst.Loc).Hour())
 	}
 	if e := p.byUID["u1"]; e.coolKind != CoolHard {
 		t.Errorf("coolKind=%v want CoolHard", e.coolKind)

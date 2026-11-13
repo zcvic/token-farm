@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/cst"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
@@ -64,8 +65,8 @@ func TestDueSlotsCatchesSlotsCrossedBySleep(t *testing.T) {
 		SchoolHours:    []int{12},
 		CatHours:       []int{1},
 	})
-	cursor := time.Date(2026, 9, 27, 20, 0, 0, 0, time.Local)
-	now := time.Date(2026, 9, 28, 9, 5, 0, 0, time.Local)
+	cursor := time.Date(2026, 9, 27, 20, 0, 0, 0, cst.Loc)
+	now := time.Date(2026, 9, 28, 9, 5, 0, 0, cst.Loc)
 
 	got := s.dueSlots(cursor, now)
 	var planned []string
@@ -92,8 +93,8 @@ func TestDueSlotsSkipsDisabledAndDoesNotRepeatCursor(t *testing.T) {
 	// 零值 Config 里其余五类是「启用」的（见 Config 的说明），所以这里只断言
 	// 「签到这一类」（被显式禁用）不出现在补跑列表里。
 	s := New(Config{CheckinHours: []int{9}, CheckinDisabled: true})
-	cursor := time.Date(2026, 9, 27, 20, 0, 0, 0, time.Local)
-	now := time.Date(2026, 9, 28, 9, 5, 0, 0, time.Local)
+	cursor := time.Date(2026, 9, 27, 20, 0, 0, 0, cst.Loc)
+	now := time.Date(2026, 9, 28, 9, 5, 0, 0, cst.Loc)
 	for _, d := range s.dueSlots(cursor, now) {
 		if hasKind(d.kinds, taskCheckin) {
 			t.Fatalf("签到被禁用却仍有补跑：%v", d)
@@ -101,7 +102,7 @@ func TestDueSlotsSkipsDisabledAndDoesNotRepeatCursor(t *testing.T) {
 	}
 	// cursor == now：没有任何「已过」的槽位（刚派发完的那个不能重复派发）
 	s2 := New(Config{CheckinHours: []int{9}})
-	at := time.Date(2026, 9, 28, 9, 0, 0, 0, time.Local)
+	at := time.Date(2026, 9, 28, 9, 0, 0, 0, cst.Loc)
 	if got := s2.dueSlots(at, at); len(got) != 0 {
 		t.Fatalf("刚派发过的槽位被重复派发：%v", got)
 	}
@@ -110,7 +111,7 @@ func TestDueSlotsSkipsDisabledAndDoesNotRepeatCursor(t *testing.T) {
 // 端到端（假时钟）：机器从 20:00 睡到次日 09:05，醒来后 09:00 的签到必须补跑。
 func TestRunCatchesUpAfterSleep(t *testing.T) {
 	var clock atomic.Int64
-	base := time.Date(2026, 9, 27, 20, 0, 0, 0, time.Local)
+	base := time.Date(2026, 9, 27, 20, 0, 0, 0, cst.Loc)
 	clock.Store(base.UnixNano())
 
 	oldNow, oldPoll, oldGrace := nowFunc, slotPoll, wakeupGraceDelay
@@ -159,7 +160,7 @@ func TestRunCatchesUpAfterSleep(t *testing.T) {
 // 长时间离线（超出 catchupWindow）不该把几天的任务一次性全跑一遍。
 func TestRunDoesNotCatchUpBeyondWindow(t *testing.T) {
 	var clock atomic.Int64
-	base := time.Date(2026, 9, 20, 20, 0, 0, 0, time.Local)
+	base := time.Date(2026, 9, 20, 20, 0, 0, 0, cst.Loc)
 	clock.Store(base.UnixNano())
 
 	oldNow, oldPoll, oldGrace := nowFunc, slotPoll, wakeupGraceDelay

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/cst"
 )
 
 // withNoPickGap 临时关闭防并发撞号窗口（minPickGap=0），让纯加权分布测试不受影响。
@@ -639,8 +640,8 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	if st.Until.Before(after) {
 		t.Errorf("until %v is in the past (call span %v..%v)", st.Until, before, after)
 	}
-	if st.Until.Hour() != 4 {
-		t.Errorf("until hour=%d want 4", st.Until.Hour())
+	if st.Until.In(cst.Loc).Hour() != 4 {
+		t.Errorf("until CST hour=%d want 4", st.Until.In(cst.Loc).Hour())
 	}
 	if d := st.Until.Sub(after); d > 24*time.Hour {
 		t.Errorf("until %v is more than 24h out: %v", st.Until, d)
@@ -661,7 +662,7 @@ func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
 	st, ok := p2.Status("u1")
-	if !ok || st.Until.Hour() != 4 || st.Reason != "余额不足" {
+	if !ok || st.Until.In(cst.Loc).Hour() != 4 || st.Reason != "余额不足" {
 		t.Errorf("status after reload=%+v ok=%v", st, ok)
 	}
 }

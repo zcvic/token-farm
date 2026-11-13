@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"workbuddy2api/internal/cst"
 )
 
 // fakeScriptExec 记录命令构建参数并按需模拟执行失败，替代真实 exec 拉起 python3 子进程。
@@ -58,8 +60,8 @@ func TestNextWakeSchoolSlot(t *testing.T) {
 		KeepaliveDisabled: true,
 		SchoolHours:       []int{12},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 14, 11, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 14, 12, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 14, 11, 0, 0, 0, cst.Loc))
+	if want := time.Date(2026, 9, 14, 12, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v（school 12:00 独立时点）", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskSchool {
@@ -76,8 +78,8 @@ func TestNextWakeCatSlot(t *testing.T) {
 		KeepaliveDisabled: true,
 		CatHours:          []int{1},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 14, 23, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 15, 1, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 14, 23, 0, 0, 0, cst.Loc))
+	if want := time.Date(2026, 9, 15, 1, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v（cat 01:00 独立时点）", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskCat {
@@ -97,8 +99,8 @@ func TestNextWakeSchoolCatDisabled(t *testing.T) {
 		SchoolDisabled:    true,
 		CatDisabled:       true,
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 14, 8, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 14, 21, 0, 0, 0, time.Local); !at.Equal(want) {
+	at, kinds := s.nextWake(time.Date(2026, 9, 14, 8, 0, 0, 0, cst.Loc))
+	if want := time.Date(2026, 9, 14, 21, 0, 0, 0, cst.Loc); !at.Equal(want) {
 		t.Errorf("next=%v want %v（school/cat 禁用 → 只有签到 21:00）", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskCheckin {
