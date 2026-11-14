@@ -52,6 +52,7 @@ logger = logging.getLogger('workbuddy.platforms')
 
 LOGIN_TTL = 300                     # 会话有效期（秒）：够用户登录 + 切浏览器
 _KEEP_DONE = 600                    # 完成后保留多久供前端轮询（秒）
+_MAX_PENDING = 16                   # 同时挂起的登录会话上限（每个都占一个本机端口）
 _LOGIN_BASE = {
     'cn': 'https://www.trae.cn/authorization',
     'intl': 'https://www.trae.ai/authorization',
@@ -297,10 +298,40 @@ def _handler_factory(login_id: str):
             self.send_response(status)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(body)))
+            # 回调页只有一次性结果，不允许被缓存 / 带 Referer 出去。
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('X-Content-Type-Options', 'nosniff')
             self.end_headers()
             self.wfile.write(body)
 
+        def _origin_allowed(self) -> bool:
+            """只认本机回环的 Host / Origin。
+
+            监听器已经绑定 `127.0.0.1`，这里再校验 Host 是为了挡住 DNS
+            rebinding：恶意域名解析到 127.0.0.1 时，浏览器仍然会带
+            `Host: evil.example`，不能让它拿到授权结果。
+            """
+            address = getattr(self.server, 'server_address', ('127.0.0.1', 0))
+            port = int(address[1])
+            host = str(self.headers.get('Host') or '').strip().lower()
+            allowed = {f'127.0.0.1:{port}', f'localhost:{port}',
+                       f'[::1]:{port}'}
+            if host not in allowed:
+                return False
+            origin = str(self.headers.get('Origin') or '').strip().lower()
+            # 浏览器顶级跳转不带 Origin；带了就只接受同一回环来源。
+            if origin and origin not in {f'http://127.0.0.1:{port}',
+                                         f'http://localhost:{port}',
+                                         f'http://[::1]:{port}'}:
+                return False
+            return True
+
         def do_GET(self) -> None:  # noqa: N802
+            if not self._origin_allowed():
+                self._respond(403, '拒绝访问', '该地址只接受本机授权回调。')
+                return
             parts = urllib.parse.urlsplit(self.path)
             if parts.path != '/authorize':
                 self._respond(404, '页面不存在', '该地址只接受 /authorize 回调。')
@@ -515,22 +546,35 @@ def start(realm: str = 'cn') -> dict[str, Any]:
     url = _build_url(port, trace, machine, device_id, realm, code_challenge)
 
     now = _now()
-    session = {
-        'id': login_id,
-        'realm': realm,
-        'trace': trace,
-        'codeVerifier': code_verifier,
-        'device': device or {},
-        'state': 'pending',
-        'error': '',
-        'account': None,
-        'server': server,
-        'created': now,
-        'updated': now,
-    }
     with _lock:
         _prune(now)
-        _sessions[login_id] = session
+        pending = sum(1 for item in _sessions.values()
+                      if str(item.get('state') or '') in ('pending', 'exchanging'))
+        reject = pending >= _MAX_PENDING
+        if not reject:
+            _sessions[login_id] = {
+                'id': login_id,
+                'realm': realm,
+                'trace': trace,
+                'codeVerifier': code_verifier,
+                'device': device or {},
+                'state': 'pending',
+                'error': '',
+                'account': None,
+                'server': server,
+                'created': now,
+                'updated': now,
+            }
+    if reject:
+        # 每个挂起会话都占一个本机端口 + 一条线程：不设上限时，反复点
+        # 「开始授权」会把本机端口耗光。serve_forever 还没起来，只能
+        # server_close()，不能 shutdown()（后者会等一个永远不来的事件）。
+        try:
+            server.server_close()
+        except Exception:  # noqa: BLE001 —— 关闭失败不该改变拒绝结果
+            logger.debug('trae login server close failed', exc_info=True)
+        raise PlatformError('同时进行的登录会话过多，请稍后重试',
+                            status=429, code='too_many_sessions')
 
     threading.Thread(target=server.serve_forever, name='trae-login-server',
                      daemon=True).start()

@@ -4,6 +4,7 @@ import {useEffect, useRef, useState} from 'react';
 import {Download, Loader2, Upload, UsersRound} from 'lucide-react';
 import {Button} from '@/components/ui/button';
 import {useT} from '@/lib/i18n/provider';
+import {useAuth} from '@/lib/auth-context';
 import {accountApi, errText} from '@/lib/api';
 import {notify} from '@/lib/toast';
 import type {UpstreamEndpoint} from '@/lib/types';
@@ -33,6 +34,7 @@ export function UploadAccountsButton({
   onSuccess?: () => void;
 }) {
   const t = useT();
+  const {isAdmin} = useAuth();
   const inputRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -53,7 +55,7 @@ export function UploadAccountsButton({
     if (!files.length || busy) return;
     setBusy(true);
     try {
-      const result = await accountApi.upload(files, upstreamId, overwrite);
+      const result = await accountApi.upload(files, upstreamId, isAdmin && overwrite);
       if (result.added.length || result.overwritten.length) {
         notify.ok(
           t('accounts.uploadDone'),
@@ -117,19 +119,21 @@ export function UploadAccountsButton({
         className="rounded-full"
         disabled={busy}
         onClick={() => setOpen(true)}
-        title={t('accounts.importExport')}
+        title={isAdmin ? t('accounts.importExport') : t('accounts.importAccount')}
       >
         {busy ? <Loader2 className="animate-spin" /> : <UsersRound />}
-        <span>{t('accounts.importExport')}</span>
+        <span>{isAdmin ? t('accounts.importExport') : t('accounts.importAccount')}</span>
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-[520px]" showCloseButton>
           <DialogHeader>
-            <DialogTitle>{t('accounts.importExport')}</DialogTitle>
-            <DialogDescription>{t('accounts.importExportDesc')}</DialogDescription>
+            <DialogTitle>{isAdmin ? t('accounts.importExport') : t('accounts.importAccount')}</DialogTitle>
+            <DialogDescription>
+              {isAdmin ? t('accounts.importExportDesc') : t('accounts.importAccountDesc')}
+            </DialogDescription>
           </DialogHeader>
           <div className="flex w-full flex-col gap-4 px-6 pb-6">
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className={`grid gap-3 ${isAdmin ? 'sm:grid-cols-2' : ''}`}>
               <div className="rounded-2xl border border-border/70 p-4">
                 <div className="mb-3 flex items-center gap-2 text-sm font-medium">
                   <Upload className="h-4 w-4" />
@@ -138,15 +142,18 @@ export function UploadAccountsButton({
                 <p className="mb-4 text-xs leading-5 text-muted-foreground">
                   {t('accounts.importAccountDesc')}
                 </p>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={overwrite}
-                    disabled={busy}
-                    onChange={(event) => setOverwrite(event.target.checked)}
-                  />
-                  {t('accounts.uploadAllowOverwrite')}
-                </label>
+                {/* 覆盖已有账号会把别人正在用的凭据换掉，只对管理员开放。 */}
+                {isAdmin && (
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={overwrite}
+                      disabled={busy}
+                      onChange={(event) => setOverwrite(event.target.checked)}
+                    />
+                    {t('accounts.uploadAllowOverwrite')}
+                  </label>
+                )}
                 <Button
                   className="mt-4 w-full rounded-full"
                   disabled={busy}
@@ -156,6 +163,8 @@ export function UploadAccountsButton({
                   {t('accounts.importAccount')}
                 </Button>
               </div>
+              {/* 导出会把账号凭据打包带走，仅管理员可用。 */}
+              {isAdmin && (
               <div className="rounded-2xl border border-border/70 p-4">
                 <div className="mb-3 flex items-center gap-2 text-sm font-medium">
                   <Download className="h-4 w-4" />
@@ -196,6 +205,7 @@ export function UploadAccountsButton({
                   onConfirm={() => void exportAccounts()}
                 />
               </div>
+              )}
             </div>
             <Button variant="outline" className="w-full rounded-full" onClick={() => setOpen(false)}>
               {t('common.cancel')}

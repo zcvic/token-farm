@@ -32,6 +32,8 @@ interface AuthContextValue {
   me: Me | null;
   loading: boolean;
   isAdmin: boolean;
+  /** 只读 + 可添加平台账号（admin / operator）。删 / 改 / 刷新 / 签到仍只对管理员开放。 */
+  canAddAccount: boolean;
   role: Role | null;
   refresh: () => Promise<void>;
   login: (username: string, password: string) => Promise<void>;
@@ -98,7 +100,16 @@ export function AuthProvider({children}: {children: ReactNode}) {
 
   return (
     <AuthContext.Provider
-      value={{me, loading, isAdmin: me?.role === 'admin', role: me?.role ?? null, refresh, login, logout}}
+      value={{
+        me,
+        loading,
+        isAdmin: me?.role === 'admin',
+        canAddAccount: me?.role === 'admin' || me?.role === 'operator',
+        role: me?.role ?? null,
+        refresh,
+        login,
+        logout,
+      }}
     >
       {children}
     </AuthContext.Provider>

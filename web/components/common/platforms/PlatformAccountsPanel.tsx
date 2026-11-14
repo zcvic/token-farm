@@ -165,7 +165,7 @@ export function PlatformAccountsPanel({
   info: PlatformInfo | null;
 }) {
   const t = useT();
-  const {isAdmin} = useAuth();
+  const {isAdmin, canAddAccount} = useAuth();
   const {realm, label: realmName} = useRealm();
 
   const accountsState = useAsyncAll({
@@ -893,7 +893,7 @@ export function PlatformAccountsPanel({
               {accountsState.isRefreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
               {t('common.refresh')}
             </Button>
-            {isAdmin && (
+            {canAddAccount && (
               <>
                 {supportsWebLogin && (
                   <Button
@@ -933,7 +933,8 @@ export function PlatformAccountsPanel({
                   <FileJson />
                   {t('platforms.importManual')}
                 </Button>
-                {supportsCheckin && (
+                {/* 批量签到会改动每个账号的签到状态，仍只对管理员开放。 */}
+                {isAdmin && supportsCheckin && (
                   <Button
                     variant="outline"
                     size="sm"
@@ -1019,7 +1020,7 @@ export function PlatformAccountsPanel({
             description={t('platforms.noAccountsDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
-            {isAdmin && (
+            {canAddAccount && (
               <Button
                 size="sm"
                 className="mt-1 rounded-full"
@@ -1040,7 +1041,7 @@ export function PlatformAccountsPanel({
             description={t('accounts.emptyRealmDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
-            {isAdmin && (
+            {canAddAccount && (
               <Button
                 size="sm"
                 className="mt-1 rounded-full"

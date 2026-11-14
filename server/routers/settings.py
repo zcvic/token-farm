@@ -391,15 +391,20 @@ def save_auto_update(body: dict, user: dict = Depends(security.require_session_a
 
 
 # ── 管理端用户 ───────────────────────────────────────────
+# 角色取值集中来自 security.USER_ROLES（admin / operator / viewer）：
+# operator = 只读 + 可添加平台账号；建 / 改 / 删登录用户仍只对管理员开放。
+_ROLE_PATTERN = '^(' + '|'.join(security.USER_ROLES) + ')$'
+
+
 class UserIn(BaseModel):
     username: str = Field(min_length=1, max_length=32)
     password: str = Field(min_length=1)
-    role: str = Field(pattern='^(admin|viewer)$')
+    role: str = Field(pattern=_ROLE_PATTERN)
 
 
 class UserPatch(BaseModel):
     password: str | None = None
-    role: str | None = Field(default=None, pattern='^(admin|viewer)$')
+    role: str | None = Field(default=None, pattern=_ROLE_PATTERN)
 
 
 def _public(cfg: dict) -> list[dict]:
@@ -414,7 +419,7 @@ def list_users(user: dict = Depends(security.current_user)) -> list[dict]:
 @router.post('/users')
 def add_user(body: UserIn, request: Request,
              user: dict = Depends(security.require_session_admin)) -> dict:
-    """新建管理用户。
+    """新建管理用户（仅管理员）。
 
     审计是必须的：上次入侵里攻击者正是「先建自己的账号、再正常登录」，
     而这一步当时没有任何记录。新建用户写随机 sv，避免同名重建后旧 cookie 复活。

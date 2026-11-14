@@ -76,11 +76,14 @@ class DesktopTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / 'Trae CN'
+        self.home = Path(self.tmp.name) / 'home'
+        self.home.mkdir()
         self.storage = self.root / 'User' / 'globalStorage' / 'storage.json'
         self.storage.parent.mkdir(parents=True)
         self._write_storage({'iCubeAuthInfo://icube.cloudide': icube.encode(_body()),
                              'other.setting': 1})
-        patch = mock.patch.dict(os.environ, {'TRAE_DESKTOP_DIRS': str(self.root)})
+        patch = mock.patch.dict(os.environ, {'TRAE_DESKTOP_DIRS': str(self.root),
+                                             'TRAE_USER_HOME': str(self.home)})
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -151,6 +154,68 @@ class DesktopTest(unittest.TestCase):
         result = desktop.sync({'uid': 'nobody', 'token': 't'})
         self.assertFalse(result['ok'])
         self.assertEqual(result['reason'], 'no_desktop_storage')
+
+
+class DesktopTempTokenTest(unittest.TestCase):
+    """CLI 临时 token 兜底：只有 access token，没有 userId / refreshToken。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / 'home'
+        self.home.mkdir()
+        self.empty_desktop = Path(self.tmp.name) / 'desktop'
+        self.empty_desktop.mkdir()
+        patch = mock.patch.dict(os.environ, {
+            'TRAE_DESKTOP_DIRS': str(self.empty_desktop),
+            'TRAE_USER_HOME': str(self.home),
+        })
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.token_path = self.home / '.trae-cn' / 'trae-jwt-token'
+
+    def _write_token(self, text: str) -> None:
+        self.token_path.parent.mkdir(parents=True, exist_ok=True)
+        self.token_path.write_text(text, encoding='utf-8')
+
+    def test_plain_token_becomes_synthetic_account(self) -> None:
+        self._write_token('temp-access-token\n')
+        accounts = desktop.read_accounts()
+        self.assertEqual(len(accounts), 1)
+        account = accounts[0]
+        self.assertEqual(account['realm'], 'cn')
+        self.assertEqual(account['token'], 'temp-access-token')
+        self.assertEqual(account['refreshToken'], '')
+        self.assertTrue(account['uid'].startswith('tok-'))
+        self.assertEqual(account['tokenSource'], 'desktop-temp-token')
+        self.assertNotIn('desktopPath', account)
+
+    def test_json_token_form_is_read(self) -> None:
+        self._write_token(json.dumps({'accessToken': 'json-token'}))
+        accounts = desktop.read_accounts()
+        self.assertEqual([a['token'] for a in accounts], ['json-token'])
+
+    def test_synthetic_uid_is_stable_for_same_file(self) -> None:
+        self._write_token('same-token')
+        first = desktop.read_accounts()[0]['uid']
+        second = desktop.read_accounts()[0]['uid']
+        self.assertEqual(first, second)
+
+    def test_storage_account_wins_over_temp_token(self) -> None:
+        root = Path(self.tmp.name) / 'Trae CN'
+        storage = root / 'User' / 'globalStorage' / 'storage.json'
+        storage.parent.mkdir(parents=True)
+        storage.write_text(json.dumps({
+            'iCubeAuthInfo://icube.cloudide': icube.encode(_body())}),
+            encoding='utf-8')
+        self._write_token('older-temp-token')
+        with mock.patch.dict(os.environ, {'TRAE_DESKTOP_DIRS': str(root)}):
+            accounts = desktop.read_accounts()
+        self.assertEqual([a['uid'] for a in accounts], ['1839902393428953'])
+
+    def test_empty_token_file_is_skipped(self) -> None:
+        self._write_token('   ')
+        self.assertEqual(desktop.read_accounts(), [])
 
 
 class ClientModelTest(unittest.TestCase):
@@ -231,7 +296,8 @@ class AdapterDesktopImportTest(unittest.TestCase):
             'iCubeAuthInfo://icube.cloudide': icube.encode(_body())}),
             encoding='utf-8')
         for patch in (mock.patch.dict(os.environ,
-                                      {'TRAE_DESKTOP_DIRS': str(self.root)}),
+                                      {'TRAE_DESKTOP_DIRS': str(self.root),
+                                       'TRAE_USER_HOME': str(root / 'home')}),
                       mock.patch.object(config, 'DATA_DIR', root / 'data')):
             patch.start()
             self.addCleanup(patch.stop)
@@ -254,6 +320,18 @@ class AdapterDesktopImportTest(unittest.TestCase):
     def test_import_filters_by_realm(self) -> None:
         result = trae_adapter.import_from_desktop(realm='intl')
         self.assertEqual(result['imported'], [])
+
+    def test_import_temp_token_as_intl_account(self) -> None:
+        token_dir = Path(self.tmp.name) / 'home' / '.trae'
+        token_dir.mkdir(parents=True)
+        (token_dir / 'trae-jwt-token').write_text('cli-token', encoding='utf-8')
+        result = trae_adapter.import_from_desktop(realm='intl')
+        self.assertEqual(len(result['imported']), 1, result)
+        account = result['imported'][0]
+        self.assertEqual(account['realm'], 'intl')
+        self.assertFalse(account['has_refresh_token'])
+        self.assertTrue(account['uid'].startswith('tok-'))
+        self.assertEqual(account['source'], 'desktop')
 
 
 if __name__ == '__main__':

@@ -676,8 +676,34 @@ def current_user(request: Request) -> dict:
     raise session_err or HTTPException(status_code=401, detail='未登录')
 
 
+# ── 角色分级 ─────────────────────────────────────────────
+# admin    —— 全部权限；
+# operator —— 只读 + **添加平台账号**（导入账号文件 / 扫码登录 / 网页登录）；
+#             不能改 / 删 / 刷新 / 签到账号，不能覆盖或重登已有账号，
+#             也不能新建登录用户、改配置；
+# viewer   —— 只读。
+# 新增角色的判断一律走下面的辅助函数，避免各路由各写一份字符串比较。
+ROLE_ADMIN = 'admin'
+ROLE_OPERATOR = 'operator'
+ROLE_VIEWER = 'viewer'
+USER_ROLES = (ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER)
+
+
+def is_admin(user: dict | None) -> bool:
+    return str((user or {}).get('role') or '') == ROLE_ADMIN
+
+
+def can_add_accounts(user: dict | None) -> bool:
+    """是否有权添加平台账号（如 Trae / Qoder / WorkBuddy）：管理员或 operator。
+
+    仅覆盖「往池子里加新账号」这一件事；覆盖已有账号、重登、删除、刷新、
+    签到、改配置都不在此列，仍由管理员专属的依赖把关。
+    """
+    return str((user or {}).get('role') or '') in (ROLE_ADMIN, ROLE_OPERATOR)
+
+
 def require_admin(user: dict = Depends(current_user)) -> dict:
-    if user.get('role') != 'admin':
+    if not is_admin(user):
         raise HTTPException(status_code=403, detail='需要管理员权限')
     return user
 
@@ -693,4 +719,20 @@ def require_session_admin(request: Request,
     if getattr(request.state, 'token_id', None) is not None:
         raise HTTPException(status_code=403,
                             detail='该接口不接受 API Token，请用会话登录后操作')
+    return user
+
+
+def require_session_account_adder(request: Request,
+                                  user: dict = Depends(current_user)) -> dict:
+    """要求**会话**身份，且具备「添加平台账号」的权限（admin / operator）。
+
+    用于导入账号文件、发起扫码 / 网页登录、轮询登录结果这些**新增**入口。
+    仍然拒绝 API Token —— 拿到 token 就能往号池里塞账号属于扩大权限面，
+    只对真人开放（与 `require_session_admin` 同一原则）。
+    """
+    if getattr(request.state, 'token_id', None) is not None:
+        raise HTTPException(status_code=403,
+                            detail='该接口不接受 API Token，请用会话登录后操作')
+    if not can_add_accounts(user):
+        raise HTTPException(status_code=403, detail='没有添加账号的权限')
     return user

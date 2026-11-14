@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -77,6 +78,80 @@ def storage_paths() -> list[dict]:
             realm = 'cn' if ('trae cn' in low or 'trae-cn' in low) else 'intl'
         out.append({'path': path, 'realm': realm})
     return out
+
+
+def _user_home() -> Path:
+    """用户主目录（`TRAE_USER_HOME` 可覆盖：测试夹具 / 容器）。"""
+    override = str(os.environ.get('TRAE_USER_HOME') or '').strip()
+    return Path(override).expanduser() if override else Path.home()
+
+
+# CLI 登录留下的 7 天临时 token（没有 userId、没有 refreshToken）。
+# 与 storage.json 分开：有桌面登录态时不用它，旧文件往往比 storage.json 更早失效。
+_TEMP_TOKEN_DIRS = (('.trae-cn', 'cn'), ('.trae', 'intl'))
+TEMP_TOKEN_FILE = 'trae-jwt-token'
+
+
+def temp_token_paths() -> list[dict]:
+    """返回 `[{path, realm, exists}]`：CLI 临时 token 的两个固定位置。
+
+    位置固定（`~/.trae-cn/trae-jwt-token` / `~/.trae/trae-jwt-token`），不跟
+    `TRAE_DESKTOP_DIRS` 走——那是桌面客户端的安装目录，与 CLI 的主目录无关。
+    """
+    home = _user_home()
+    out: list[dict] = []
+    for directory, realm in _TEMP_TOKEN_DIRS:
+        path = home / directory / TEMP_TOKEN_FILE
+        out.append({'path': path, 'realm': realm, 'exists': path.is_file()})
+    return out
+
+
+def _read_temp_token(path: Path) -> str:
+    """读临时 token 文件（纯串或 JSON；读不到 / 空文件返回空串）。"""
+    try:
+        text = path.read_text(encoding='utf-8-sig').strip()
+    except (OSError, UnicodeError):
+        return ''
+    if not text:
+        return ''
+    if text.startswith('{'):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return ''
+        if not isinstance(parsed, dict):
+            return ''
+        text = str(parsed.get('token') or parsed.get('accessToken')
+                   or parsed.get('Token') or '')
+    return str(text or '').strip()
+
+
+def _temp_token_account(entry: dict) -> dict | None:
+    """临时 token 文件 → 账号结构；没有 token 返回 None。
+
+    这种 token 没有 userId，用 token 摘要派生一个稳定的合成 uid，保证同一份
+    文件重复导入命中同一个账号文件（而不是每次新建）。
+    """
+    token = _read_temp_token(entry['path'])
+    if not token:
+        return None
+    realm = str(entry.get('realm') or 'cn')
+    return {
+        'uid': 'tok-' + hashlib.sha256(token.encode('utf-8')).hexdigest()[:20],
+        'realm': realm,
+        'region': 'CN' if realm == 'cn' else '',
+        'token': token,
+        'refreshToken': '',
+        'expiredAt': '',
+        'refreshExpiredAt': '',
+        'nickname': 'IDE 临时 token',
+        'email': '',
+        # 来源沿用 desktop：用户就是在「从本机导入」里拿到的；但没有
+        # desktopPath，刷新后不会去回写一个不存在的 storage.json。
+        'source': 'desktop',
+        'tokenSource': 'desktop-temp-token',
+        'ideOnly': True,
+    }
 
 
 def _read_storage(path: Path) -> dict:
@@ -151,6 +226,19 @@ def read_accounts() -> list[dict]:
             seen.add(dedupe)
             account['desktopPath'] = str(path)
             accounts.append(account)
+
+    # 兜底：桌面客户端没登录、但 IDE / CLI 留了 7 天临时 token 的位置。
+    # 同一区域已经有桌面登录态时跳过——临时 token 只有 access token，
+    # 不能刷新，拿它顶替可刷新账号只会让账号更快失效。
+    realms = {account['realm'] for account in accounts}
+    for entry in temp_token_paths():
+        if not entry['exists'] or entry['realm'] in realms:
+            continue
+        account = _temp_token_account(entry)
+        if account is None:
+            continue
+        realms.add(entry['realm'])
+        accounts.append(account)
     return accounts
 
 

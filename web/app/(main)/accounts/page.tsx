@@ -158,7 +158,7 @@ const groupOf = (a: Account) => availabilityGroup(availabilityOf(a));
 function WorkbuddyAccountsPage() {
   const {realm, label: realmName} = useRealm();
   const t = useT();
-  const {isAdmin} = useAuth();
+  const {isAdmin, canAddAccount} = useAuth();
   const [addOpen, setAddOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [proxyRoutes, setProxyRoutes] = useState<string[] | null>(null);
@@ -1373,10 +1373,10 @@ function WorkbuddyAccountsPage() {
                 )}
               </span>
             )}
-            {isAdmin && (
+            {canAddAccount && (
               <UploadAccountsButton upstreamId={groupId} groups={groups} onSuccess={reloadAll} />
             )}
-            {isAdmin && (
+            {canAddAccount && (
               <Button size="sm" className="rounded-full" onClick={() => setAddOpen(true)}>
                 <Plus />
                 {t('accounts.addAccount')}
@@ -1702,10 +1702,10 @@ function WorkbuddyAccountsPage() {
           <EmptyState
             icon={Users}
             title={t('accounts.emptyTitle')}
-            description={isAdmin ? t('accounts.emptyDescAdmin') : t('accounts.emptyDescViewer')}
+            description={canAddAccount ? t('accounts.emptyDescAdmin') : t('accounts.emptyDescViewer')}
             className="flex flex-col items-center justify-center py-16 text-center"
           >
-            {isAdmin && (
+            {canAddAccount && (
               <Button className="mt-4 rounded-full" onClick={() => setAddOpen(true)}>
                 <Plus />
                 {t('accounts.addAccount')}

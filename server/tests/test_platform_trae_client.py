@@ -86,6 +86,30 @@ class HttpErrorTest(unittest.TestCase):
         self.assertEqual(err.message, text)
 
 
+class AuthHeadersTest(unittest.TestCase):
+    """设备头必须跟着账号走：网页登录绑定的设备不能被 uid 派生值替换。"""
+
+    def test_default_device_headers_are_uid_derived(self) -> None:
+        headers = client.auth_headers({'uid': '1839902393428953', 'token': 't'})
+        self.assertEqual(headers['X-Device-Id'], '1839902393428953')
+        self.assertEqual(headers['X-Machine-Id'],
+                         client.fingerprint.machine_id('1839902393428953'))
+
+    def test_login_device_overrides_derived_identity(self) -> None:
+        headers = client.auth_headers({
+            'uid': '1839902393428953', 'token': 't', 'realm': 'intl',
+            'deviceId': '1234567890123456789',
+            'machineId': 'a' * 64,
+        })
+        self.assertEqual(headers['X-Device-Id'], '1234567890123456789')
+        self.assertEqual(headers['X-Machine-Id'], 'a' * 64)
+
+    def test_blank_login_device_falls_back(self) -> None:
+        headers = client.auth_headers({'uid': '42', 'token': 't',
+                                       'deviceId': '  ', 'machineId': ''})
+        self.assertEqual(headers['X-Device-Id'], '42')
+
+
 class BodyTest(unittest.TestCase):
     def test_normalize_content(self) -> None:
         self.assertEqual(client.normalize_content('hi'),

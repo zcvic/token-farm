@@ -319,6 +319,9 @@ class WriteEndpointScopeMatrixTest(unittest.TestCase):
         # 面板前做」的动作，令牌（哪怕是管理员令牌）不行。导出虽然也是只对会话
         # 开放，但它是**读**接口，本清扫只看写接口，另见 ExportRequiresSessionTest。
         'POST /api/accounts/upload',
+        # 扫码添加账号：发起时会由服务端起后台轮询并在成功后**写入凭据**，与
+        # `/api/accounts/upload` 同一性质。operator 可用（仅会话），令牌不行。
+        'POST /api/auth/start',
         # PostgreSQL 异地备份：配置里带着能写整库的数据库凭据；导出会把全部数据
         # （含密钥哈希、请求日志）复制出去，恢复会**覆盖本地库**。三条都远超
         # 只读令牌该有的权限，与 /api/system/update 同级，只对会话开放。
@@ -327,7 +330,8 @@ class WriteEndpointScopeMatrixTest(unittest.TestCase):
         'POST /api/settings/pg-sync/export',
         'POST /api/settings/pg-sync/import',
         # 多平台账号池：导入/删除写的是**外部平台凭据**（Trae 的 token /
-        # refreshToken），与 `/api/accounts/upload` 同一性质——只对会话开放。
+        # refreshToken），与 `/api/accounts/upload` 同一性质——只对会话开放
+        # （导入允许 admin / operator，但仍拒绝 API Token）。
         # 刷新令牌与签到只算「操作」，落在 `require_admin`，不在本清单里。
         'POST /api/platforms/{name}/accounts/import',
         'POST /api/platforms/{name}/accounts/import-desktop',
@@ -391,15 +395,19 @@ class WriteEndpointScopeMatrixTest(unittest.TestCase):
         注意 `require_admin` 与 `require_session_admin` 内部都依赖 `current_user`，
         所以不能简单看「依赖树里有没有 current_user」——那会把全部写接口都算进来
         （第一版就是，报出一长串「新增」）。这里按依赖名出现的组合判断。
+        `require_session_account_adder`（admin / operator + 仅会话）同样是「仅会话」
+        一层，只放开了角色范围，不等同于接受 API Token。
         """
         out = set()
         for key, names in self.rows:
             if kind == 'session_only':
-                if 'require_session_admin' in names:
+                if ('require_session_admin' in names
+                        or 'require_session_account_adder' in names):
                     out.add(key)
             elif kind == 'any_logged_in':
                 if ('current_user' in names and 'require_admin' not in names
-                        and 'require_session_admin' not in names):
+                        and 'require_session_admin' not in names
+                        and 'require_session_account_adder' not in names):
                     out.add(key)
         return out
 

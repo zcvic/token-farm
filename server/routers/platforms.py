@@ -9,7 +9,10 @@
 
   · 读（列表 / 额度 / 模型目录）→ `current_user`，只读令牌也看得到；
   · 操作（刷新令牌 / 签到）      → `require_admin`，与管理令牌同级；
-  · 改凭据（导入 / 删除账号）    → `require_session_admin`，与
+  · 添加账号（导入 / 网页登录）  → `require_session_account_adder`（admin /
+    operator）：operator 只能**新增**，重复 uid 会被拒绝，删除 / 刷新 / 签到
+    仍只对管理员开放；
+  · 删除账号                    → `require_session_admin`，与
     `/api/accounts/upload` 同级：写外部凭据进号池这件事只对真人开放。
 """
 from __future__ import annotations
@@ -46,6 +49,25 @@ def _adapter(name: str):
 
 def _fail(exc: PlatformError) -> HTTPException:
     return HTTPException(status_code=exc.status, detail=exc.message)
+
+
+_UID_KEYS = ('uid', 'user_id', 'userId', 'id')
+
+
+def _entry_uid(entry: object) -> str:
+    """从导入条目里取出 uid（兼容扁平与 `{account: {...}}` 两种形状）。
+
+    只用于「operator 不能覆盖已有账号」这条守卫：取不到就交给适配器去校验，
+    不在路由层猜测平台字段的语义。
+    """
+    if not isinstance(entry, dict):
+        return ''
+    raw = entry.get('account') if isinstance(entry.get('account'), dict) else entry
+    for key in _UID_KEYS:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ''
 
 
 @router.get('')
@@ -212,7 +234,7 @@ async def list_accounts(name: str,
 async def import_accounts(
     name: str,
     payload: dict = Body(...),
-    user: dict = Depends(security.require_session_admin),
+    user: dict = Depends(security.require_session_account_adder),
 ) -> dict:
     """导入账号。接受单个对象，或 `{accounts: [...]}` 批量。
 
@@ -224,9 +246,21 @@ async def import_accounts(
         entries = payload['accounts']
     else:
         entries = [payload]
+    # operator（只读 + 添加账号）只能加新号。重复 uid 若直接交给适配器，
+    # Trae / Qoder 会把它当成「更新」并覆盖已有凭据——那属于管理员操作。
+    existing_uids: set[str] = set()
+    if not security.is_admin(user):
+        try:
+            existing_uids = {str(a.get('uid') or '') for a in adapter.list_accounts()}
+        except Exception:  # noqa: BLE001 —— 读列表失败不阻断导入，交给适配器报错
+            logger.warning('读取既有账号列表失败，跳过重复检查 platform=%s', name)
     imported: list[dict] = []
     failed: list[dict] = []
     for entry in entries:
+        uid = _entry_uid(entry)
+        if uid and uid in existing_uids:
+            failed.append({'error': '账号已存在，未覆盖', 'code': 'account_exists'})
+            continue
         try:
             imported.append(adapter.import_account(entry))
         except PlatformError as exc:
@@ -238,7 +272,7 @@ async def import_accounts(
 
 @router.post('/{name}/accounts/import-desktop')
 async def import_from_desktop(name: str, realm: str | None = Query(None),
-                              user: dict = Depends(security.require_session_admin)) -> dict:
+                              user: dict = Depends(security.require_session_account_adder)) -> dict:
     """从本机客户端一键导入（Trae：读 `%APPDATA%\\Trae CN` 里已登录的账号；
     Qoder：读官方桌面 App 与 CLI 的登录态，双区一起导入）。
 
@@ -255,7 +289,7 @@ async def import_from_desktop(name: str, realm: str | None = Query(None),
 
 @router.post('/{name}/login/start')
 async def login_start(name: str, body: dict | None = Body(None),
-                      user: dict = Depends(security.require_session_admin)) -> dict:
+                      user: dict = Depends(security.require_session_account_adder)) -> dict:
     """发起「网页登录」：返回授权 URL，前端打开浏览器后轮询结果。
 
     Trae 走本机回环回调：回调服务由**后端**在 `127.0.0.1` 随机端口上临时起
@@ -279,7 +313,7 @@ async def login_start(name: str, body: dict | None = Body(None),
 
 @router.get('/{name}/login/poll')
 def login_poll(name: str, login_id: str = Query(...),
-               user: dict = Depends(security.require_session_admin)) -> dict:
+               user: dict = Depends(security.require_session_account_adder)) -> dict:
     """查询网页登录状态：`pending` / `exchanging` / `success` / `error` / `expired`。"""
     adapter = _adapter(name)
     poller = getattr(adapter, 'login_poll', None)
@@ -295,7 +329,7 @@ def login_poll(name: str, login_id: str = Query(...),
 @router.post('/{name}/login/{login_id}/callback')
 async def login_callback(name: str, login_id: str,
                          body: dict | None = Body(None),
-                         user: dict = Depends(security.require_session_admin)) -> dict:
+                         user: dict = Depends(security.require_session_account_adder)) -> dict:
     """提交回调地址，完成一次网页登录。
 
     授权页只允许回调 `http://127.0.0.1:<port>/authorize`，远程部署时浏览器
@@ -318,7 +352,7 @@ async def login_callback(name: str, login_id: str,
 
 @router.delete('/{name}/login/{login_id}')
 async def login_cancel(name: str, login_id: str,
-                       user: dict = Depends(security.require_session_admin)) -> dict:
+                       user: dict = Depends(security.require_session_account_adder)) -> dict:
     adapter = _adapter(name)
     canceller = getattr(adapter, 'login_cancel', None)
     if canceller is None:

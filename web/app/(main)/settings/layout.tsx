@@ -2255,6 +2255,7 @@ export default function SettingsLayout({children}: {children: React.ReactNode}) 
                     <SelectTrigger className="bg-background" aria-label={t('settings.usersRole')}><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="admin">{t('settings.roleAdmin')}</SelectItem>
+                      <SelectItem value="operator">{t('settings.roleOperator')}</SelectItem>
                       <SelectItem value="viewer">{t('settings.roleViewer')}</SelectItem>
                     </SelectContent>
                   </Select>
@@ -2302,7 +2303,11 @@ export default function SettingsLayout({children}: {children: React.ReactNode}) 
                     <TableCell className="pl-4 text-sm font-medium">{u.username}</TableCell>
                     <TableCell>
                       <Badge variant="secondary" className="rounded-full">
-                        {u.role === 'admin' ? t('profile.roleAdmin') : t('profile.roleViewer')}
+                        {u.role === 'admin'
+                          ? t('profile.roleAdmin')
+                          : u.role === 'operator'
+                            ? t('profile.roleOperator')
+                            : t('profile.roleViewer')}
                       </Badge>
                     </TableCell>
                     {isAdmin && (

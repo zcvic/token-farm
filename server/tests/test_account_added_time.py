@@ -89,6 +89,7 @@ class AccountAddedTimeTest(unittest.TestCase):
     def test_upload_records_new_account_but_not_overwrite(self):
         app=FastAPI();app.include_router(accounts.router)
         app.dependency_overrides[security.require_session_admin]=lambda:{'username':'admin','role':'admin'}
+        app.dependency_overrides[security.require_session_account_adder]=lambda:{'username':'admin','role':'admin'}
         with TestClient(app) as client, mock.patch.object(security,'audit'):
             def upload(overwrite=False):
                 return client.post('/api/accounts/upload?overwrite='+str(overwrite).lower(),

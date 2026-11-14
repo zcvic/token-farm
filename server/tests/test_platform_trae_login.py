@@ -67,12 +67,18 @@ def _callback_url(trace: str, **extra: str) -> str:
     return 'http://127.0.0.1:43210/authorize?' + urllib.parse.urlencode(params)
 
 
-def _call(url: str, timeout: float = 5.0) -> tuple[int, str]:
+def _call(url, timeout: float = 5.0) -> tuple[int, str]:
+    status, _, body = _call_verbose(url, timeout)
+    return status, body
+
+
+def _call_verbose(url, timeout: float = 5.0):
+    """返回 `(status, headers, body)`；`url` 可以是字符串或 `Request`。"""
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - 本机回环
-            return resp.status, resp.read().decode('utf-8', 'replace')
+            return resp.status, resp.headers, resp.read().decode('utf-8', 'replace')
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode('utf-8', 'replace')
+        return exc.code, exc.headers, exc.read().decode('utf-8', 'replace')
 
 
 def _wait_settled(login_id: str, timeout: float = 5.0) -> dict:
@@ -148,6 +154,54 @@ class WebLoginTest(unittest.TestCase):
         # 轮换后的 refreshToken 才是落盘值，不能只存回调里的那个。
         self.assertEqual(payload['refreshToken'], 'refresh-rotated')
         self.assertEqual(out['account']['uid'], '42')
+
+    def test_callback_response_is_not_cacheable(self) -> None:
+        start = login.start('cn')
+        self.addCleanup(login.cancel, start['login_id'])
+        port, trace = _callback_port_and_trace(start['url'])
+        url = (f'http://127.0.0.1:{port}/authorize?'
+               + urllib.parse.urlencode({'refreshToken': 'refresh-from-callback',
+                                         'loginTraceID': trace}))
+        status, headers, _ = _call_verbose(url)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get('Cache-Control'), 'no-store')
+        self.assertEqual(headers.get('Referrer-Policy'), 'no-referrer')
+        self.assertEqual(headers.get('X-Content-Type-Options'), 'nosniff')
+
+    def test_callback_rejects_foreign_host(self) -> None:
+        """DNS rebinding：域名解析到 127.0.0.1 时 Host 仍是外部域名。"""
+        start = login.start('cn')
+        self.addCleanup(login.cancel, start['login_id'])
+        port, trace = _callback_port_and_trace(start['url'])
+        url = (f'http://127.0.0.1:{port}/authorize?'
+               + urllib.parse.urlencode({'refreshToken': 'x', 'loginTraceID': trace}))
+        req = urllib.request.Request(url, headers={'Host': 'evil.example'})
+        status, _ = _call(req)
+        self.assertEqual(status, 403)
+        self.assertEqual(login.poll(start['login_id'])['status'], 'pending')
+        self.exchange.assert_not_awaited()
+
+    def test_callback_rejects_foreign_origin(self) -> None:
+        start = login.start('cn')
+        self.addCleanup(login.cancel, start['login_id'])
+        port, trace = _callback_port_and_trace(start['url'])
+        url = (f'http://127.0.0.1:{port}/authorize?'
+               + urllib.parse.urlencode({'refreshToken': 'x', 'loginTraceID': trace}))
+        req = urllib.request.Request(url, headers={'Origin': 'https://evil.example'})
+        status, _ = _call(req)
+        self.assertEqual(status, 403)
+        self.assertEqual(login.poll(start['login_id'])['status'], 'pending')
+
+    def test_pending_sessions_are_capped(self) -> None:
+        first = login.start('cn')
+        self.addCleanup(login.cancel, first['login_id'])
+        with mock.patch.object(login, '_MAX_PENDING', 1):
+            with self.assertRaises(PlatformError) as ctx:
+                login.start('cn')
+        self.assertEqual(ctx.exception.status, 429)
+        self.assertEqual(ctx.exception.code, 'too_many_sessions')
+        # 被拒绝的会话不落表，也不影响已经挂起的那一场。
+        self.assertEqual(login.poll(first['login_id'])['status'], 'pending')
 
     def test_trace_mismatch_is_rejected_and_session_stays_pending(self) -> None:
         start = login.start('cn')

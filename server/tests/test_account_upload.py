@@ -38,6 +38,9 @@ class AccountUploadTest(unittest.TestCase):
         app.include_router(accounts.router)
         app.dependency_overrides[security.require_session_admin] = lambda: {
             'username': 'test', 'role': 'admin'}
+        # 导入入口用的是「可添加账号」依赖（admin / operator + 仅会话）。
+        app.dependency_overrides[security.require_session_account_adder] = lambda: {
+            'username': 'test', 'role': 'admin'}
         self.client = TestClient(app)
 
     def test_imports_canonical_and_flat_exports(self) -> None:
@@ -235,6 +238,31 @@ class AccountUploadTest(unittest.TestCase):
             response = self.client.get('/api/accounts/export')
 
         self.assertEqual(response.status_code, 409)
+
+    def test_operator_can_add_accounts_but_not_overwrite(self) -> None:
+        """operator = 只读 + 添加平台账号；覆盖已有账号仍只对管理员开放。"""
+        self.client.app.dependency_overrides[security.require_session_account_adder] = (
+            lambda: {'username': 'op', 'role': 'operator'})
+        payload = {'uid': 'op-1', 'access_token': 'first', 'expires_at': 4102444800}
+        response = self.client.post('/api/accounts/upload', files=[
+            ('files', ('op.json', json.dumps(payload), 'application/json'))])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([item['uid'] for item in response.json()['added']], ['op-1'])
+
+        # 不带 overwrite：重复账号按「已存在」拒绝，不覆盖
+        response = self.client.post('/api/accounts/upload', files=[
+            ('files', ('op.json', json.dumps({**payload, 'access_token': 'second'}),
+                       'application/json'))])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['rejected'][0]['uid'], 'op-1')
+
+        # 带 overwrite：后端直接 403，不依赖前端隐藏勾选框
+        response = self.client.post('/api/accounts/upload?overwrite=true', files=[
+            ('files', ('op.json', json.dumps({**payload, 'access_token': 'second'}),
+                       'application/json'))])
+        self.assertEqual(response.status_code, 403, response.text)
+        saved = json.loads((self.auth_dir / 'workbuddy-op-1.json').read_text())
+        self.assertEqual(saved['auth']['accessToken'], 'first')
 
 
 class ImportExportAuditTest(AccountUploadTest):

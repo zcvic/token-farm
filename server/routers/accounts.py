@@ -175,9 +175,12 @@ async def upload_accounts(
     files: list[UploadFile] = File(...),
     upstream_id: int | None = Query(None),
     overwrite: bool = Query(False),
-    user: dict = Depends(security.require_session_admin),
+    user: dict = Depends(security.require_session_account_adder),
 ) -> dict:
     """Import one or more account JSON files, preserving the existing account flow."""
+    # operator 只能**新增**：覆盖已有账号会替换别人正在用的凭据，属于管理员操作。
+    if overwrite and not security.is_admin(user):
+        raise HTTPException(status_code=403, detail='只有管理员可以覆盖已有账号')
     group = _group(upstream_id)
     auth_dir = _require_dir(group)
     uploaded: list[dict] = []
@@ -684,7 +687,7 @@ async def auth_start(
                     '给了它就进入「针对该账号的重登」语义（见下）',
     ),
     body: dict | None = Body(None),
-    user: dict = Depends(security.require_admin),
+    user: dict = Depends(security.require_session_account_adder),
 ) -> dict:
     """发起扫码登录。realm 决定国内版 / 国际版端点（缺省国内版）。
 
@@ -731,6 +734,9 @@ async def auth_start(
         raw_uid = str(body.get('uid'))
     target: dict | None = None
     target_uid = str(raw_uid or '').strip()
+    # 带 uid = 重登**已有**账号：会覆盖它的凭据，operator（只读 + 添加账号）不得执行。
+    if target_uid and not security.is_admin(user):
+        raise HTTPException(status_code=403, detail='只有管理员可以重登已有账号')
     if target_uid:
         target = _relogin_target(target_uid, group)
         if target is None:
@@ -785,7 +791,7 @@ async def auth_poll(
     realm: str | None = None,
     region: str | None = None,
     upstream_id: int | None = Query(None),
-    user: dict = Depends(security.require_admin),
+    user: dict = Depends(security.require_session_account_adder),
 ) -> dict:
     """轮询扫码结果；成功则落盘并触发上游重载。
 
@@ -794,6 +800,9 @@ async def auth_poll(
     """
     if not state:
         return {'status': 'invalid'}
+    # 重登（针对已有账号）的轮询同样是管理员专属，别让 operator 借已知 state 覆盖旧账号。
+    if not security.is_admin(user) and _login_targets.get(state):
+        raise HTTPException(status_code=403, detail='只有管理员可以重登已有账号')
     # 出站网络失败（线路连不上等）→ 502 + 中文原因：与 /auth/start 同一口径。
     # 不转的话前端拿到的是英文 500，用户看不出「是线路的问题、该换线路」。
 

@@ -697,7 +697,11 @@ export function ManagementBar() {
                               </div>
                               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                 <Badge variant="secondary" className="h-5 rounded-full px-2 text-[10px]">
-                                  {me.role === 'admin' ? t('profile.roleAdmin') : t('profile.roleViewer')}
+                                  {me.role === 'admin'
+                                    ? t('profile.roleAdmin')
+                                    : me.role === 'operator'
+                                      ? t('profile.roleOperator')
+                                      : t('profile.roleViewer')}
                                 </Badge>
                               </div>
                             </div>

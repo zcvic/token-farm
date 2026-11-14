@@ -1,4 +1,28 @@
 # 已人工核对过的 trae2api-hub 提交 —— 本仓库 Trae 适配层的协议事实来源。
 # 推进时机：跑过 -Refs 看过 diff，确认本仓库不受影响（或已跟着改完）之后。
 # 记录方式：sync-upstream 的 --refs --mark（Windows 用 -Refs -Mark）
-5ed619f314f75e3016392370d1b766467a5e92c1
+#
+# ---- 2026-11 第一批（基线 5ed619f3 → 95c97fab，3 个提交）
+# 只有 trae_client.py / trae_accounts.py 两个协议事实文件有改动；CHANGELOG 是
+# 参考仓自己的发布说明。看板 / 调度 / 记账 / 上下文预算等改动在别的文件里，
+# 属于参考仓自己的运行时，按 docs/upstream-sync.md 不整段移植。
+# 已同步：
+#   · 95c97fab 数据面设备头跟随登录设备：网页登录 / OAuth 落盘的 deviceId、
+#     machineId 优先于按 uid 派生的默认值（server/platforms/trae/client.py）。
+#   · 95c97fab 回调页 Cache-Control: no-store / Referrer-Policy: no-referrer，
+#     并校验 Host / Origin 只来自本机回环、限制同时挂起的登录会话数
+#     （server/platforms/trae/login.py）。
+#   · bad2c318 本机导入的 CLI 临时 token 兜底：读 ~/.trae-cn/trae-jwt-token 与
+#     ~/.trae/trae-jwt-token，没有 userId 时按 token 摘要派生合成 uid；同一区域
+#     已有桌面登录态时不使用临时 token（server/platforms/trae/desktop.py）。
+#     桌面 storage.json 的跨平台路径（Windows / macOS / XDG）本地此前已有。
+# 有意不跟：
+#   · bad2c318 的显式 path 导入与扫描页候选行：那是参考仓看板的导入入口，本地用
+#     TRAE_DESKTOP_DIRS / TRAE_USER_HOME 覆盖，暂不加 API 参数与扫描页。
+#   · bad2c318 / 67eefc97 的上下文预算、用量记账、保守调度与看板重构：属于
+#     参考仓自己的单文件看板 / 调度实现，本地运行时不同，不移植。
+#   · 95c97fab 的 login_trace_id 强制回显：本地对未带 trace 的回调保持宽松
+#     （部分抓包显示 CN 可能不回传），带 trace 时仍严格比对。
+#   · 95c97fab 的面板会话 owner 绑定：本地登录接口已限定管理员会话，不再加一层。
+#   · 每号默认并发 8 → 2：本地并发是平台池级配置（默认不限），语义不同。
+95c97fab0529bc75dbf906df04f8ad190d217f0a

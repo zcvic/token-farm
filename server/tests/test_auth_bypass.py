@@ -320,6 +320,8 @@ class UserAdminHttpTest(unittest.TestCase):
         _users_file(self._dir, users=[
             {'username': 'admin', 'role': 'admin',
              'pwd_hash': security.make_hash('http-admin-pw')},
+            {'username': 'operator', 'role': 'operator',
+             'pwd_hash': security.make_hash('operator-pw-123')},
             {'username': 'guest', 'role': 'viewer',
              'pwd_hash': security.make_hash('guest-pw-123')},
         ], api_keys=['wbk_leaked_from_production'])
@@ -401,6 +403,82 @@ class UserAdminHttpTest(unittest.TestCase):
             self.c.patch('/api/users/admin', json={'password': 'hacked-pw-1'}).status_code, 403)
         self.assertEqual(self.c.post('/api/users', json={
             'username': 'x', 'password': 'yyyyyyyy', 'role': 'admin'}).status_code, 403)
+
+    def test_admin_can_create_operator_user(self) -> None:
+        """管理员可以把新用户设为 operator（只读 + 添加平台账号）。"""
+        self.assertEqual(self._login('admin', 'http-admin-pw'), 200)
+        r = self.c.post('/api/users', json={
+            'username': 'ops', 'password': 'ops-password-1', 'role': 'operator'})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()['role'], 'operator')
+        self.assertEqual(self._login('ops', 'ops-password-1'), 200)
+
+    def test_operator_cannot_create_users(self) -> None:
+        """operator 的额外权限是「添加平台账号」，不是新建登录用户。"""
+        self.assertEqual(self._login('operator', 'operator-pw-123'), 200)
+
+        r = self.c.post('/api/users', json={
+            'username': 'newbie', 'password': 'newbie-pw-123', 'role': 'viewer'})
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(TestClient(self.app).post('/api/login', json={
+            'username': 'newbie', 'password': 'newbie-pw-123'}).status_code, 401)
+
+        # 改密码 / 删用户同样是管理员专属
+        self.assertEqual(self.c.patch('/api/users/guest', json={
+            'password': 'changed-pw-123'}).status_code, 403)
+        self.assertEqual(self.c.delete('/api/users/guest').status_code, 403)
+
+    def test_operator_can_reach_account_import_but_viewer_cannot(self) -> None:
+        """operator 可以往号池里加账号：导入入口放行（无效条目只回 failed）。"""
+        self.assertEqual(self._login('operator', 'operator-pw-123'), 200)
+        r = self.c.post('/api/platforms/trae/accounts/import',
+                        json={'accounts': [{'no_uid': True}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json().get('failed'))
+        self.assertEqual(r.json().get('imported'), [])
+
+        self.assertEqual(self._login('guest', 'guest-pw-123'), 200)
+        self.assertEqual(self.c.post('/api/platforms/trae/accounts/import', json={
+            'accounts': [{'uid': 'x', 'token': 't'}]}).status_code, 403)
+
+    def test_operator_cannot_overwrite_existing_platform_account(self) -> None:
+        """operator 只能加新号：重复 uid 应被拒绝，而不是走适配器的「更新」分支。"""
+        from server.routers import platforms as platforms_router
+
+        class _FakeAdapter:
+            name = 'trae'
+            label = 'Trae'
+
+            def list_accounts(self) -> list[dict]:
+                return [{'uid': 'existing-1'}]
+
+            def import_account(self, payload: dict) -> dict:
+                raise AssertionError('已有账号不该被 operator 覆盖')
+
+        self.assertEqual(self._login('operator', 'operator-pw-123'), 200)
+        with mock.patch.object(platforms_router, 'get_platform',
+                               return_value=_FakeAdapter()):
+            r = self.c.post('/api/platforms/trae/accounts/import', json={
+                'accounts': [{'uid': 'existing-1', 'token': 'new-token'}]})
+
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()['imported'], [])
+        self.assertEqual(r.json()['failed'][0]['code'], 'account_exists')
+
+    def test_operator_cannot_modify_existing_accounts(self) -> None:
+        """删除 / 改权重 / 刷新 / 签到 / 改配置仍只对管理员开放。"""
+        self.assertEqual(self._login('operator', 'operator-pw-123'), 200)
+        self.assertEqual(self.c.delete('/api/platforms/trae/accounts/abc').status_code, 403)
+        self.assertEqual(self.c.patch('/api/platforms/trae/accounts/abc',
+                                      json={'weight': 2}).status_code, 403)
+        self.assertEqual(self.c.post(
+            '/api/platforms/trae/accounts/abc/refresh').status_code, 403)
+        self.assertEqual(self.c.post('/api/platforms/trae/checkin-all').status_code, 403)
+        self.assertEqual(self.c.put('/api/platforms/trae/settings',
+                                    json={'enabled': True}).status_code, 403)
+        # 重登已有账号 = 覆盖它的凭据，operator 也不行
+        self.assertEqual(self.c.post('/api/auth/start',
+                                     params={'uid': 'existing-uid'}).status_code, 403)
 
     def test_viewer_cannot_read_audit_logs(self) -> None:
         self._login('guest', 'guest-pw-123')

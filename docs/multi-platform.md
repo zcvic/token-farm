@@ -154,7 +154,7 @@ registry.register(FooAdapter())
 这样协议差异（Trae 永远返回 SSE、WorkBuddy 返回标准 SSE）被关在适配器内，
 网关只认 OpenAI 形状。
 
-管理端端点（都需要管理员会话）：
+管理端端点：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -178,12 +178,15 @@ registry.register(FooAdapter())
 | DELETE | `/api/platforms/{name}/login/{login_id}` | 取消登录（释放本机回调端口） |
 | GET | `/api/platforms/{name}/models` | 模型目录（`?refresh=true` 拉线上） |
 
-权限分三档（与账号页同口径，不是一律「已登录」）：
+权限分四档（与账号页同口径，不是一律「已登录」）：
 
 - **读**（平台清单 / 账号列表 / 额度 / 模型目录）→ `current_user`，只读令牌也能看；
+- **添加账号**（手工导入 / 一键导入 / 网页登录 / 登录轮询与取消）→
+  `require_session_account_adder`：管理员或 `operator`（只读 + 添加账号）都能用，
+  但 operator 只能**新增**（重复 uid 会被拒绝），仍拒绝 API Token；
 - **操作**（刷新令牌 / 签到 / 批量签到）→ `require_admin`；
-- **改凭据**（手工导入 / 一键导入 / 网页登录 / 删除账号）→ `require_session_admin`，
-  与 `/api/accounts/upload` 同级：把外部平台凭据写进池子这件事只对真人开放。
+- **删除账号** → `require_session_admin`，与 `/api/accounts/upload` 同级：
+  把外部平台凭据写进池子或从池子里删掉这件事只对真人开放。
 
 这些写端点已登记进 `test_api_tokens` 的 `SESSION_ONLY` 清单；`realm` /
 `force` 两个 query 参数已登记进 `test_request_binding` 的
@@ -248,6 +251,18 @@ registry.register(FooAdapter())
 国内版仍不带 PKCE，授权页直接回 `refreshToken`，复用已有的刷新链路。早先
 「国际版也可以主动省略 PKCE」的结论已作废——省略后走的是 refreshToken 分支，
 兑换形状与真实客户端不一致。
+
+**登录设备贯穿到数据面**：登录时上报并随账号落盘的 `deviceId` / `machineId`，
+之后所有 IDE 数据面请求的 `X-Device-Id` / `X-Machine-Id` 都继续用这两个值，
+而不是按 uid 重新派生——浏览器令牌绑定的是授权时那台设备，换成另一套设备画像
+会被上游按异常处理。只有没有登录设备记录的账号（手工粘贴 / 旧版导入）才回退到
+按 uid 派生。
+
+**本机回调监听器**：只绑定 `127.0.0.1`、只处理 `GET /authorize`，并校验
+`Host` / `Origin` 必须来自同一回环端口（挡 DNS rebinding 与跨站请求）；回包带
+`Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`，也不把查询串写进
+访问日志。同时最多 16 个挂起会话，超过后新请求直接拒绝，避免反复点「开始授权」
+把本机端口耗尽。
 
 **同机约束与远程兜底**：授权页强校验 `auth_callback_url` 必须是
 `http://127.0.0.1:<port>/authorize`，所以后端只能在本机回环地址上等回调。
@@ -449,6 +464,16 @@ storage.json` 的 `iCubeAuthInfo://icube.cloudide` 里，值是加密的
 （见 `icube.py`：`tc` 头 + AES-128-CBC，密钥由 blob 自带的 key material 派生）。
 `POST /api/platforms/trae/accounts/import-desktop` 直接读它，凭据只在内存里过一遍
 就落到 `data/platforms/trae/accounts/`，接口只返回脱敏结构。
+
+路径按平台取（Windows `%APPDATA%`、macOS `~/Library/Application Support`、
+Linux `$XDG_CONFIG_HOME`）；`TRAE_DESKTOP_DIRS` 可指定自定义安装目录，
+`TRAE_USER_HOME` 可覆盖下面临时 token 所在的用户主目录。
+
+桌面客户端没登录、但 IDE / CLI 留了 7 天临时 token 时，还会兜底读
+`~/.trae-cn/trae-jwt-token`（国际版 `~/.trae/trae-jwt-token`）。这种 token 只有
+access token、不能刷新，也没有 userId，导入时按 token 摘要生成稳定的合成 uid；
+同一区域已有 `storage.json` 登录态时不使用它——用不能刷新的一次性令牌顶替
+可刷新账号只会让账号更快失效。
 
 **同步是双向的**，否则会把用户从 IDE 里踢出去：
 
@@ -774,7 +799,7 @@ Trae 事件 → OpenAI chunk：
 - `server/tests/test_platform_trae_adapter.py`：目录缓存策略、隐式拉取冷却、
   多账号选择。
 - `server/tests/test_platform_trae_desktop.py`：blob 编解码（含 FIPS-197 官方向量）、
-  导入、回写、备份。
+  导入（含 CLI 临时 token 兜底）、回写、备份。
 - `server/tests/test_platform_sse.py`：SSE 拼帧、错误帧、断开时不补错误帧。
 - `server/tests/test_platform_realm.py`：前端版本映射（`global` ↔ `intl`）、
   版本开关的显示条件、账号 / 模型过滤、导入时补 `realm`。

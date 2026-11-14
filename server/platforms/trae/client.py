@@ -136,6 +136,16 @@ def auth_headers(account: dict, realm: str | None = None) -> dict[str, str]:
         'User-Agent': REALMS[realm]['ua'],
     }
     headers.update(fingerprint.device_headers(str(account.get('uid') or '')))
+    # 网页登录（浏览器 OAuth）把令牌绑定在**授权时的设备**上：设备号 / 机器号
+    # 随账号一起落盘，后续请求必须继续用它。默认的按 uid 派生值只适用于没有
+    # 登录设备记录的账号（手工粘贴 / 旧版导入）；用它覆盖会把浏览器令牌伪装成
+    # 另一台设备，上游按设备画像不一致处理。
+    device_id = str(account.get('deviceId') or '').strip()
+    machine_id = str(account.get('machineId') or '').strip()
+    if device_id:
+        headers['X-Device-Id'] = device_id
+    if machine_id:
+        headers['X-Machine-Id'] = machine_id
     headers['X-Request-Id'] = fingerprint.request_id()
     return headers
 
