@@ -186,10 +186,10 @@ func TestRunActivityNowSelfCheckDaysNormal(t *testing.T) {
 	s := New(Config{Pool: p, Upstream: up})
 
 	s.RunActivityNow()
-	// streak 命中 2 次 = streak 自检 1 次 + 连登奖励读取（GrowthRewardState）1 次
-	// （days=3 未达 7d 档，奖励链停在无达标档，不再发 redeem）。
-	if stub.reportCalls.Load() != 1 || stub.streakHits.Load() != 2 {
-		t.Errorf("report_calls=%d streak_hits=%d want 1/2（上报 + 自检 + 奖励状态读取）", stub.reportCalls.Load(), stub.streakHits.Load())
+	// streak 命中 1 次 = streak 自检。奖励链已与 activity 解耦（A-5），不再读 reward-state。
+	// （days=3 未达 7d 档，奖励链在签到排程末尾才跑。）
+	if stub.reportCalls.Load() != 1 || stub.streakHits.Load() != 1 {
+		t.Errorf("report_calls=%d streak_hits=%d want 1/1（上报 + 自检，奖励链已移出 activity）", stub.reportCalls.Load(), stub.streakHits.Load())
 	}
 	// days>=1：checkActivityStreak 返回 false（无可疑）。
 	if s.checkActivityStreak(p.AuthByUID("u1")) {

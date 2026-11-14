@@ -1756,6 +1756,10 @@ _INT_RANGES: dict[str, tuple[int, int, str]] = {
     'account_delay_min_seconds': (0, 600, '秒'),
     'account_delay_max_seconds': (0, 600, '秒'),
     'activity_report_count': (1, 50, '条'),
+    # 每轮连登管家最多用几张补签卡（0 = 不限）。上限 100：官方补签卡持有上限是
+    # 个位数，留出余量但不至于让误填的 10 位数把整月漏签一口气全补掉
+    #（补签是改账号历史的写操作，多补不可逆）。
+    'makeup_cards_per_round': (0, 100, '张'),
     'max_in_flight': (0, 64, '个'),
     # 国际版在途上限分档（上游 2680f4c）。**语义与 max_in_flight 不同**：那边
     # 0 = 不限制，这边的 0（含负数）在上游 config 归一化时被改成默认值 **2**

@@ -72,6 +72,8 @@ const KIND_LABEL_KEYS: Record<string, string> = {
   cat: 'tasks.kindCat',
   // 面板发起的一次执行（server/services/taskrun.py 写入，含 claim / full 两种模式）
   taskrun: 'tasks.kindTaskrun',
+  // 连登管家（上游 2026-11 从 activity 解耦，见 upstream/internal/scheduler/streak.go）
+  'streak-bonus': 'tasks.kindStreakBonus',
 };
 
 /**

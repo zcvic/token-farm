@@ -220,6 +220,10 @@ func main() {
 		SchoolDisabled:         !cfg.Schedule.SchoolEnabled,
 		CatDisabled:            !cfg.Schedule.CatEnabled,
 	})
+	// 每轮补签卡上限（schedule.makeup_cards_per_round）：0 = 不限。
+	// 用 setter 而不是 Config 字段：运行期可热改（面板保存配置后调用同一个 setter），
+	// 与 atomic 读侧（makeupMissed）保持同一份语义。
+	sch.SetMakeupCardsPerRound(cfg.Schedule.MakeupCardsPerRound)
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
 		log.Printf("签到已禁用（schedule.checkin_enabled=false）")

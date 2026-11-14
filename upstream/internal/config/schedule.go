@@ -47,6 +47,13 @@ type Schedule struct {
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
+	// MakeupCardsPerRound 每轮连登管家最多用几张补签卡（0 = 不限，补到卡用光）。
+	//
+	// 为什么要这个上限：补签是**改账号历史**的写操作（把某天从"漏签"改成"已签"），
+	// 一次把整月漏签全补上风险不可逆。保守部署配 1，一轮只补一张，剩下的交给
+	// 次日签到继续补——连登天数不会因此丢，只是分几天补齐。
+	// 负值 fail fast（与 KeepaliveRefreshWindow 同口径：不猜语义）。
+	MakeupCardsPerRound int `json:"makeup_cards_per_round"`
 	// KeepaliveRefreshWindow 周期保活只刷新「剩余有效期 <= 该窗口」的凭证（如 "168h"）。
 	//
 	// 空 = 默认 168h（7 天）；非法或 <= 0 **fail fast**——一个写错的值（例如 "168"，
@@ -121,6 +128,12 @@ func (s *Schedule) Normalize() error {
 	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
+	}
+	// makeup_cards_per_round：0 = 不限（默认），负值 fail fast。
+	// 不用负数表意"禁用补签"——要关补签请把补签卡用光或关掉签到排程；
+	// 一个写错的值（比如 -1）静默变成"不限"正是最危险的方向。
+	if s.MakeupCardsPerRound < 0 {
+		return fmt.Errorf("schedule.makeup_cards_per_round: 不能为负（0 = 不限，正数 = 每轮上限）")
 	}
 	// keepalive_refresh_window：空回落默认 168h；非法或 <= 0 fail fast。
 	// 不用 0 表意「不过滤」——那会让「少写单位」（"168" 之类）静默变成全量刷新，

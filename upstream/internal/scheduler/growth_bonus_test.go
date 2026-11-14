@@ -1,9 +1,11 @@
 package scheduler
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,95 +15,127 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// bonusChainStub 模拟 claimGrowthRewards 全链新增段：heatmap + makeup-cards/use +
-// claim-gift/claim-compensation（在 rewardStub 覆盖的 redeem/lottery 之外）。
-// 默认：昨日漏签、有卡、补签成功、礼包/补偿到账。
+// bonusChainStub 模拟连登管家全链：heatmap（补签判据）+ streak（天数/补签卡/档位）
+// + makeup-cards/use + check-gift-claimed + claim-gift + redeem + lottery。
+//
+// 与旧版的关键差别：礼包走「先查状态再领」（benefit.go），所以 stub 必须提供
+// check-gift-claimed；heatmap 必须带 today.date（HeatmapBrokenDates 的窗口下界）。
 type bonusChainStub struct {
-	days         int // streak.days（补签前）
-	daysAfter    int // 补签后重读的 streak.days（0 = 不变，模拟无需补签外的场景）
-	missed       bool
-	cards        int  // 补签卡余额
-	makeupFail   bool // use 接口业务错误
-	giftCredit   int64
-	compCredit   int64
-	redeemCalls  atomic.Int32
+	days       int      // streak.days
+	daysAfter  int      // 补签成功后重读的 days（0 = 与 days 相同）
+	cards      int      // 补签卡余额
+	broken     []string // 漏签日期（升序，2006-01-02 形态）
+	noToday    bool     // heatmap 缺 today.date
+	heatErr    bool     // heatmap 500
+	makeupFail int      // >0：第 N 次 use 起返回业务错误（0 = 从不失败）
+	giftActive bool
+	giftClaim  bool  // 上游说已领
+	giftNum    int64 // 状态里的可领额度（credit_num）
+	giftCredit int64 // claim 回执 credit
+	giftEnd    string
+	giftErr    bool // 状态查询失败
+
 	makeupCalls  atomic.Int32
+	makeupMu     sync.Mutex
+	makeupDates  []string
+	giftStatus   atomic.Int32
 	giftCalls    atomic.Int32
-	compCalls    atomic.Int32
-	heatmapCalls atomic.Int32
 	streakCalls  atomic.Int32
+	redeemCalls  atomic.Int32
+	chanceCalls  atomic.Int32
+	drawCalls    atomic.Int32
+	heatmapCalls atomic.Int32
 }
 
 func newBonusChainStub() *bonusChainStub {
-	return &bonusChainStub{days: 8, daysAfter: 8, missed: true, cards: 2,
-		giftCredit: 66, compCredit: 88}
-}
-
-// streakCallBudget 返回 streak GET 的预期次数：
-// reward-state 1 + 漏签时查补签卡余额 1 + 补签成功后重读挑档 1。
-func (s *bonusChainStub) streakCallBudget() int {
-	n := 1 // reward-state
-	if s.missed && s.cards > 0 {
-		n++ // makeupYesterday 的补签卡余额读取（use 之前发生）
-		if !s.makeupFail {
-			n++ // 补签成功后的 state 重读
+	today := travelDay(time.Now())
+	monthStart := today[:8] + "01"
+	// 本月内、严格早于今天的三天（跨月时自动裁掉上月那几天）。
+	var broken []string
+	for _, d := range []string{
+		travelDay(time.Now().AddDate(0, 0, -3)),
+		travelDay(time.Now().AddDate(0, 0, -2)),
+		travelDay(time.Now().AddDate(0, 0, -1)),
+	} {
+		if d >= monthStart && d < today {
+			broken = append(broken, d)
 		}
 	}
-	return n
+	return &bonusChainStub{
+		days: 8, cards: len(broken), broken: broken,
+		giftActive: true, giftNum: 66, giftCredit: 66, giftEnd: "2026-12-31 23:59:59",
+	}
 }
 
 func (s *bonusChainStub) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 昨日日期必须与生产侧同口径（CST 自然日）：判据侧是
-		// upstream.GrowthYesterdayDate(time.Now()) → scheduler.makeupYesterday，
-		// 热力图 date 也是 CST 自然日。travelDay 是本包 CST 自然日的唯一口径，
-		// 用它彻底避开进程本地时区（容器恒 UTC）。若按本地时区取 AddDate(-1)，
-		// 则在 UTC 16:00–24:00（= CST 次日 00:00–08:00）窗口内标签整体错一天：
-		// HeatmapDayScore 查不到「昨日」格 → makeupYesterday 早退 → 不发补签 use
-		//（每天固定 8 小时的时序性红灯）。按请求现算，避免跨 CST 零点冻住标签。
-		yest := travelDay(time.Now().AddDate(0, 0, -1))
+		// 今日必须与生产侧同口径（CST 自然日）。stub 的 today.date 是
+		// HeatmapBrokenDates 的唯一窗口依据，按请求现算，避免跨 CST 零点冻住。
+		today := travelDay(time.Now())
 		switch r.URL.Path {
-		case "/v2/report":
-			w.Write([]byte(`{"code":0,"msg":"OK"}`))
 		case "/activity/growth/heatmap":
 			s.heatmapCalls.Add(1)
-			score := 1
-			if s.missed {
-				score = 0
+			if s.heatErr {
+				w.WriteHeader(500)
+				w.Write([]byte(`boom`))
+				return
 			}
-			fmt.Fprintf(w, `{"code":0,"data":{"cells":[{"date":"%s","score":%d}]}}`, yest, score)
+			cells := ""
+			for _, d := range s.broken {
+				cells += fmt.Sprintf(`{"date":"%s","score":0},`, d)
+			}
+			cells += fmt.Sprintf(`{"date":"%s","score":1}`, today)
+			if s.noToday {
+				fmt.Fprintf(w, `{"code":0,"data":{"cells":[%s]}}`, cells)
+				return
+			}
+			fmt.Fprintf(w, `{"code":0,"data":{"today":{"date":"%s"},"cells":[%s]}}`, today, cells)
 		case "/activity/growth/streak":
 			s.streakCalls.Add(1)
 			days := s.days
 			if s.makeupCalls.Load() > 0 && s.daysAfter > 0 {
-				days = s.daysAfter // 补签后重读 → 恢复的天数
+				days = s.daysAfter
 			}
 			fmt.Fprintf(w, `{"code":0,"data":{"streak":{"days":%d},"makeup_cards":{"balance":%d,"max":5},`+
 				`"redemption_status":{"tier_7d_status":"available","tier_14d_status":"locked","tier_28d_status":"locked",`+
 				`"remaining_days":%d,"tiers":[{"tier":"7d","days":7,"credit":0,"energy":2,"cards":1,"chances":1}]}}}`,
 				days, s.cards, days)
 		case "/activity/growth/makeup-cards/use":
-			s.makeupCalls.Add(1)
-			if s.makeupFail {
+			n := s.makeupCalls.Add(1)
+			var b struct {
+				Date string `json:"target_date"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			s.makeupMu.Lock()
+			s.makeupDates = append(s.makeupDates, b.Date)
+			s.makeupMu.Unlock()
+			if s.makeupFail > 0 && int(n) >= s.makeupFail {
 				w.WriteHeader(400)
-				w.Write([]byte(`{"code":400,"msg":"no makeup card"}`))
+				w.Write([]byte(`{"code":400,"msg":"no makeup card available"}`))
 				return
 			}
 			w.Write([]byte(`{"code":0,"data":{}}`))
+		case "/billing/meter/check-gift-claimed":
+			s.giftStatus.Add(1)
+			if s.giftErr {
+				w.WriteHeader(500)
+				w.Write([]byte(`boom`))
+				return
+			}
+			fmt.Fprintf(w, `{"code":0,"data":{"active":%t,"claimed":%t,"credit_num":%d,"end_time":"%s"}}`,
+				s.giftActive, s.giftClaim, s.giftNum, s.giftEnd)
 		case "/billing/meter/claim-gift":
 			s.giftCalls.Add(1)
 			fmt.Fprintf(w, `{"code":0,"data":{"credit":%d}}`, s.giftCredit)
-		case "/billing/meter/claim-compensation":
-			s.compCalls.Add(1)
-			fmt.Fprintf(w, `{"code":0,"data":{"credit":%d}}`, s.compCredit)
 		case "/activity/growth/redeem":
 			s.redeemCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"cards_granted":1,"credit_granted":0,"energy_granted":2,"chances_granted":1}}`))
 		case "/activity/growth/lottery/chances":
+			s.chanceCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"balance":0}}`))
-		case "/activity/growth/buddy/info":
-			// runActivity 里 travelAdoptForce 会查有无猫：已有猫 → 跳过领养，不干扰链。
-			w.Write([]byte(`{"code":0,"data":{"buddy":{"id":1,"name":"档案喵"}}}`))
+		case "/activity/growth/lottery/draw":
+			s.drawCalls.Add(1)
+			w.Write([]byte(`{"code":0,"data":{"prize_name":"p"}}`))
 		default:
 			http.Error(w, "not found", 404)
 		}
@@ -117,165 +151,276 @@ func bonusChainScheduler(t *testing.T, srv *httptest.Server) (*Scheduler, *pool.
 	return New(Config{Pool: p, Upstream: up, ActivityReportCount: 1}), p
 }
 
-// TestClaimGrowthRewardsClaimsGiftAndCompensation 礼包/补偿：成功到账打日志、各打一次。
-func TestClaimGrowthRewardsClaimsGiftAndCompensation(t *testing.T) {
-	fastActivity(t)
-	stub := newBonusChainStub()
+func bonusChainServer(t *testing.T, stub *bonusChainStub) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(stub.handler())
-	defer srv.Close()
-	s, p := bonusChainScheduler(t, srv)
+	t.Cleanup(srv.Close)
+	return srv
+}
 
-	s.claimGrowthRewards(p.AuthByUID("u1"))
+// ---------------------------------------------------------------------------
+// 补签（A-2：本月漏签全补，从最近一天往回）
+// ---------------------------------------------------------------------------
 
-	if n := stub.giftCalls.Load(); n != 1 {
-		t.Errorf("gift calls=%d want 1", n)
+// TestStreakBonusMakeupMultiDaysDescending 本月 3 天漏签 + 3 张卡 → 三天都补，
+// 且从最近的一天往回（连续天数优先保最近的）。
+func TestStreakBonusMakeupMultiDaysDescending(t *testing.T) {
+	stub := newBonusChainStub()
+	if len(stub.broken) < 2 {
+		t.Skip("月初运行，本月不足两天可测（跨月窗口）")
 	}
-	if n := stub.compCalls.Load(); n != 1 {
-		t.Errorf("comp calls=%d want 1", n)
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+
+	s.RunStreakBonusNow()
+
+	if n := stub.makeupCalls.Load(); n != int32(len(stub.broken)) {
+		t.Fatalf("makeup calls=%d want %d（有卡就全补）", n, len(stub.broken))
 	}
-	// 按天幂等：当日第二趟不再重复领取。
-	s.claimGrowthRewards(p.AuthByUID("u1"))
-	if n := stub.giftCalls.Load(); n != 1 {
-		t.Errorf("gift calls after repeat=%d want 1（按天幂等）", n)
+	// 倒序：最近的一天先补。
+	wantFirst := stub.broken[len(stub.broken)-1]
+	if got := stub.makeupDates[0]; got != wantFirst {
+		t.Errorf("首次补签日期=%q want %q（从最近一天往回）", got, wantFirst)
 	}
 }
 
-// TestClaimGrowthRewardsGiftBusinessErrorSilent 已领（业务错误）→ 静默跳过，链继续走 redeem。
-func TestClaimGrowthRewardsGiftBusinessErrorSilent(t *testing.T) {
-	fastActivity(t)
+// TestStreakBonusMakeupRespectsPerRoundCap 每轮上限 1 → 只补 1 天，剩余留给下一轮。
+func TestStreakBonusMakeupRespectsPerRoundCap(t *testing.T) {
 	stub := newBonusChainStub()
-	giftFailed := false
-	base := stub.handler()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/billing/meter/claim-gift" {
-			w.WriteHeader(400)
-			w.Write([]byte(`{"code":400,"msg":"already claimed"}`))
-			return
-		}
-		base.ServeHTTP(w, r)
-	}))
-	defer srv.Close()
-	s, p := bonusChainScheduler(t, srv)
-
-	s.claimGrowthRewards(p.AuthByUID("u1")) // 不 panic；链继续
-	if n := stub.redeemCalls.Load(); n != 1 {
-		t.Errorf("redeem calls=%d want 1（礼包业务错误不阻断后续链）", n)
+	if len(stub.broken) < 2 {
+		t.Skip("月初运行，本月不足两天可测（跨月窗口）")
 	}
-	_ = giftFailed
-}
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+	s.SetMakeupCardsPerRound(1)
 
-// TestMakeupYesterdayMissedWithCards 昨日漏签 + 有卡 → 补签（use 被调）+ streak 重读。
-func TestMakeupYesterdayMissedWithCards(t *testing.T) {
-	fastActivity(t)
-	stub := newBonusChainStub()
-	srv := httptest.NewServer(stub.handler())
-	defer srv.Close()
-	s, p := bonusChainScheduler(t, srv)
-
-	s.claimGrowthRewards(p.AuthByUID("u1"))
+	s.RunStreakBonusNow()
 
 	if n := stub.makeupCalls.Load(); n != 1 {
-		t.Fatalf("makeup calls=%d want 1（漏签+有卡应补签）", n)
-	}
-	// streak 读取：reward-state + 查卡余额 + 补签后重读。
-	if n := stub.streakCalls.Load(); n != int32(stub.streakCallBudget()) {
-		t.Errorf("streak calls=%d want %d（补签后重读挑档）", n, stub.streakCallBudget())
+		t.Errorf("makeup calls=%d want 1（schedule.makeup_cards_per_round=1）", n)
 	}
 }
 
-// TestMakeupYesterdayNoMissNoWrite 昨日有分 → 不发 use 写请求。
-func TestMakeupYesterdayNoMissNoWrite(t *testing.T) {
-	fastActivity(t)
+// TestStreakBonusMakeupStopsOnReject 上游拒绝即停：注册前的日子同样是 0 分，
+// 不能跳过继续（继续只会连环失败）。
+func TestStreakBonusMakeupStopsOnReject(t *testing.T) {
 	stub := newBonusChainStub()
-	stub.missed = false
-	srv := httptest.NewServer(stub.handler())
-	defer srv.Close()
-	s, p := bonusChainScheduler(t, srv)
-
-	s.claimGrowthRewards(p.AuthByUID("u1"))
-
-	if n := stub.makeupCalls.Load(); n != 0 {
-		t.Errorf("makeup calls=%d want 0（无漏签不写）", n)
+	if len(stub.broken) < 3 {
+		t.Skip("月初运行，本月不足三天可测（跨月窗口）")
 	}
-	// 无补签 → streak 只读一次（reward-state）。
-	if n := stub.streakCalls.Load(); n != int32(stub.streakCallBudget()) {
-		t.Errorf("streak calls=%d want %d（无补签不重读）", n, stub.streakCallBudget())
+	stub.makeupFail = 2 // 第 2 次起拒绝
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+
+	s.RunStreakBonusNow()
+
+	if n := stub.makeupCalls.Load(); n != 2 {
+		t.Errorf("makeup calls=%d want 2（第二次被拒后即停）", n)
 	}
 }
 
-// TestMakeupYesterdayNoCardsNoWrite 漏签但无卡 → 不发 use 写请求（次日再判）。
-func TestMakeupYesterdayNoCardsNoWrite(t *testing.T) {
-	fastActivity(t)
+// TestStreakBonusMakeupNoCards 无卡 → 不写；且不再重复读 streak（省一次往返）。
+func TestStreakBonusMakeupNoCards(t *testing.T) {
 	stub := newBonusChainStub()
 	stub.cards = 0
-	srv := httptest.NewServer(stub.handler())
-	defer srv.Close()
-	s, p := bonusChainScheduler(t, srv)
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
 
-	s.claimGrowthRewards(p.AuthByUID("u1"))
+	s.RunStreakBonusNow()
 
 	if n := stub.makeupCalls.Load(); n != 0 {
 		t.Errorf("makeup calls=%d want 0（无卡不写）", n)
 	}
-}
-
-// TestMakeupYesterdayUseErrorNoReread 补签失败（业务错误）→ 不重读 streak（用旧 state 挑档）。
-func TestMakeupYesterdayUseErrorNoReread(t *testing.T) {
-	fastActivity(t)
-	stub := newBonusChainStub()
-	stub.makeupFail = true
-	srv := httptest.NewServer(stub.handler())
-	defer srv.Close()
-	s, p := bonusChainScheduler(t, srv)
-
-	s.claimGrowthRewards(p.AuthByUID("u1"))
-
-	if n := stub.makeupCalls.Load(); n != 1 {
-		t.Fatalf("makeup calls=%d want 1（先试 use）", n)
-	}
-	// 补签失败：查过卡余额（1）但不重读挑档（无 +1）。
-	if n := stub.streakCalls.Load(); n != int32(stub.streakCallBudget()) {
-		t.Errorf("streak calls=%d want %d（补签失败不重读）", n, stub.streakCallBudget())
+	if n := stub.streakCalls.Load(); n != 1 {
+		t.Errorf("streak calls=%d want 1（无卡不重读，仅兑换前读一次）", n)
 	}
 }
 
-// TestMakeupYesterdayHeatmapFailsSilent heatmap 查询失败 → 静默（无 use 写）。
-func TestMakeupYesterdayHeatmapFailsSilent(t *testing.T) {
-	fastActivity(t)
+// TestStreakBonusMakeupHeatmapErrorSilent heatmap 失败 → 静默跳过补签，链继续。
+func TestStreakBonusMakeupHeatmapErrorSilent(t *testing.T) {
 	stub := newBonusChainStub()
-	base := stub.handler()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/activity/growth/heatmap" {
-			w.WriteHeader(500)
-			w.Write([]byte(`boom`))
-			return
-		}
-		base.ServeHTTP(w, r)
-	}))
-	defer srv.Close()
-	s, p := bonusChainScheduler(t, srv)
+	stub.heatErr = true
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
 
-	s.claimGrowthRewards(p.AuthByUID("u1")) // 不 panic
+	s.RunStreakBonusNow() // 不 panic
 
 	if n := stub.makeupCalls.Load(); n != 0 {
 		t.Errorf("makeup calls=%d want 0（判据失败不写）", n)
 	}
+	if n := stub.redeemCalls.Load(); n != 1 {
+		t.Errorf("redeem calls=%d want 1（补签失败不阻断兑换）", n)
+	}
 }
 
-// TestMakeupYesterdayRestoresTierForRedeem 补签恢复天数后本日 redeem 直接头吃到：
-// 补签前 days=6（未达 7d），补签后 days=7 → redeem 发生。
-func TestMakeupYesterdayRestoresTierForRedeem(t *testing.T) {
-	fastActivity(t)
+// TestStreakBonusMakeupMissingTodayDate heatmap 缺 today.date → 不猜窗口、不补签。
+func TestStreakBonusMakeupMissingTodayDate(t *testing.T) {
 	stub := newBonusChainStub()
-	stub.days = 6      // 补签前：断档后只剩 6 天
-	stub.daysAfter = 7 // 补签后：恢复到 7（7d 档达标）
-	srv := httptest.NewServer(stub.handler())
-	defer srv.Close()
-	s, p := bonusChainScheduler(t, srv)
+	stub.noToday = true
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
 
-	s.claimGrowthRewards(p.AuthByUID("u1"))
+	s.RunStreakBonusNow()
+
+	if n := stub.makeupCalls.Load(); n != 0 {
+		t.Errorf("makeup calls=%d want 0（缺 today.date 不猜）", n)
+	}
+}
+
+// TestStreakBonusMakeupRestoresTierForRedeem 补签恢复天数后本日 redeem 直接吃到：
+// 补签前 days=6（未达 7d），补签后 days=7 → redeem 发生。
+func TestStreakBonusMakeupRestoresTierForRedeem(t *testing.T) {
+	stub := newBonusChainStub()
+	stub.days = 6
+	stub.daysAfter = 7
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+
+	s.RunStreakBonusNow()
 
 	if n := stub.redeemCalls.Load(); n != 1 {
 		t.Errorf("redeem calls=%d want 1（补签恢复天数 → 7d 档当日可兑）", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 礼包（A-1：先查状态再领；A-8：guard 防同期重复）
+// ---------------------------------------------------------------------------
+
+// TestStreakBonusGiftPendingClaims 待领 → 领一次，且按 end_time 不重复。
+func TestStreakBonusGiftPendingClaims(t *testing.T) {
+	stub := newBonusChainStub()
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+
+	s.RunStreakBonusNow()
+
+	if n := stub.giftStatus.Load(); n != 1 {
+		t.Errorf("gift status calls=%d want 1（先查后领）", n)
+	}
+	if n := stub.giftCalls.Load(); n != 1 {
+		t.Errorf("gift claim calls=%d want 1", n)
+	}
+	// 同一期（同 end_time）再跑一轮：状态仍说可领（上游 claimed 字段不可靠），
+	// 但 guard 已记账 → 不再打 claim。
+	s.RunStreakBonusNow()
+	if n := stub.giftCalls.Load(); n != 1 {
+		t.Errorf("gift claim calls after repeat=%d want 1（同期 guard）", n)
+	}
+}
+
+// TestStreakBonusGiftNotPendingNoClaim active=false → 无活动，不领也不报错。
+func TestStreakBonusGiftNotPendingNoClaim(t *testing.T) {
+	stub := newBonusChainStub()
+	stub.giftActive = false
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+
+	s.RunStreakBonusNow()
+
+	if n := stub.giftCalls.Load(); n != 0 {
+		t.Errorf("gift claim calls=%d want 0（无活动）", n)
+	}
+}
+
+// TestStreakBonusGiftAlreadyClaimedNoClaim claimed=true → 不领。
+func TestStreakBonusGiftAlreadyClaimedNoClaim(t *testing.T) {
+	stub := newBonusChainStub()
+	stub.giftClaim = true
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+
+	s.RunStreakBonusNow()
+
+	if n := stub.giftCalls.Load(); n != 0 {
+		t.Errorf("gift claim calls=%d want 0（已领）", n)
+	}
+}
+
+// TestStreakBonusGiftZeroCreditSilent 上游对「已领过」回 200 + 无 credit 字段：
+// credit<=0 不再打成功行（旧实现的假「+0c」来源），但 guard 照样记上。
+func TestStreakBonusGiftZeroCreditSilent(t *testing.T) {
+	stub := newBonusChainStub()
+	stub.giftCredit = 0 // 状态说可领 66，但领取回执没有 credit 字段
+	srv := bonusChainServer(t, stub)
+	s, p := bonusChainScheduler(t, srv)
+
+	if got := s.claimGiftQuiet(p.AuthByUID("u1")); got != 0 {
+		t.Errorf("claimGiftQuiet=%d want 0", got)
+	}
+	// guard 已记 → 再问不再打 claim（状态端点仍会被查）。
+	s.claimGiftQuiet(p.AuthByUID("u1"))
+	if n := stub.giftCalls.Load(); n != 1 {
+		t.Errorf("gift claim calls=%d want 1（credit<=0 也要记账防重试）", n)
+	}
+}
+
+// TestStreakBonusGiftNewPeriodRetries end_time 变了 = 新一期 → guard key 不同，重新尝试。
+func TestStreakBonusGiftNewPeriodRetries(t *testing.T) {
+	stub := newBonusChainStub()
+	srv := bonusChainServer(t, stub)
+	s, p := bonusChainScheduler(t, srv)
+	a := p.AuthByUID("u1")
+
+	s.claimGiftQuiet(a)
+	stub.giftEnd = "2027-01-31 23:59:59" // 新一期
+	s.claimGiftQuiet(a)
+
+	if n := stub.giftCalls.Load(); n != 2 {
+		t.Errorf("gift claim calls=%d want 2（新一期应重试）", n)
+	}
+}
+
+// TestStreakBonusGiftStatusErrorNoClaim 状态查询失败 → 不盲领。
+func TestStreakBonusGiftStatusErrorNoClaim(t *testing.T) {
+	stub := newBonusChainStub()
+	stub.giftErr = true
+	srv := bonusChainServer(t, stub)
+	s, p := bonusChainScheduler(t, srv)
+
+	if got := s.claimGiftQuiet(p.AuthByUID("u1")); got != 0 {
+		t.Errorf("claimGiftQuiet=%d want 0", got)
+	}
+	if n := stub.giftCalls.Load(); n != 0 {
+		t.Errorf("gift claim calls=%d want 0（查询失败不盲领）", n)
+	}
+}
+
+// TestStreakBonusGiftEnterpriseSilent 企业版查不到礼包属预期，静默且不领。
+func TestStreakBonusGiftEnterpriseSilent(t *testing.T) {
+	stub := newBonusChainStub()
+	stub.giftErr = true
+	srv := bonusChainServer(t, stub)
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "e1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
+		EnterpriseID: "e1"})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	if got := s.claimGiftQuiet(p.AuthByUID("e1")); got != 0 {
+		t.Errorf("claimGiftQuiet=%d want 0", got)
+	}
+	if n := stub.giftCalls.Load(); n != 0 {
+		t.Errorf("gift claim calls=%d want 0", n)
+	}
+}
+
+// TestStreakBonusEnterpriseSkipped 企业版整号跳过连登管家（无个人成长体系）。
+func TestStreakBonusEnterpriseSkipped(t *testing.T) {
+	stub := newBonusChainStub()
+	srv := bonusChainServer(t, stub)
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "e1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
+		EnterpriseID: "e1"})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunStreakBonusNow()
+
+	if n := stub.streakCalls.Load(); n != 0 {
+		t.Errorf("enterprise streak calls=%d want 0", n)
+	}
+	if n := stub.giftStatus.Load(); n != 0 {
+		t.Errorf("enterprise gift status calls=%d want 0", n)
 	}
 }

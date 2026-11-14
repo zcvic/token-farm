@@ -347,6 +347,17 @@ const SCHEDULE_FIELDS: Field[] = [
     max: 20,
     def: 5,
   },
+  {
+    key: 'makeup_cards_per_round',
+    kind: 'num',
+    label: '每轮补签上限',
+    desc: '连登漏签自动补签时，一轮最多用几张补签卡。0 = 不限（补到卡用光）；'
+      + '填 1 更保守，剩下的漏签下一轮继续补',
+    unit: '张',
+    min: 0,
+    max: 100,
+    def: 0,
+  },
 ];
 
 const COOLDOWN_FIELDS: Field[] = [

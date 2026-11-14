@@ -28,7 +28,10 @@ from . import wb2api
 # docker --timestamps 前缀
 _DOCKER_TS = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(.*)$', re.S)
 
-_KINDS = 'travel|activity|checkin|keepalive|user-resource'
+# streak-bonus：连登管家（补签 / 礼包 / 全档兑换 / 抽奖），上游 2026-11 从 activity
+# 解耦后独立打前缀（见 upstream/internal/scheduler/streak.go）。不收录的话这些行
+# 会整段消失——而「兑换到账多少积分」只有这一处日志源。
+_KINDS = 'travel|activity|checkin|keepalive|user-resource|streak-bonus'
 
 # 账号 uid 的形态：字母数字（允许 - _），长度 >= 6。
 _UID_SHAPE = re.compile(r'^[0-9A-Za-z_-]{6,64}$')
@@ -119,6 +122,20 @@ SCRIPT_KIND_LABELS = {
 # 与上游 IsAlreadyCheckin 的判定保持一致（已签到 / already）。
 _ALREADY_MARKERS = ('已签到', 'already', '重复签到')
 
+# 上游的中文成功行（没有 ` ok ` 字样）。不列的话会被末尾的 error 兜底判成红色失败：
+#   `签到成功`                                   CN 签到
+#   `国际版签到成功（每日 N 积分）`                global 签到（checkin_global.go）
+#   `已用补签卡补签 2026-11-13（保连登）`          streak-bonus 补签
+#   `抽奖完成 4 次`                              streak-bonus 抽奖收尾
+#
+# 只收**完整成功措辞**，不要收「补签」「兑换」这种动词：失败行形如
+# `兑换 14d: boom`，按动词匹配会把真失败判成成功（WARN 前缀能挡住，但
+# 没有前缀的行就漏了）。
+_OK_MARKERS = ('签到成功', '已用补签卡补签', '抽奖完成')
+
+# 中文「什么都没做，也不算失败」的行（活动未开 / 已到本轮上限）。
+_SKIP_CN_MARKERS = ('，跳过', '（跳过）', '剩余漏签下一轮继续')
+
 # 中文类型名，前端与日志里共用一套说法
 KIND_LABELS = {
     'travel': '猫猫旅行',
@@ -132,8 +149,10 @@ KIND_LABELS = {
     # 脚本类任务（开学季 / 夜猫）：整批跑脚本，日志只有成败两行
     'school': '开学季任务',
     'cat': '夜猫任务',
-    # 面板发起的「一键执行」（taskrun._record_history 写入）：claim / full 各记一行
+    # 面板发起的一次执行（server/services/taskrun.py 写入）：claim / full 各记一行
     'taskrun': '一键执行',
+    # 连登管家（上游 2026-11 从 activity 解耦）：补签 / 礼包 / 兑换 / 抽奖
+    'streak-bonus': '连登管家',
 }
 
 # 明确表示「什么都没做，也不算失败」的前缀
@@ -230,6 +249,27 @@ def _classify(rest: str, sev: str | None) -> tuple[int, str]:
         # 实物 / 未中奖等：算成功，但没有积分收益
         return 0, 'ok'
 
+    # 连登管家（streak-bonus）：上游 2026-11 把「补签 / 礼包 / 全档兑换 / 抽完次数」
+    # 从 activity 解耦成独立前缀，文案全部是中文（`★ 兑换 7d 档（+0c +2e 卡×1 抽奖×1）`
+    # / `🎁 新手礼包 +66c（截止 …）`）。它们既没有 ` ok ` 也没有英文动作词，
+    # 不特判会整批落到末尾的 error——把「赚到了」显示成红色失败。
+    #
+    # 积分口径是 `+Nc`（c = credit，`+2e` 是 energy 不算）；0 也标 credit
+    # （「明确告知这次没给积分」与「这条与积分无关」不同）。
+    m_sc = re.search(r'\+(\d+)c(?:\s|（|$)', rest)
+    if m_sc:
+        return int(m_sc.group(1)), 'credit'
+
+    # 连登抽奖的中文回执：`🎲 第1抽 10 积分（credit）` / `🎲 第1抽 谢谢参与（none）`。
+    # 判据仍是括号里的奖品类型，与英文 `lottery drawn prize=… (type)` 同口径。
+    m_draw_cn = re.search(r'第\d+抽\s*(.+?)（([A-Za-z]+)）', rest)
+    if m_draw_cn:
+        prize_name = (m_draw_cn.group(1) or '').strip()
+        if (m_draw_cn.group(2) or '').lower() == 'credit':
+            num = re.search(r'(\d+)', prize_name)
+            return (int(num.group(1)), 'credit') if num else (0, 'credit')
+        return 0, 'ok'
+
     # 账号被禁用属于严重结果，即使上游只标了 WARN 也按失败展示
     if '禁用' in rest or 'session dead' in lower:
         return 0, 'error'
@@ -243,6 +283,16 @@ def _classify(rest: str, sev: str | None) -> tuple[int, str]:
     # 不特判就会在界面上显示成红色的签到失败。
     if any(m in rest or m in lower for m in _ALREADY_MARKERS):
         return 0, 'ok'
+
+    # 中文成功行（无 ` ok ` 字样）：`签到成功` / 国际版的 `国际版签到成功（每日 N 积分）`
+    # / 连登管家的 `已用补签卡补签 …` / `抽奖完成 N 次`。
+    # 上游这些行一直存在，但只有英文 ` ok ` 判据时会被判成红色失败。
+    if any(m in rest for m in _OK_MARKERS):
+        return 0, 'ok'
+
+    # 中文跳过行（`国际版签到活动未开启（每日 100 积分），跳过`）：活动未开是正常态。
+    if any(m in rest for m in _SKIP_CN_MARKERS):
+        return 0, 'info'
 
     # 抽奖成功（无积分奖或未命中上面的 credit 形态）：不能落到末尾的 error——
     # 它没有 ` ok ` 字样，全靠这一条兜住，否则中奖反而显示成红色失败。

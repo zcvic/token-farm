@@ -574,6 +574,120 @@ class ScriptTaskKindsTest(unittest.TestCase):
         self.assertIn('本轮签到完成', ev2['message'])
 
 
+class StreakBonusLogTest(unittest.TestCase):
+    """连登管家（上游 2026-11 从 activity 解耦成 `streak-bonus` 前缀）。
+
+    这批日志的文案**全是中文**，既没有英文 ` ok ` 也没有 `redeem tier=` 之类
+    旧形态，所以必须两条都补：`_KINDS`（否则整批行被丢弃）与 `_classify`
+    的中文口径（否则「兑换到账 50 积分」被判成红色失败、收益显示 0）。
+    """
+
+    def test_kind_recognized(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}streak-bonus 9b212d8c: 抽奖完成 4 次')
+        assert ev is not None, 'streak-bonus 行被整段丢弃了（_KINDS 未收录）'
+        self.assertEqual(ev['kind'], 'streak-bonus')
+        self.assertEqual(ev['uid'], '9b212d8c')
+
+    def test_kind_label_present(self) -> None:
+        self.assertIn('streak-bonus', tasklog.KIND_LABELS)
+
+    def test_redeem_credit_extracted(self) -> None:
+        """`★ 兑换 14d 档（+50c +3e 卡×1 抽奖×1）`：只取 c（credit），e 是 energy。"""
+        ev = tasklog.parse_line(
+            f'{DOCKER}streak-bonus 9b212d8c: ★ 兑换 14d 档（+50c +3e 卡×1 抽奖×1）')
+        assert ev is not None
+        self.assertEqual(ev['credits'], 50)
+        self.assertEqual(ev['level'], 'credit')
+
+    def test_redeem_zero_credit_is_credit_level(self) -> None:
+        """`+0c` 是「这次确实没给积分」，与「这条与积分无关」不同。"""
+        ev = tasklog.parse_line(
+            f'{DOCKER}streak-bonus 9b212d8c: ★ 兑换 7d 档（+0c +2e 卡×1 抽奖×1）')
+        assert ev is not None
+        self.assertEqual(ev['credits'], 0)
+        self.assertEqual(ev['level'], 'credit')
+
+    def test_gift_credit_extracted(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}streak-bonus 9b212d8c: 🎁 新手礼包 +66c（截止 2026-12-31 23:59:59）')
+        assert ev is not None
+        self.assertEqual(ev['credits'], 66)
+        self.assertEqual(ev['level'], 'credit')
+
+    def test_makeup_is_ok_without_credit(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}streak-bonus 9b212d8c: ★ 已用补签卡补签 2026-11-13（保连登）')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'ok', '补签成功不能显示成失败')
+        self.assertEqual(ev['credits'], 0, '补签本身不产生积分')
+
+    def test_lottery_credit_prize(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}streak-bonus 9b212d8c: 🎲 第1抽 10 积分（credit）')
+        assert ev is not None
+        self.assertEqual(ev['credits'], 10)
+        self.assertEqual(ev['level'], 'credit')
+
+    def test_lottery_none_prize_is_ok(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}streak-bonus 9b212d8c: 🎲 第2抽 谢谢参与（none）')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'ok')
+        self.assertEqual(ev['credits'], 0)
+
+    def test_lottery_done_is_ok(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}streak-bonus 9b212d8c: 抽奖完成 4 次')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'ok')
+
+    def test_failures_stay_warn_or_error(self) -> None:
+        for line in (
+            'WARN: streak-bonus 9b212d8c: 礼包状态查询失败: boom',
+            'WARN: streak-bonus 9b212d8c: 补签 2026-11-13 失败: boom',
+            'WARN: streak-bonus 9b212d8c: 兑换 14d: boom',
+            'WARN: streak-bonus 9b212d8c: lottery-chances: boom',
+        ):
+            ev = tasklog.parse_line(f'{DOCKER}{line}')
+            assert ev is not None, line
+            self.assertEqual(ev['level'], 'warn', line)
+            self.assertEqual(ev['credits'], 0, line)
+
+    def test_cap_notice_is_info(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}streak-bonus 9b212d8c: 本轮已用 1 张补签卡'
+            '（schedule.makeup_cards_per_round 上限），剩余漏签下一轮继续')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'info', '到上限是正常态，不是失败')
+
+
+class GlobalCheckinLogTest(unittest.TestCase):
+    """国际版签到（checkin_global.go）：中文成功/跳过行不能显示成红色失败。"""
+
+    def test_success_is_ok(self) -> None:
+        for text in ('国际版签到成功（每日 100 积分）',
+                     '国际版今天已签到（连登 3 天，每日 100 积分）'):
+            ev = tasklog.parse_line(f'{DOCKER}checkin 9b212d8c: {text}')
+            assert ev is not None, text
+            self.assertEqual(ev['level'], 'ok', text)
+
+    def test_activity_off_is_info(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}checkin 9b212d8c: 国际版签到活动未开启（每日 100 积分），跳过')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'info', '活动未开是常态，不是失败')
+
+    def test_status_error_is_warn(self) -> None:
+        ev = tasklog.parse_line(
+            f'{DOCKER}WARN: checkin 9b212d8c: 国际版活动状态查询失败（不发签到请求）: boom')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'warn')
+
+    def test_checkin_failure_is_warn(self) -> None:
+        ev = tasklog.parse_line(f'{DOCKER}WARN: checkin 9b212d8c: 国际版签到失败: boom')
+        assert ev is not None
+        self.assertEqual(ev['level'], 'warn')
+
+
 class ScheduleHoursValidationTest(unittest.TestCase):
     """新增的两类任务时刻必须能被保存（白名单外的键会被静默丢弃）。"""
 

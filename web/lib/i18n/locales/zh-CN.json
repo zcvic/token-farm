@@ -1160,6 +1160,7 @@
     "kindSchool": "开学季任务",
     "kindCat": "夜猫任务",
     "kindTaskrun": "一键执行",
+    "kindStreakBonus": "连登管家",
     "creditLedger": "余额 +{delta}（{prev} → {next}）",
     "runLogHistoryClaim": "一键领奖（{target}）{summary}",
     "runLogHistoryFull": "一键做任务（{target}）{summary}",

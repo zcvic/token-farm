@@ -9,6 +9,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -86,6 +87,24 @@ type Scheduler struct {
 
 	// checkinMu 串行化签到：定时入口与手动触发互斥，避免同一时刻重复打上游签到接口。
 	checkinMu sync.Mutex
+
+	// makeupPerRound 每轮连登管家最多用几张补签卡（0 = 不限，补到卡用光）。
+	// atomic 读写，面板保存配置后可热改（schedule.makeup_cards_per_round）。
+	//
+	// 为什么要封顶：补签是**改账号历史**的写操作，一次把整月漏签全补上风险不可逆
+	// （上游按日期逐条校验，拒绝即停也挡不住"多补了本不该补的日子"）。保守部署
+	// 可以一轮只补一张，剩下的交给次日签到再补。
+	makeupPerRound atomic.Int64
+
+	// benefitGuardMu/benefitGuard 福利领取「本期已试过」记账（key = "gift|" + uid + "|" + end_time）。
+	//
+	// 为什么需要：上游福利 status 端点的 claimed 字段**可能恒为 false**（2026-10-20
+	// 实测：已领过的号照样回 claimed:false），于是 Pending() 恒真 → 每次签到都重打
+	// 一遍全池的 claim，白打请求却永远拿不到新发放。
+	// 只记进程内：重启后每期再试一次，代价可接受（次数极少），也不会漏掉上游新开的期
+	//（end_time 变了就是新 key）。
+	benefitGuardMu sync.Mutex
+	benefitGuard   map[string]bool
 }
 
 // New 构建。
@@ -114,6 +133,17 @@ func New(cfg Config) *Scheduler {
 	}
 	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string), rewardClaimed: make(map[string]string)}
 }
+
+// SetMakeupCardsPerRound 热改每轮补签卡上限；<0 视为 0（不限）。
+func (s *Scheduler) SetMakeupCardsPerRound(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.makeupPerRound.Store(int64(n))
+}
+
+// MakeupCardsPerRound 当前每轮补签卡上限（0 = 不限）。
+func (s *Scheduler) MakeupCardsPerRound() int { return int(s.makeupPerRound.Load()) }
 
 // checkinRefreshSkew 签到前判定"token 是否临近过期"的时间窗口（10 分钟）。
 // 长时间停机/容器长期停跑后 access token 往往已过期，不先刷新则签到必然 401 白跑。
@@ -571,20 +601,26 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
-		// D4 门控：realm=global 账号无签到体系/任务中心，直接跳过（不发起任何上游调用，避免风控）。
+		// D4 门控：realm=global 账号无 CN 签到体系/任务中心。
 		// 经 auth.Realm() 统一判定：逃生门（global.enabled=false）下 global 账号被降级为 cn、
 		// 按 CN 处理——这是 D5 逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
+		//
+		// 但「无签到体系」是 2026-09 的判断，2026-10 复验发现国际版两个端点都存在
+		// （checkin-activity-status 200 / daily-checkin 在活动未开时 400 10001）——
+		// 见 checkin_global.go。所以这里不再一刀切跳过，而是走 fail-closed 的
+		// 「先查状态、仅 active 且未签才 claim」。
 		if a.IsGlobal() {
 			oc.Status, oc.Detail = CheckinSkipped, "global"
 			skipN++
-			// 签到仍然跳过（global 没有签到体系），但**只读**余额必须刷新：
-			// 否则 pool 里的 credits 恒 0，weightOf 的「余额 / 快过期」两个
-			// 因子对 global 完全失效，选号退化成纯轮询（issue #228）。
-			// UserResourceDetailed 只调 billing/meter 只读接口，不碰签到，
-			// 风控语义与 D4 门控一致。
 			if !pace() {
 				return out, ctx.Err()
 			}
+			// 签到按状态门控（见 checkinGlobal）。
+			s.checkinGlobal(a)
+			// **只读**余额必须刷新：否则 pool 里的 credits 恒 0，weightOf 的
+			// 「余额 / 快过期」两个因子对 global 完全失效，选号退化成纯轮询（issue #228）。
+			// UserResourceDetailed 只调 billing/meter 只读接口，不碰签到，
+			// 风控语义与 D4 门控一致。
 			if remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow); err != nil {
 				log.Printf("user-resource(global) %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			} else {
@@ -671,6 +707,10 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	// 分钟级补签：只排「瞬时失败」（HTTP 5xx / code 10001）。业务拒绝重试必然同样
 	// 失败，排进去只会每天多打几轮无效写调用。后台 goroutine，不阻塞本函数返回。
 	s.startCheckinLateRetry(ctx, lateRetry)
+	// 连登管家（streak.go）：补签 → 礼包 → 全档兑换 → 抽完次数。
+	// 挂在这里而不是活跃上报之后：activity 关闭、上报失败或不足条数时也要能领
+	//（A-5「成长奖励与 activity 解耦」）。幂等，一天多跑几趟只是多几次只读。
+	s.RunStreakBonusNow()
 	return out, nil
 }
 
@@ -749,7 +789,9 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		}
 		s.checkActivityStreak(a) // N 条全发满 → 回读 streak 自检（只留结论行）
 		s.travelAdoptForce(a)    // 无猫账号对话量刚补满 → 立即重试领养（豁免防抖）
-		s.claimGrowthRewards(a)  // 连登奖励 + 抽奖：点亮连登后按天领取（finally 语义：失败不拖累上报）
+		// 连登兑换/抽奖**不在这里**：已移到签到排程末尾（RunStreakBonusNow，见
+		// streak.go）。activity 只管点亮连登与自检——否则 activity 一关、上报失败
+		// 或不足 ActivityReportCount 条，兑换/抽奖就整天不跑（A-5）。
 	}
 }
 
@@ -774,24 +816,15 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 	return false
 }
 
-// claimGrowthRewards 领取连登奖励（里程碑兑换）+ 执行连登抽奖。
-// 在 runActivity 上报成功 + streak 自检之后调用：连登达标（days>=某档）才能领奖，
-// 领奖送的 chances 才是抽奖次数来源，故先领奖后抽奖。
+// claimGrowthRewards 手动/兼容入口：对单账号执行一次连登管家全链。
 //
-// 全链（panel 连登管家吸收版）：礼包/补偿领取 → 读 reward-state → 补签保连登
-// （补签成功重读 state 吃恢复后的天数）→ 挑档 redeem → chances → draw。
+// 主体已迁到 streak.go 的 streakBonusAccount（补签 → 礼包 → 全档兑换 → 抽完次数），
+// 这里只保留两件旧语义，供面板手动触发与既有调用方复用：
+//   - global 跳过（连登链只服务 CN；礼包另由 RunStreakBonusNow 的 global 分支处理）；
+//   - 当日幂等闸（同一账号当日只跑一轮，避免手动连点对上游重复写）。
 //
-// 幂等/风控语义（与现有 travel/travel 同口径：单号失败只该号 WARN，不影响其他账号）：
-//   - 按天幂等：每日每号最多领一轮（rewardClaimedToday 闸；自然日 CST 重置，进程重启清零——
-//     重启后当日重复 redeem 由上游 409 duplicate 正常态兜底，不刷 WARN）。
-//   - 服务端正常态识别为静默跳过：redeem 409 duplicate/403 天数不足；lottery 400 无次数/未开启——
-//     这些不是失败，不刷 WARN（见 upstream.IsRedeemAlreadyClaimed 等）。
-//   - 领奖只领「本次新达标」的档位：状态非 claimed 且 days>=档位天数。跨档连领（14d 未领而
-//     days 已到 28）是官方正常态（spa 按 byTier 逐档可兑），但每日一轮限一档，避免同日多写。
-//   - 礼包/补偿是「有则领」的幂等写，业务错误静默；补签只在「昨日漏签且有卡」时触发，
-//     无卡/无漏签不写。
-//
-// 日志每号一行可 grep：`activity %s: redeem tier=%s ...` / `activity %s: lottery ...`。
+// 注意：签到排程走的是 RunStreakBonusNow（不设闸——它本身幂等，且签到一天两趟
+// 需要第二趟也能补上第一趟失败的那一档）。
 func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	if a == nil || a.AccessTokenValue() == "" {
 		return
@@ -807,51 +840,23 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	if s.rewardClaimedToday(a.UID) {
 		return // 当日已领过一轮，跳过（按天幂等）
 	}
-	// 0. 礼包/补偿领取（panel 连登管家口径）：每号一次 / 有则领的幂等写，
-	// 业务错误静默跳过（不刷 WARN），先于 redeem——到账积分不依赖连登状态。
-	s.claimGrowthBonus(a)
-	state, err := s.cfg.Upstream.GrowthRewardState(a)
-	if err != nil {
-		log.Printf("WARN: activity %s: reward-state: %v", logfmt.Label(a.UID, a.Nickname), err)
-		return
+	// 只有真的发过写请求（补签/兑换/抽奖）才标记当日已处理：全 locked 且无存量
+	// 抽奖次数时什么都没写，留出「下一趟补上刚解锁的档位」的余地。
+	if s.streakBonusAccount(a) {
+		s.markRewardClaimed(a.UID)
 	}
-	// 0.5 补签保连登（panel makeupYesterday 口径）：昨日漏签（heatmap score==0）且
-	// 有补签卡 → 补昨日。放在 reward-state 之后：若补签把 streak 恢复到新档位，
-	// 重读 state 让本日 redeem 直接吃到恢复后的天数（补签是保 7d/14d/28d 里程碑的关键）。
-	if s.makeupYesterday(a) {
-		if st2, err2 := s.cfg.Upstream.GrowthRewardState(a); err2 == nil {
-			state = st2 // 补签成功 → 用恢复后的天数挑档
-		}
-	}
-	days := state.Days()
-	tier := growthEligibleTier(days, &state.Redemption)
-	if tier == "" {
-		// 无新达标档位：不动写接口（不刷 WARN，这是正常态——很多天没到 7d）。
-		return
-	}
-	res, err := s.cfg.Upstream.GrowthRedeem(a, tier, "")
-	switch {
-	case err == nil:
-		log.Printf("activity %s: redeem tier=%s ok (+%d credit, +%d energy, +%d chances)",
-			logfmt.Label(a.UID, a.Nickname), tier, res.CreditGranted, res.EnergyGranted, res.ChancesGranted)
-	case upstream.IsRedeemAlreadyClaimed(err) || upstream.IsRedeemNotEnoughDays(err):
-		log.Printf("activity %s: redeem tier=%s skip (already claimed or days not enough)", logfmt.Label(a.UID, a.Nickname), tier)
-	default:
-		log.Printf("activity %s: redeem tier=%s: %v", logfmt.Label(a.UID, a.Nickname), tier, err)
-	}
-	// 标记当日已处理（无论 redeem 是否成功都记一次：领取类各状态当日不再重试，
-	// 避免对上游重复写；成功→无需再领，失败→当日不轰炸，次日自然日重置/上游幂等兜底）。
-	s.markRewardClaimed(a.UID)
-	s.claimGrowthLottery(a)
 }
 
 // growthEligibleTier 按当前连登天数挑选「尚未领取且达标」的最高档位。
 // 返回 "" 表示无可领档（未达标或全部已领），调用方据此跳过 redeem（正常态）。
+//
+// 注意：**排程已不再用它**（A-3 改成遍历 tiers 全档兑换，见 streakBonusAccount）。
+// 保留是因为面板侧的「下一档还差几天」展示与单测仍按这个口径描述档位选择。
 func growthEligibleTier(days int, rs *upstream.GrowthRedemptionStatus) string {
 	if rs == nil {
 		return ""
 	}
-	// 档位按 days 升序，从高到低挑最高的已达标未领档（一次领一份，每日一轮）。
+	// 档位按 days 升序，从高到低挑最高的已达标未领档。
 	for i := len(rs.Tiers) - 1; i >= 0; i-- {
 		sp := rs.Tiers[i]
 		if days >= sp.Days && !rs.Claimed(sp.Tier) {
@@ -859,72 +864,6 @@ func growthEligibleTier(days int, rs *upstream.GrowthRedemptionStatus) string {
 		}
 	}
 	return ""
-}
-
-// claimGrowthBonus 新手礼包 + 活动补偿领取（panel 连登管家口径）。
-// 两者都是幂等写：礼包每号一次（已领业务错误静默）、补偿有则领（无则业务错误静默）。
-// 只在成功到账时打日志（每号一生一次的事件，不值得每日刷行）；失败静默——
-// 业务错误是常态（绝大多数号早已领过），无法与真错误可靠区分，不刷 WARN。
-func (s *Scheduler) claimGrowthBonus(a *auth.Auth) {
-	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil && credit > 0 {
-		log.Printf("activity %s: gift ok (+%d credit)", logfmt.Label(a.UID, a.Nickname), credit)
-	}
-	if credit, err := s.cfg.Upstream.ClaimCompensation(a); err == nil && credit > 0 {
-		log.Printf("activity %s: compensation ok (+%d credit)", logfmt.Label(a.UID, a.Nickname), credit)
-	}
-}
-
-// makeupYesterday 昨日漏签且有补签卡时自动补签（保住连登连续天数，panel 口径）。
-// 连续天数一断就要重攒 7 天，一张卡代价远小——有漏签 + 有卡即补。
-// 判据链：heatmap 昨日格 score==0（漏签）→ streak.makeup_cards.balance>0（有卡）
-// → POST makeup-cards/use {"target_date":昨日}。
-// 无卡 / 无漏签 / 无该日格 / 查询失败均静默返回 false（不影响主流程）；
-// 补签成功打一行日志并返回 true（调用方重读 streak 天数挑档）。
-func (s *Scheduler) makeupYesterday(a *auth.Auth) bool {
-	cells, err := s.cfg.Upstream.GrowthHeatmap(a)
-	if err != nil {
-		return false // 只读判据失败：静默（每日重试，无写风险）
-	}
-	yesterday := upstream.GrowthYesterdayDate(time.Now())
-	score, ok := upstream.HeatmapDayScore(cells, yesterday)
-	if !ok || score != 0 {
-		return false // 昨日有分或无判据：无需补签
-	}
-	// 有漏签 → 查补签卡余额（streak 端点同一响应体）。
-	st, err := s.cfg.Upstream.GrowthStreakWithCards(a)
-	if err != nil || st.MakeupCards.Balance <= 0 {
-		return false // 无卡或查询失败：静默（次日再判）
-	}
-	if err := s.cfg.Upstream.UseMakeupCard(a, yesterday); err != nil {
-		log.Printf("activity %s: makeup %s: %v", logfmt.Label(a.UID, a.Nickname), yesterday, err)
-		return false
-	}
-	log.Printf("activity %s: makeup ok %s (+streak kept)", logfmt.Label(a.UID, a.Nickname), yesterday)
-	return true
-}
-
-// claimGrowthLottery 消耗连登奖励赠与的抽奖次数。仅抽 balance>0 的次数；无次数跳过
-// （400 insufficient 正常态静默）；抽奖未开启（400 lottery disabled）静默。
-// client_token 每次 draw 必须新键（security-relevant，见 upstream.GrowthLotteryDraw）。
-func (s *Scheduler) claimGrowthLottery(a *auth.Auth) {
-	chances, err := s.cfg.Upstream.GrowthLotteryChances(a)
-	if err != nil {
-		log.Printf("WARN: activity %s: lottery-chances: %v", logfmt.Label(a.UID, a.Nickname), err)
-		return
-	}
-	if chances <= 0 {
-		log.Printf("activity %s: lottery skip (no chances)", logfmt.Label(a.UID, a.Nickname))
-		return
-	}
-	res, err := s.cfg.Upstream.GrowthLotteryDraw(a, "") // 每次自动新 client_token
-	switch {
-	case err == nil:
-		log.Printf("activity %s: lottery drawn prize=%s (%s)", logfmt.Label(a.UID, a.Nickname), res.PrizeName, res.PrizeType)
-	case upstream.IsLotteryNoChance(err) || upstream.IsLotteryDisabled(err):
-		log.Printf("activity %s: lottery skip (no chances or disabled)", logfmt.Label(a.UID, a.Nickname))
-	default:
-		log.Printf("activity %s: lottery draw: %v", logfmt.Label(a.UID, a.Nickname), err)
-	}
 }
 
 // rewardClaimedToday 该账号当日是否已处理过连登奖励领取（自然日 CST）。

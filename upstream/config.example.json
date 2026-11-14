@@ -31,6 +31,7 @@
       22
     ],
     "keepalive_refresh_window": "168h",
+    "makeup_cards_per_round": 0,
     "school_hours": [
       12
     ],

@@ -18,7 +18,9 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -93,6 +95,76 @@ func HeatmapDayScore(cells []HeatmapCell, date string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// GrowthStreakFull 连登完整状态（GET /activity/growth/streak）：天数 + 补签卡 + 各档状态。
+//
+// 与 GrowthStreakWithCards / GrowthRewardState 同端点不同切片：一次请求同时供
+// 「补签判据（卡片余额）」与「挑档（redemption_status）」使用，省掉一次往返。
+type GrowthStreakFull struct {
+	Streak struct {
+		Days int `json:"days"`
+	} `json:"streak"`
+	MakeupCards      GrowthMakeupCards      `json:"makeup_cards"`
+	RedemptionStatus GrowthRedemptionStatus `json:"redemption_status"`
+}
+
+// GrowthStreakFull 读取连登完整状态（GET /activity/growth/streak）。
+func (c *Client) GrowthStreakFull(a *auth.Auth) (*GrowthStreakFull, error) {
+	data, err := c.growthJSON(a, http.MethodGet, streakPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var st GrowthStreakFull
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+// HeatmapBrokenDates 返回**本月**（今天所在月的 1 号起）到昨天（不含今天）之间
+// score==0 的日期，升序。
+//
+// 下界只能取月首，不能更宽：score==0 同时表示「那天漏签」与「那天账号还不存在」
+// （探针实测：注册前的日子也是 0 分，heatmap 的 range 是近 365 天），只有上游能区分
+// 两者——所以这里只做时间窗收窄，交给 UseMakeupCard 的拒绝兜底。
+//
+// 今天不算：当天未结束，0 分不代表漏签。today 由响应给出，不读宿主本机时钟
+// （宿主若为 UTC，本地 08:00 前会算错天）。
+func (c *Client) HeatmapBrokenDates(a *auth.Auth) ([]string, error) {
+	data, err := c.growthJSON(a, http.MethodGet, heatmapPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Today struct {
+			Date string `json:"date"`
+		} `json:"today"`
+		Cells []HeatmapCell `json:"cells"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Today.Date) < 10 {
+		// 缺 today.date 就无法界定「本月 / 今天」，宁可报错也不猜宿主时区——
+		// 猜错的后果是把今天或上月最后几天当成漏签，白烧补签卡。
+		return nil, fmt.Errorf("heatmap 缺 today.date（结构未知，不敢猜窗口）")
+	}
+	today := resp.Today.Date[:10]
+	monthStart := today[:8] + "01"
+	var out []string
+	for _, cell := range resp.Cells {
+		d := cell.Date
+		if len(d) < 10 {
+			continue
+		}
+		d = d[:10]
+		if cell.Score == 0 && d >= monthStart && d < today {
+			out = append(out, d)
+		}
+	}
+	sort.Strings(out) // 上游是否保证升序未验证
+	return out, nil
 }
 
 // UseMakeupCard 对指定日期使用补签卡（target_date 格式 2006-01-02，CST 自然日）。

@@ -233,3 +233,147 @@ func TestGrowthYesterdayDateDSTZone(t *testing.T) {
 		t.Errorf("GrowthYesterdayDate=%q want 2026-03-07（昨日 CST；DST 切换日不得错位）", got)
 	}
 }
+
+// heatmapServer 返回固定 heatmap body 的测试 server。
+func heatmapServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/activity/growth/heatmap" {
+			http.Error(w, "not found", 404)
+			return
+		}
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestHeatmapBrokenDatesWindow 窗口收窄：只取「本月 1 号 ≤ d < today」且 score==0，
+// 上月漏签 / 今天 / 未来日期 / 有分日期都不算。
+func TestHeatmapBrokenDatesWindow(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14 09:00:00"},"cells":[`+
+		`{"date":"2026-10-31","score":0},`+ // 上月：不算
+		`{"date":"2026-11-01","score":0},`+ // 月首漏签：算
+		`{"date":"2026-11-05","score":1},`+ // 有分：不算
+		`{"date":"2026-11-09","score":0},`+ // 漏签：算
+		`{"date":"2026-11-14","score":0},`+ // 今天：不算（当天未结束）
+		`{"date":"2026-11-20","score":0}`+ // 未来：不算
+		`]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("HeatmapBrokenDates: %v", err)
+	}
+	want := []string{"2026-11-01", "2026-11-09"}
+	if len(got) != len(want) {
+		t.Fatalf("got=%v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got=%v want %v", got, want)
+		}
+	}
+}
+
+// TestHeatmapBrokenDatesSorted 上游不保证顺序：输出必须升序。
+func TestHeatmapBrokenDatesSorted(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14"},"cells":[`+
+		`{"date":"2026-11-09","score":0},{"date":"2026-11-02","score":0},{"date":"2026-11-05","score":0}]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("HeatmapBrokenDates: %v", err)
+	}
+	want := []string{"2026-11-02", "2026-11-05", "2026-11-09"}
+	if len(got) != len(want) {
+		t.Fatalf("got=%v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got=%v want 升序 %v", got, want)
+		}
+	}
+}
+
+// TestHeatmapBrokenDatesMissingToday 缺 today.date → 报错不猜（猜错会白烧补签卡）。
+func TestHeatmapBrokenDatesMissingToday(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"cells":[{"date":"2026-11-09","score":0}]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}); err == nil {
+		t.Fatal("缺 today.date 应报错")
+	}
+}
+
+// TestHeatmapBrokenDatesEmpty 全有分 → 空切片（无漏签，不写）。
+func TestHeatmapBrokenDatesEmpty(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14"},"cells":[`+
+		`{"date":"2026-11-13","score":1}]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("HeatmapBrokenDates: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got=%v want 空（无漏签）", got)
+	}
+}
+
+// TestHeatmapBrokenDatesError 上游失败透传（调用方静默跳过补签）。
+func TestHeatmapBrokenDatesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		w.Write([]byte(`boom`))
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}); err == nil {
+		t.Fatal("500 应返回错误")
+	}
+}
+
+// TestGrowthStreakFull 一次读全量：天数 + 补签卡 + 档位状态。
+func TestGrowthStreakFull(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/activity/growth/streak" {
+			http.Error(w, "not found", 404)
+			return
+		}
+		w.Write([]byte(`{"code":0,"data":{"streak":{"days":20},"makeup_cards":{"balance":3,"max":5},` +
+			`"redemption_status":{"tier_7d_status":"claimed","tier_14d_status":"available",` +
+			`"tier_28d_status":"locked","remaining_days":8,` +
+			`"tiers":[{"tier":"7d","days":7},{"tier":"14d","days":14},{"tier":"28d","days":28}]}}}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	st, err := c.GrowthStreakFull(&auth.Auth{UID: "u1", AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("GrowthStreakFull: %v", err)
+	}
+	if st.Streak.Days != 20 {
+		t.Errorf("days=%d want 20", st.Streak.Days)
+	}
+	if st.MakeupCards.Balance != 3 || st.MakeupCards.Max != 5 {
+		t.Errorf("cards=%d/%d want 3/5", st.MakeupCards.Balance, st.MakeupCards.Max)
+	}
+	if !st.RedemptionStatus.Claimed("7d") {
+		t.Error("7d 应为 claimed")
+	}
+	if st.RedemptionStatus.Claimed("14d") {
+		t.Error("14d 不应为 claimed")
+	}
+	if got := st.RedemptionStatus.Tier28dStatus; got != "locked" {
+		t.Errorf("28d=%q want locked", got)
+	}
+	if len(st.RedemptionStatus.Tiers) != 3 {
+		t.Errorf("tiers=%d want 3", len(st.RedemptionStatus.Tiers))
+	}
+	if st.RedemptionStatus.RemainingDays != 8 {
+		t.Errorf("remaining_days=%d want 8", st.RedemptionStatus.RemainingDays)
+	}
+}

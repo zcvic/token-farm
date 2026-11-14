@@ -76,6 +76,30 @@
 >
 > 该批九项**全部落地**，未提交。
 
+### 2026-11 成长任务批（附录 A 八项）
+
+来自 [upstream-sync-misakano.md](upstream-sync-misakano.md) 的附录 A 与附录 B，
+是「连登管家」闭环与两个只读状态端点。**不改流量分布、不碰 transport**，
+但补签是写历史的操作，因此多了一条 `schedule.makeup_cards_per_round` 上限配置。
+
+| 编号 | 能力 | 状态 | 来源提交 |
+|---|---|---|---|
+| M-A-1 | 新手礼包先查状态再领（`Pending()` 才领） | ✅ 已同步（`scheduler/benefit.go`；`gift\|uid\|endTime` guard） | `16f39d26` |
+| M-A-2 | 补签范围：昨日 → 本月漏签由近及远 | ✅ 已同步（`HeatmapBrokenDates` + `makeupMissed`；拒绝即停） | `d6272fa3` |
+| M-A-3 | 连登兑换：每日一档 → 全部已解锁档 | ✅ 已同步（跳过 `locked`/`claimed`） | `1cb4568e` |
+| M-A-4 | 抽奖：一次 → 抽完 chances（单轮上限 50） | ✅ 已同步 | `1cb4568e` |
+| M-A-5 | 成长奖励与活跃上报解耦 | ✅ 已同步（`checkinAll` 末尾 `RunStreakBonusNow`） | `1cb4568e` |
+| M-A-6 | global 签到先查状态（fail-closed） | ✅ 已同步（`scheduler/checkin_global.go`） | `bb6d581a` |
+| M-A-7 | 签到活动状态只读端点 | ✅ 已同步（`upstream/checkin_activity.go`） | `17d12a5f` |
+| M-A-8 | 国际版礼包（按 realm 走 billing base） | ✅ 已同步（global 分支只领礼包） | `ef84fb6a` |
+| M-B-8 | 签到活动状态端点（同 A-7） | ✅ 已同步 | `17d12a5f` |
+| M-B-9 | 礼包状态端点（同 A-1） | ✅ 已同步 | `5367e78d` |
+
+> 这一批的取舍与文件清单**不在本文展开**，见
+> [upstream-sync-misakano.md](upstream-sync-misakano.md) 的 **A.1.1**。
+> 三处有意偏离：补偿整条下线（活动已结束）、抽奖次数沿用本地
+> `/lottery/chances`、`streakBonusAccount` 返回「本轮是否发过写请求」。
+
 第二批（改流量分布、需灰度）与「明确不移植」的项见文末「建议实施顺序」。
 
 **部署注意**（G-P1-16 的镜像写入）：写入发生在**面板容器**里，目标是上游仓库目录
@@ -1313,16 +1337,16 @@ allowed 过滤后的结果）。
 | usage 缓存别名归一 | M-B-4 | `internal/upstream/usage.go` |
 | 401 三态求证 | M-B-5 / M-A-18 | `internal/upstream/verify.go`、`scheduler/balance_401.go` |
 | global 余额 summary/paid/free | M-B-7 | `internal/upstream/billing_summary.go` |
-| 签到活动状态 | M-A-7 / M-B-8 | `internal/upstream/checkin_activity.go` |
-| global 账号签到 / 成长奖励解耦 | M-A-5 / M-A-6 | `scheduler/checkin_global.go`、`scheduler/growth.go` |
-| 礼包状态查询 | M-A-1 / M-B-9 | `internal/upstream/benefit.go` |
+| 签到活动状态 | M-A-7 / M-B-8 | `internal/upstream/checkin_activity.go`（✅ 已同步） |
+| global 账号签到 / 成长奖励解耦 | M-A-5 / M-A-6 | `scheduler/checkin_global.go`（✅ 已同步）、`scheduler/growth.go`（不搬） |
+| 礼包状态查询 | M-A-1 / M-B-9 | `internal/upstream/benefit.go`（✅ 已同步） |
 | 国际版注册 / 地区 | M-B-10 | `internal/upstream/global_register.go` |
 | 账号昵称同步 | M-B-11 | `internal/upstream/profile.go` |
 | 桌面事件 / 外观 | M-B-12 | `internal/upstream/desktop.go` |
 | 模型 picker 裁剪 | M-B-14 | `internal/upstream/clientpick.go` |
 | 思考档位策略层 | M-B-15 | `internal/upstream/effort_policy.go`（`/v1/models` 侧的声明改写见本文 **G-P1-17**） |
 | 分段耗时观测 | M-B-16 | `internal/upstream/timing.go` |
-| 补签范围 / 兑换档位 / 抽奖次数 | M-A-2 / M-A-3 / M-A-4 | `scheduler/streak.go`、`streak_extras.go` |
+| 补签范围 / 兑换档位 / 抽奖次数 | M-A-2 / M-A-3 / M-A-4 | `scheduler/streak.go`（✅ 已同步）、`streak_extras.go` |
 | 成长任务队列 / 补领清扫 | M-A-9 / M-A-14 | `scheduler/growth.go`、`sweep.go` |
 | 重启补跑标记 | M-A-15 | `scheduler/runstamps.go` |
 | 账号级摊开 / 分钟级抖动 | M-A-16 / M-A-17 | `scheduler/spread.go`、`humanize.go` |
@@ -1388,7 +1412,7 @@ allowed 过滤后的结果）。
 | 6004 模型级冷却 | `pool.CooldownSoftForModel` + `modelCooldowns` |
 | 思考档位列表（部分） | `upstream.EffortListing`（`effort_catalog.go:111`）已输出 `reasoning_supported_efforts` + `reasoning_default_effort`，远端优先、静态表兜底；**缺** `can_disable_thinking`、`off` 追加、默认档改写，见 **G-P1-17** |
 | 账号代理路由 | `server/services/proxyroutes.py` + `upstream/internal/upstream/transport.go` |
-| 成长 streak / redeem / lottery / 补签 / 热力图 | `upstream/internal/upstream/growth_*.go` + `scheduler.go:793`。**能力在**，但范围比参考仓窄（补签只补昨天、兑换只取一档、抽奖只抽一次、无热力图补签依据），逐项差异见 M-附录 A 的 A-1～A-4 |
+| 成长 streak / redeem / lottery / 补签 / 热力图 | `upstream/internal/upstream/growth_*.go` + `scheduler/streak.go`。**能力在**，范围已与参考仓对齐（补签本月漏签、兑换全部已解锁档、抽完次数、礼包先查后领），逐项差异见 M-附录 A 的 **A.1.1** |
 | 多平台适配器（Trae / Qoder / combo） | `server/platforms/**` |
 | Python 侧 listing compat（部分） | `server/routers/gateway.py` 的 `_listing_compat_models` 补 `modalities.input` / `supported_reasoning_levels` / `supports_reasoning`；models.dev 独有键两边都缺，见 **G-P1-9** |
 | `cmd/stats` / `cmd/activity` / `cmd/acct` / `cmd/credit` | 本地独有，参考仓没有 |

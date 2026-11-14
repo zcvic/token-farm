@@ -93,3 +93,33 @@ b64773e85c4f9dcb1e73cf6d4f2010fa55ff66a8
 #        · Trace Tap（调用抓包）整段：新表、所有转发路径的采集点、/traces 页面
 #          与导航、tap 测试与文档；与本地定位不符，收益不足以覆盖维护面。
 8b5a4df412b86d29b92c4740d0c9adc1f6750b99
+
+# ---- 2026-11 成长任务批：附录 A 的 A-1～A-8 + 附录 B 的 B-8/B-9
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      范围：连登管家闭环（补签 / 礼包 / 全档兑换 / 抽完次数）+ 两个只读状态
+#      端点。逐项落地说明见 docs/upstream-sync-misakano.md 的 A.1.1。
+#      这一批的提交都早于基线 49fad282（2026-09/10），属于「基线之前一直没移植」
+#      的能力，按「本地缺不缺」收录，与上面的低风险九项不是同一来源批次。
+#      已取：
+#        · 连登管家全链（补签 → 礼包 → 全档兑换 → 抽完次数）+ 与 activity 解耦；
+#        · 本月漏签由近及远补 + 每轮补签卡上限（schedule.makeup_cards_per_round）；
+#        · 新手礼包「先查状态 → 待领才领」+ 同期 guard；
+#        · 国际版签到「先查状态再领」（fail-closed）+ 签到活动状态端点；
+#        · 任务记录新增 streak-bonus 类型（面板 tasklog + 任务页 + 五份 locale）。
+#      未取：
+#        · 官方补偿整条链（状态查询 / 领取 / 排程）：活动 2026-10 已结束，
+#          Go 侧不再自动领，只在 Python 面板保留手动兜底；
+#        · Go 内嵌面板的持久化成长作业（panel/taskjobs.go、tasksweep.go）
+#          与 Go 版 scheduler/growth.go 持久作业：本地是 Python + Next.js，
+#          按 docs/upstream-sync-misakano.md 附录 A.5 不搬。
+1cb4568e8b4052bef33d6aab42c73d51dd40e242
+3b8c4f254ef28ebb32a324b781603da3c99b0702
+d6272fa32ee16cdc8aaf5b1db75212b666aa6961
+16f39d26985eab9d64f65fb78f4309689cb49b5e
+17d12a5fbc26644b5fd4aacf2018dd0fcfc277bd
+ef84fb6a3e71b8169d0880ad9bab792e47ebcfa4
+5367e78dc934d07328d6c012f94b1d8cd6b8464b
+bb6d581a52ebb499d5bbab71b5669b5c4796ee88
+96a33f134dcde4334b681a5d08b1fec6390eb374
+# （本批逐项对照是在参考仓 10d01b48 上复核的；那个 HEAD 本身没有移植，
+#  按本文约定不写提交号，只在 docs/upstream-sync-misakano.md 的 A.1.1 里注明。）

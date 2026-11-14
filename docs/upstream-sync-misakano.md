@@ -53,6 +53,11 @@
 > （`reserve_credits` → `model_fallback` → 6020/6021 → `account_priority` /
 > `account_share` → `balance_window`，需灰度）不是同一批。
 
+> **2026-11 成长任务批**（附录 A 的 A-1～A-8 + 附录 B 的 B-8/B-9）：
+> **八项全部落地**，逐项说明见 **A.1.1**。这一批只动签到后的成长奖励链与两个
+> 只读状态端点，不改流量分布、不碰 transport；A-9/A-14 的 Go 内嵌持久作业
+> 与 A-15～A-18 的调度健壮性仍未做（见 A.5）。
+
 ## 先看两套运行时的差异
 
 本项目是 **Python 面板 + Go 上游网关** 双运行时；参考仓是**单二进制 Go 程序，
@@ -1662,6 +1667,10 @@ transport（`upstream/transport.go`），Python 侧有
 > M-P2-15、M-P1-11、M-P1-6、M-P1-8、M-P1-14、M-P1-12、M-P1-15、M-P0-2，
 > 各项末尾都有「落地状态」段）。M-P1-12 原本排在第 11 位，
 > 因为依赖的 `failKeepBinding` 已在第 6 项落地，提前并入本批一起做。
+>
+> **进度（2026-11 成长任务批）**：附录 A 的 A-1～A-8 与附录 B 的 B-8/B-9
+> 也**全部落地**，不在这张表里（它们不属于「一页摘要」那 20 项），
+> 逐项说明见 **A.1.1**。
 
 明确**暂不移植**：M-P2-11（活动 2026-11-16 结束）、M-P2-18（无 profiling 需求
 时不必开）、M-P2-19（参考仓自己刚 revert 了号池分区）、M-P2-16（与 M-B-11 合并
@@ -1680,6 +1689,10 @@ transport（`upstream/transport.go`），Python 侧有
 - **分叉**：两边都有实现，但通道、指纹或语义已经不同，不能简单判缺失。
 
 ### A.0 结论摘要
+
+> **本节是 2026-11 初的判断，现已被 A.1.1 的实现取代**：下面三件事（A-1、
+> A-5、A-2/A-3/A-4）连同 A-6～A-8、B-8/B-9 都已在**2026-11 成长任务批**
+> 落地。保留原文是为了说明「当时为什么先做这三项」，不是待办。
 
 优先做三件事，收益最大、风险最低：
 
@@ -1703,14 +1716,92 @@ transport（`upstream/transport.go`），Python 侧有
 
 | 项 | 本地现状 | 参考实现 | 判定 | 建议动作 | 成本/风险 |
 |---|---|---|---|---|---|
-| A-1 新手礼包 / 补偿领取 | `scheduler.go:866` `claimGrowthBonus` 直接 `ClaimGift` + `ClaimCompensation`，业务错误静默；`claimGrowthRewards` 在 `scheduler.go:802` 对 global 提前 `return`，global 连礼包都不领 | `scheduler/benefit.go:23` `claimGiftQuiet`：`GetGiftStatus` → `Pending()` → `ClaimGift`；`gift\|uid\|endTime` guard 防同期重复；`scheduler/streak.go:28-32` 对 global 单独 `claimGiftQuiet`（礼包是 billing 域，国际号实测 200） | **缺失**（含 global 漏领） | 补 `upstream.GetGiftStatus`（`POST /billing/meter/check-gift-claimed`，**不带 `/v2`**）；scheduler 改为先查后领；把 global 的礼包领取移到 early return 之前。补偿活动已于 2026-10 结束，本地保留手动兜底即可，不必恢复状态查询 | 低；每号每天多一次只读请求。企业/禁用号查询失败应静默，其余 WARN |
-| A-2 补签范围 | `scheduler.go:881` `makeupYesterday` 只判昨日；`growth_bonus.go:99` `UseMakeupCard`；补签成功重读 streak 挑档 | `scheduler/streak.go:103` `makeupMissed` + `streak_extras.go:36` `HeatmapBrokenDates`：取本月所有 `score==0`，从最近一天往回补，受 `schedule.makeup_cards_per_round` 上限 | **弱化** | 加 `HeatmapBrokenDates`；按日期倒序补；遇到上游拒绝即停（注册前日期同样是 0 分，无法与漏签区分）；加每轮上限配置 | 低到中；补签是改历史的写操作，必须封顶、必须可停 |
-| A-3 连登兑换档位 | `scheduler.go:848` `growthEligibleTier` 从高到低只挑**一个**已达标未领档，每日一轮 | `scheduler/streak.go:40` 遍历 `full.RedemptionStatus.Tiers`，跳过 `locked`/`claimed`，其余**全部** redeem | **弱化** | 改为遍历所有 `available` 档；保留每日 `rewardClaimedToday` 闸；日志逐档记录 credit/energy/cards/chances | 低；只对 available 写，避免重复 redeem |
-| A-4 抽奖次数 | `scheduler.go:907` `claimGrowthLottery` 只 `GrowthLotteryDraw` **一次** | `scheduler/streak.go:70` 按当前 `chances` 循环抽完 | **弱化** | 循环抽到 chances 用尽，失败即停；每次新 `client_token`；加单轮上限保护（例如 50） | 低；无次数/活动关闭按正常态静默 |
-| A-5 成长奖励触发点 | `claimGrowthRewards` 只在 `runActivity`（`scheduler.go:750`）里调用；activity 关闭、上报失败或不足 `ActivityReportCount` 条时完全不领 | `RunStreakBonusNow` 在签到排程末尾调用（`scheduler/streak.go:17`），与 activity 解耦；面板也可手动触发 | **弱化 / 结构差异** | 在 `runCheckinNow` 每号签到+余额后调用 `claimGrowthRewards`，或做独立 `RunGrowthNow`；activity 只负责点亮与自检。保留每日闸防双触发 | 低；签到与 activity 可能同日各触发一次，有 `rewardClaimedToday` 兜底 |
-| A-6 global 签到 | `checkinAll` 在 `scheduler.go:577` 直接 `CheckinSkipped, "global"`；Python `realm.supports_checkin()` 也返回 false | `scheduler/checkin_global.go`：先 `GetCheckinActivityStatus`，查询失败**直接返回**（不猜），只有 `active && !today_checked_in` 才 claim；国际活动当前常态关闭 | **弱化（可安全补）** | 加只读状态查询；global 走 fail-closed，CN 走 fail-open；面板文案同步。若不想发写请求，也可以只展示状态 | 低；国际活动可能 500/404，必须静默 |
-| A-7 签到活动状态 | 无 `checkin-activity-status` 调用；Go 直接 `DailyCheckin`，靠 10001 判「今天已签」 | `upstream/checkin_activity.go`：`POST /billing/meter/checkin-activity-status`（CN `/v2`，global 无前缀优先、404 回落），返回 `active/today_checked_in/streak_days/end_time` | **缺失** | 补只读客户端；CN 失败不阻断签到，global 失败不写；面板显示活动是否有效、今天是否已签、连登天数、截止日 | 低；只读，无副作用 |
-| A-8 国际版礼包 | 同 A-1，global 被 early return 挡住 | `scheduler/benefit.go` + `scheduler/streak.go` 的 global 分支 | **缺失** | 与 A-1 一起做；礼包按 realm 走 billing base，不要用 CN 固定 base | 低 |
+| A-1 新手礼包 / 补偿领取 | `scheduler.go:866` `claimGrowthBonus` 直接 `ClaimGift` + `ClaimCompensation`，业务错误静默；`claimGrowthRewards` 在 `scheduler.go:802` 对 global 提前 `return`，global 连礼包都不领 | `scheduler/benefit.go:23` `claimGiftQuiet`：`GetGiftStatus` → `Pending()` → `ClaimGift`；`gift\|uid\|endTime` guard 防同期重复；`scheduler/streak.go:28-32` 对 global 单独 `claimGiftQuiet`（礼包是 billing 域，国际号实测 200） | **缺失**（含 global 漏领）→ ✅ **已同步**（见 A.1.1） | 补 `upstream.GetGiftStatus`（`POST /billing/meter/check-gift-claimed`，**不带 `/v2`**）；scheduler 改为先查后领；把 global 的礼包领取移到 early return 之前。补偿活动已于 2026-10 结束，本地保留手动兜底即可，不必恢复状态查询 | 低；每号每天多一次只读请求。企业/禁用号查询失败应静默，其余 WARN |
+| A-2 补签范围 | `scheduler.go:881` `makeupYesterday` 只判昨日；`growth_bonus.go:99` `UseMakeupCard`；补签成功重读 streak 挑档 | `scheduler/streak.go:103` `makeupMissed` + `streak_extras.go:36` `HeatmapBrokenDates`：取本月所有 `score==0`，从最近一天往回补，受 `schedule.makeup_cards_per_round` 上限 | **弱化** → ✅ **已同步** | 加 `HeatmapBrokenDates`；按日期倒序补；遇到上游拒绝即停（注册前日期同样是 0 分，无法与漏签区分）；加每轮上限配置 | 低到中；补签是改历史的写操作，必须封顶、必须可停 |
+| A-3 连登兑换档位 | `scheduler.go:848` `growthEligibleTier` 从高到低只挑**一个**已达标未领档，每日一轮 | `scheduler/streak.go:40` 遍历 `full.RedemptionStatus.Tiers`，跳过 `locked`/`claimed`，其余**全部** redeem | **弱化** → ✅ **已同步** | 改为遍历所有 `available` 档；保留每日 `rewardClaimedToday` 闸；日志逐档记录 credit/energy/cards/chances | 低；只对 available 写，避免重复 redeem |
+| A-4 抽奖次数 | `scheduler.go:907` `claimGrowthLottery` 只 `GrowthLotteryDraw` **一次** | `scheduler/streak.go:70` 按当前 `chances` 循环抽完 | **弱化** → ✅ **已同步** | 循环抽到 chances 用尽，失败即停；每次新 `client_token`；加单轮上限保护（例如 50） | 低；无次数/活动关闭按正常态静默 |
+| A-5 成长奖励触发点 | `claimGrowthRewards` 只在 `runActivity`（`scheduler.go:750`）里调用；activity 关闭、上报失败或不足 `ActivityReportCount` 条时完全不领 | `RunStreakBonusNow` 在签到排程末尾调用（`scheduler/streak.go:17`），与 activity 解耦；面板也可手动触发 | **弱化 / 结构差异** → ✅ **已同步** | 在 `runCheckinNow` 每号签到+余额后调用 `claimGrowthRewards`，或做独立 `RunGrowthNow`；activity 只负责点亮与自检。保留每日闸防双触发 | 低；签到与 activity 可能同日各触发一次，有 `rewardClaimedToday` 兜底 |
+| A-6 global 签到 | `checkinAll` 在 `scheduler.go:577` 直接 `CheckinSkipped, "global"`；Python `realm.supports_checkin()` 也返回 false | `scheduler/checkin_global.go`：先 `GetCheckinActivityStatus`，查询失败**直接返回**（不猜），只有 `active && !today_checked_in` 才 claim；国际活动当前常态关闭 | **弱化（可安全补）** → ✅ **已同步** | 加只读状态查询；global 走 fail-closed，CN 走 fail-open；面板文案同步。若不想发写请求，也可以只展示状态 | 低；国际活动可能 500/404，必须静默 |
+| A-7 签到活动状态 | 无 `checkin-activity-status` 调用；Go 直接 `DailyCheckin`，靠 10001 判「今天已签」 | `upstream/checkin_activity.go`：`POST /billing/meter/checkin-activity-status`（CN `/v2`，global 无前缀优先、404 回落），返回 `active/today_checked_in/streak_days/end_time` | **缺失** → ✅ **已同步** | 补只读客户端；CN 失败不阻断签到，global 失败不写；面板显示活动是否有效、今天是否已签、连登天数、截止日 | 低；只读，无副作用 |
+| A-8 国际版礼包 | 同 A-1，global 被 early return 挡住 | `scheduler/benefit.go` + `scheduler/streak.go` 的 global 分支 | **缺失** → ✅ **已同步** | 与 A-1 一起做；礼包按 realm 走 billing base，不要用 CN 固定 base | 低 |
+
+### A.1.1 落地状态（2026-11 成长任务批）
+
+A-1～A-8 与 B-8/B-9 **八项已同步**，来源提交见
+`deploy/workbuddy-panel-ref.txt` 的「2026-11 成长任务批」段（逐项对照是在参考仓
+`10d01b48` 上复核的，那个 HEAD 本身没有移植）。与参考仓的差异
+逐条如下——**有意偏离的地方不要当成遗漏**。
+
+**新增文件**
+
+- `upstream/internal/upstream/benefit.go`（B-9）：`giftStatusPath` =
+  `/billing/meter/check-gift-claimed`（**不带 `/v2`**，带前缀是 404）；
+  `BenefitStatus.Pending() = active && !claimed && credit_num>0`。走
+  `billingJSON`（billingBase），与领取端点同域同头。
+- `upstream/internal/upstream/checkin_activity.go`（B-8）：CN 单路径 `/v2/...`；
+  global 先无前缀、404 再回落（与 `checkinMeterPaths` 同口径）。走
+  `billingMeterJSON`，`active=false` 是正常 200 不是错误。
+- `upstream/internal/scheduler/benefit.go`（A-1/A-8）：`claimGiftQuiet` 先查
+  `Pending()` 再领；`gift|uid|endTime` guard 保证同一期只试一次（上游 status 的
+  `claimed` 实测有时恒 false，单靠 `Pending()` 会每次签到重打一遍全池 claim）。
+  企业号 / 已禁用号查询失败静默，其余 WARN。`credit<=0` 不打成功行。
+- `upstream/internal/scheduler/checkin_global.go`（A-6）：fail-closed——状态查询
+  失败直接返回，`active && !today_checked_in` 才 `DailyCheckin`；
+  `today_checked_in` 视为权威并落 `NoteCheckinDone`。
+- `upstream/internal/scheduler/streak.go`（A-2/A-3/A-4/A-5）：`RunStreakBonusNow`
+  + `streakBonusAccount` + `makeupMissed` + `lotteryDrawPerRoundCap = 50`。
+
+**与参考仓不同的四处取舍**
+
+1. **补偿整条下线**（`08700391` 的两端都不搬）。补偿活动 2026-10 已结束，
+   Go 侧不再查状态、不再领；Python 面板保留手动兜底
+   （`server/services/tencent.py` 的 `claim_compensation`，账号页仍可点）。
+   参考仓把它连同礼包一起做成「先查后领」，本地只保留礼包那一半。
+2. **抽奖次数端点沿用本地的**：参考仓用 `/lottery/summary` 读 `data.chances`，
+   本地实测可用的是 `/activity/growth/lottery/chances` 的 `data.balance`，继续
+   用后者，不为了对齐换端点。
+3. **`streakBonusAccount` 返回 `bool`**：参考仓的 `makeupMissed` 无返回值、每轮
+   都重读 streak。本地让 `makeupMissed` 返回 `(state, wrote)`——无漏签或热力图
+   失败时 `state=nil`（调用方自己读）、有漏签无卡时直接交回已读 state（省一次
+   往返）、补签成功时 `wrote=true` 且 state 作废必须重读。`streakBonusAccount`
+   把这个 `wrote` 继续往上传给 `claimGrowthRewards`，只有真发过写请求才
+   `markRewardClaimed`——全 locked 且无存量次数时什么都不写，留出下一趟补上刚
+   解锁档位的余地。
+4. **`claimGrowthRewards` 保留为手动/兼容入口**（不再被 `runActivity` 调用）：
+   仍带 global 跳过与当日闸，主体转调 `streakBonusAccount`。签到排程走的是
+   `RunStreakBonusNow`，**不设闸**——它本身幂等，一天两趟签到需要第二趟也能补上
+   第一趟失败的那一档。
+
+**新增配置**
+
+- `schedule.makeup_cards_per_round`（`upstream/internal/config/schedule.go`）：
+  每轮最多用几张补签卡，0 = 不限。负值 fail fast（不猜语义）。面板「设置 →
+  上游配置」有对应输入项，`server/services/wb2api.py` 的 `_INT_RANGES` 限
+  0～100。参考仓 `5367e78d` 引入同一个键，语义一致。
+
+**任务记录与界面**
+
+- 上游日志前缀从 `activity` 换成独立的 `streak-bonus`；
+  `server/services/tasklog.py` 的 `_KINDS` / `KIND_LABELS` 同步收录，任务页
+  `KIND_LABEL_KEYS` 与五份 locale 加「连登管家」。
+- 「每轮补签上限」的 label / desc / unit 是拼接式文案，必须同时进四份目标语言
+  的短语表（en/ja/ko/zh-TW）——漏一条会在非中文界面静默退回中文，由
+  `test_web_i18n` 的 `test_setting_field_concats_have_translations` 守着。
+- 中文成功行（`签到成功` / `已用补签卡补签` / `抽奖完成`）与中文跳过行
+  （`，跳过` / `（跳过）` / `剩余漏签下一轮继续`）在 `_classify` 里单列判据，
+  不再落到末尾的 error 兜底。积分口径只认 `+Nc`，`+Ne`（energy）不算。
+
+**测试**
+
+- Go：`scheduler/reward_test.go`（全档兑换、抽完次数、上限、global 只领礼包、
+  activity 不再领奖、`RunStreakBonusNow` 全链）、`growth_bonus_test.go`
+  （补签多日倒序 / 每轮上限 / 拒绝即停 / 无卡不重读 / 热力图失败）、
+  `checkin_global_test.go`（8 个分支）、`upstream/benefit_test.go`、
+  `upstream/checkin_activity_test.go`、`growth_bonus_test.go` 的
+  `HeatmapBrokenDates` / `GrowthStreakFull`。`go build` / `go vet` /
+  `go test ./...` 全绿。
+- Python：`server/tests/test_tasklog.py` 的 `StreakBonusLogTest`（12 例）与
+  `GlobalCheckinLogTest`（4 例）。
 
 ### A.2 任务执行与调度
 
@@ -1729,8 +1820,9 @@ transport（`upstream/transport.go`），Python 侧有
 
 ### A.3 建议实施顺序
 
-1. **第一批（只读 + 低风险）**：A-1 礼包状态查询、A-6/A-7 签到活动状态、A-2 的 `HeatmapBrokenDates` 只读部分。
-2. **第二批（闭环）**：A-5 成长奖励解耦、A-3 全部档兑换、A-4 抽完次数、A-2 补签范围、A-1 global 礼包。
+1. ~~**第一批（只读 + 低风险）**：A-1 礼包状态查询、A-6/A-7 签到活动状态、A-2 的 `HeatmapBrokenDates` 只读部分。~~
+2. ~~**第二批（闭环）**：A-5 成长奖励解耦、A-3 全部档兑换、A-4 抽完次数、A-2 补签范围、A-1 global 礼包。~~
+   —— 两批已在 **2026-11 成长任务批**一起落地，逐项见 **A.1.1**。
 3. **第三批（任务系统）**：A-9 的 Python 侧持久作业与锁、A-12 外观 API、A-14 补领清扫、A-15～A-18 调度健壮性。
 4. **最后再评估**：B-6 活跃上报通道切换。没有 A/B 实测数据不要动。
 
@@ -1742,13 +1834,13 @@ transport（`upstream/transport.go`），Python 侧有
 
 | 结论 | 条目 | 理由 |
 |---|---|---|
-| **值得，先做** | A-5 | 现在 activity 一关或上报不满 5 条，连登兑换/抽奖**整条跳过**。这是最大的一处漏，成本却只有「换个调用点」 |
-| **值得，先做** | A-3、A-4 | 只领一档 / 只抽一次，等于每天主动放弃 N-1 档和 N-1 次。改动小、只对 `available` 写 |
-| **值得，先做** | A-1、A-8 | global 号**完全不领礼包**；CN 盲领把「已领过」打成假成功行。每天一次只读换确定性 |
-| **值得** | A-2 → M-P0-2 | 补签范围 + 失败重排。**顺序不能反**：先扩范围再排队，否则队列补的还是「只有昨日」 |
+| ✅ 已落地 | A-5 | 现在 activity 一关或上报不满 5 条，连登兑换/抽奖**整条跳过**。这是最大的一处漏，成本却只有「换个调用点」 |
+| ✅ 已落地 | A-3、A-4 | 只领一档 / 只抽一次，等于每天主动放弃 N-1 档和 N-1 次。改动小、只对 `available` 写 |
+| ✅ 已落地 | A-1、A-8 | global 号**完全不领礼包**；CN 盲领把「已领过」打成假成功行。每天一次只读换确定性 |
+| ✅ 已落地 | A-2 → M-P0-2 | 补签范围 + 失败重排。**顺序不能反**：先扩范围再排队，否则队列补的还是「只有昨日」。M-P0-2 先落、A-2 随后补上范围，现在两者都已生效 |
+| ✅ 已落地 | A-7、A-6 | 只读状态查询，成本极低；A-6 的 global 分支最终**确实发了写请求**——但只在 `active && !today_checked_in` 时，常态零写 |
 | **值得** | M-P1-13 | 回执四态。本身不产积分，但它是 M-P0-2 和 A-2 的观测前提——不修就看不见补签到底成没成 |
-| **值得** | A-7、A-6 | 只读状态查询，成本极低；A-6 的 global 分支建议只展示状态、不发写请求 |
-| **值得（一行）** | M-P2-15 | `isFirstPage` 字符串改布尔，`Buddy_App` 一直 0/1 的根因。改动两行，风险几乎为零 |
+| **值得（一行）** | M-P2-15 | `isFirstPage` 字符串改布尔，`Buddy_App` 一直 0/1 的根因。改动两行，风险几乎为零（已同步） |
 | **缓** | A-15 | 重启补跑标记只防重复写。**但如果 A-9 不做**，本地本来就没有分钟级任务，重复写风险很小 |
 | **缓** | A-12 | 只点亮 `Hp_Appearance` 一个任务点，且要先确认该任务在当前账号上还挂得出来 |
 | **缓** | A-16、A-17 | `spread` / `humanize` 只解决时间相关性，**不是防封**。参考仓自己也没给出封号对比数据 |
@@ -1772,8 +1864,9 @@ transport（`upstream/transport.go`），Python 侧有
 
 > 与 A-1～A-18 的关系：A-1/A-2/A-3/A-4 是「闭环本身缺」，
 > M-P0-2/M-P1-13 是「闭环有了但**失败路径**没兜住」——补签没排队、回执被丢掉。
-> 两项都建议**先做 A-2 的补签范围**再做 M-P0-2，否则补签队列补的仍是「只有昨日」
-> 那一个日期。M-P2-15 与 A-11/A-12 同属桌面任务链，但它是独立的一行修复，
+> 「先做 A-2 的补签范围再做 M-P0-2」这个顺序现在**已经自然满足**：M-P0-2 先落地，
+> A-2 随后补上本月漏签范围，补签队列补的已经是「本月断点」而不是只有昨日。
+> M-P2-15 与 A-11/A-12 同属桌面任务链，但它是独立的一行修复，
 > 不必等 A-12 的外观 apply。
 >
 > 另外两项**看着像成长任务、其实不是**，别在附录 A 找：
@@ -1788,6 +1881,14 @@ transport（`upstream/transport.go`），Python 侧有
   实现写在 Python 侧（A-14）。
 - `runstamps.go` 的「按天落小文件」：本地方案可以更简单——Python 侧已有
   `tasklog.py` 落盘，复用即可，不必新开一个 stamp 文件格式。
+
+**这一批也明确没搬的**（A.1.1 落地时逐项评估过）：
+
+- `scheduler/compensation.go` / `upstream/compensation.go`（`08700391` 两端）：
+  补偿活动 2026-10 已结束，Go 侧不再自动领，只在 Python 面板留手动兜底。
+- `scheduler/growth.go` 的「每日排程启动持久化后台作业」：同 A-9，不搬。
+- `streak.go` 里的 `compactJSON` 奖品载荷裁剪：本地抽奖回执已解析成
+  `PrizeName` / `PrizeType` 两个字段，不需要再截 JSON。
 
 ---
 
@@ -1840,8 +1941,8 @@ transport（`upstream/transport.go`），Python 侧有
 | 项 | 本地现状 | 参考实现 | 判定 | 建议动作 | 成本/风险 |
 |---|---|---|---|---|---|
 | B-7 global 余额 summary / paid / free | Python `tencent.fetch_credits:796` 始终走 CN 的 `get-user-resource` + CN body；Go `client.go:2040` 对 global 也用同一 body 与解析；没有 summary/paid/free | `upstream/billing_summary.go`（`bde6da11`）：`get-user-resource-summary` + `get-user-resource-paid-packages` + `get-user-resource-free-packages`；`flexFloat` 兼容字符串小数；按 `PackageCode` 关联；明细失败时只降级到期批次，不丢总额 | **缺失**（global 余额可能恒 0） | 先改 Python 面板展示，再改 Go 池权重。global 才走三件套，CN 保持现状；summary 给权威 remain/total，paid/free 只补到期；字段可能是字符串，必须宽容解析 | 中；解析兼容与降级策略是关键 |
-| B-8 签到活动状态 | 无 | `upstream/checkin_activity.go`（`17d12a5f`）：`POST /billing/meter/checkin-activity-status`；CN `/v2`，global 无前缀优先、404 回落；只读 | **缺失** | 见 A-6/A-7；CN 查询失败 fail-open，global fail-closed | 低 |
-| B-9 礼包状态 | 无 | `upstream/benefit.go`（`5367e78d`、`16f39d26`）：`POST /billing/meter/check-gift-claimed`（**不带 `/v2`**）；`Pending() = active && !claimed && credit_num>0` | **缺失** | 见 A-1；不要复用 CN `billingMeterPaths`（它只给 `/v2`） | 低 |
+| B-8 签到活动状态 | 无 | `upstream/checkin_activity.go`（`17d12a5f`）：`POST /billing/meter/checkin-activity-status`；CN `/v2`，global 无前缀优先、404 回落；只读 | **缺失** → ✅ **已同步**（见 A.1.1） | 见 A-6/A-7；CN 查询失败 fail-open，global fail-closed | 低 |
+| B-9 礼包状态 | 无 | `upstream/benefit.go`（`5367e78d`、`16f39d26`）：`POST /billing/meter/check-gift-claimed`（**不带 `/v2`**）；`Pending() = active && !claimed && credit_num>0` | **缺失** → ✅ **已同步**（见 A.1.1） | 见 A-1；不要复用 CN `billingMeterPaths`（它只给 `/v2`） | 低 |
 | B-10 国际版注册 / 地区 / trial | Python `tencent.py:1545` `registration_status`、`:1578` `submit_region`、`:1664` `claim_trial`，并已调 `get-country-code` | `upstream/global_register.go`：注册状态 + `get-user-area-info` 当前地区 + `console/login/account` 提交地区 + `ide/trial` 领 trial；响应可能是双层 JSON 字符串 | **基本覆盖（Python）** | 不搬 Go；如需面板回显「当前地区」，补 `get-user-area-info` 只读调用；地区选择仍由用户决定 | 低；隐私/地区合规 |
 | B-11 账号昵称同步 | 无 `/console/account` 调用；昵称来自导入文件 | `upstream/profile.go`（`04005ba2`，issue #94）：`GET {webBase}/console/account`，Bearer + `x-client-platform: web`；只解析 `nickname` 与 `uid`，手机号等字段不解析、不落日志、不透传；仅手动刷新触发 | **缺失（低优先）** | 只做手动刷新；只取 nickname/uid；后台余额刷新不调用 | 低；隐私边界必须写死 |
 | B-12 桌面端 / 外观 | Python 有桌面事件链与 skin 事件，但没有真实 `appearance/set`；Go 无 | `upstream/desktop.go`（`5677928d`、`ee1c80d8`）：`desktopReport` + `SetAppearanceTheme`（`POST /v2/user-asset/appearance/set`，`kind:"theme"` + `resource_key`） | **部分覆盖 / 分叉** | 先补 A-12 的真实 apply；事件链与指纹按任务完成率再决定是否全量对齐 | 低到中 |

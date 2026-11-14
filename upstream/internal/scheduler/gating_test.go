@@ -14,18 +14,24 @@ import (
 )
 
 // TestGlobalAccountsSkipCheckinTravel gating（活动已放开，见下方两个 activity 用例）：
-// 池内 global 账号在 checkin/travel 两类循环中**零上游调用**；activity 已不再跳过
+// 池内 global 账号在 checkin/travel 两类循环中**零写调用**；activity 已不再跳过
 // global（PR #45 实测 /v2/report 在 workbuddy.ai code=0 OK）。
 //
-// fake upstream 全路径统计调用数：global 账号若被误放行，会打到 fake server
-// 的 /daily-checkin /buddy/info 等任意路径，调用数即 >0。
+// 2026-11 起 global 签到改为 fail-closed 的「先查状态、仅 active 且未签才 claim」
+// （checkin_global.go），礼包也改为「先查状态再领」（benefit.go）：所以 global
+// 现在有 3 次**只读**调用（签到活动状态 / 余额 / 礼包状态），但没有一次写请求。
+// fake upstream 按路径区分读写：写请求一旦出现就是门控回归。
 func TestGlobalAccountsSkipCheckinTravel(t *testing.T) {
 	fastTravel(t)
 	fastActivity(t)
 
-	var calls atomic.Int32
+	var calls, writes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		switch r.URL.Path {
+		case "/daily-checkin", "/v2/billing/meter/daily-checkin", "/v2/billing/meter/claim-gift":
+			writes.Add(1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// 只读余额查询要成功，避免 404 触发 /v2 → fallback 的第二次请求。
 		_, _ = io.WriteString(w, `{"Response":{"Data":{"Accounts":[{"CapacityRemain":100}]}}}`)
@@ -44,8 +50,12 @@ func TestGlobalAccountsSkipCheckinTravel(t *testing.T) {
 	s.CheckinAll()
 	s.RunTravelNow()
 
-	if n := calls.Load(); n != 1 {
-		t.Errorf("global account checkin/travel upstream calls=%d want 1（仅只读余额查询）", n)
+	if n := writes.Load(); n != 0 {
+		t.Errorf("global account 写请求=%d want 0（签到/礼包都必须先查状态）", n)
+	}
+	// 3 次只读：签到活动状态 + 余额 + 礼包状态（全部返回空对象 → active=false 静默）。
+	if n := calls.Load(); n != 3 {
+		t.Errorf("global account checkin/travel upstream calls=%d want 3（签到状态 + 余额 + 礼包状态）", n)
 	}
 }
 
@@ -55,9 +65,13 @@ func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 	fastTravel(t)
 	fastActivity(t)
 
-	var calls atomic.Int32
+	var calls, writes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		switch r.URL.Path {
+		case "/daily-checkin", "/v2/billing/meter/daily-checkin", "/v2/billing/meter/claim-gift":
+			writes.Add(1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// 只读余额查询要成功，避免 404 触发 /v2 → fallback 的第二次请求。
 		_, _ = io.WriteString(w, `{"Response":{"Data":{"Accounts":[{"CapacityRemain":100}]}}}`)
@@ -83,8 +97,12 @@ func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 	if out[0].Detail != "global" {
 		t.Errorf("detail=%q want global", out[0].Detail)
 	}
-	if calls.Load() != 1 {
-		t.Errorf("upstream calls=%d want 1（仅只读余额查询）", calls.Load())
+	if n := writes.Load(); n != 0 {
+		t.Errorf("写请求=%d want 0（国际版活动未开时不得盲签/盲领）", n)
+	}
+	// 3 次只读：签到活动状态 + 余额 + 礼包状态。
+	if n := calls.Load(); n != 3 {
+		t.Errorf("upstream calls=%d want 3（签到状态 + 余额 + 礼包状态，均为只读）", n)
 	}
 }
 
