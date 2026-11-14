@@ -123,3 +123,33 @@ bb6d581a52ebb499d5bbab71b5669b5c4796ee88
 96a33f134dcde4334b681a5d08b1fec6390eb374
 # （本批逐项对照是在参考仓 10d01b48 上复核的；那个 HEAD 本身没有移植，
 #  按本文约定不写提交号，只在 docs/upstream-sync-misakano.md 的 A.1.1 里注明。）
+
+# ---- 2026-11 登录与协议批：附录 C 的 C-1 / C-2
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      范围：参考仓 7a48d72e 之后的 8 个非 merge 提交，取 2 项、跳 4 项、暂缓 1 项。
+#      逐项判定见 docs/upstream-sync-misakano.md 的 C.1，落点与取舍见 C.2。
+#      已取：
+#        · 登录授权链接补真机参数：CN 带 version=5.9.3 + loginSessionId（uuid），
+#          GL 只带 version=5.9.4（官方 platform!=='workbuddy' 直接 return）；
+#          ?platform= 同时从 CLI 改回真机口径（CN workbuddy / GL workbuddy-ai，
+#          取自 product.json 的 authentication.attributes.platform）。
+#          落点是 Python 登录链（server/services/realm.py + tencent.start_login），
+#          因为本地面板的 /login 链在 Python 而非 Go。
+#        · Anthropic 结构化输出：/v1/messages 的 output_config.format{type:json_schema}
+#          映射为 response_format{json_schema:{name,strict,schema}}。只搬语义——
+#          本地 /v1/messages 在 Python server/routers/anthropic.py，参考仓的
+#          Go messages.go 搬不过来。
+#      未取：
+#        · 余额趋势灰线 / 日柱色板口径 / 示例配置 models.allowed 断言（ff398789、
+#          1a294b73、1ad68a0e）：改的是参考仓内嵌面板与它自己的 config 断言，
+#          本地是 Next.js 且没有「按账号的余额曲线」视图。
+#        · 二维码编码器补到 v9（eecc7299）：本地用 qrcode.react，无 v6 长度上限。
+#      暂缓：
+#        · 6020/6021 网关内先等一轮（b957e32b）：那半个提交依赖参考仓自己的
+#          headkeepalive.go（已提交响应头后的 error 帧改造），本地没有该文件
+#          （M-P1-7 未做）。留待与 M-P1-7 一起评估，不单独引入半边语义的开关。
+#      另注：Go 侧 cmd/login 本批刻意未动——它还停在 platform=CLI + CodeBuddy/2.63.2
+#      UA + 缺 x-domain/哨兵头（P2-4 整条），只补 version 会更自相矛盾。
+320f5d4daf65c6acffb3c724c023a959150cd8eb
+0e863d8380d837e1568fce6e14dcfbc02382635c
+fa4d62ceb81fc6714224947a2ec8cd781e47e7db

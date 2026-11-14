@@ -31,8 +31,10 @@ from .realm import (
     billing_paths,
     chat_base,
     chat_paths,
+    decorate_auth_url,
     device_token_for,
     headers as realm_headers,
+    login_platform,
     realm_of,
     resolve_realm,
     supports_checkin,
@@ -203,12 +205,16 @@ async def start_login(realm: Realm = CN, proxy_name: str = '') -> dict:
 
     网络层失败统一转成 `RuntimeError`（带可执行的中文原因，见 `_login_net_hint`）：
     路由层把它转 502，界面就能显示「哪条线路连不上、该怎么办」，而不是英文 500。
+
+    `?platform=` 与授权链接补参走 realm 层的真机口径（见 `realm.login_platform`
+    与 `realm.decorate_auth_url`）：参考仓 2026-10-30 / 11-14 两次真机抓包确认
+    旧的 `platform=CLI` 取错了字段层，且授权页会读 `version` / `loginSessionId`。
     """
     try:
         async with _account_http_client({'proxy': proxy_name}) as client:
             resp = await client.post(
                 f'{chat_base(realm)}/v2/plugin/auth/state',
-                params={'platform': 'CLI'},
+                params={'platform': login_platform(realm)},
                 json={},
                 headers=_hdr(realm),
             )
@@ -220,7 +226,12 @@ async def start_login(realm: Realm = CN, proxy_name: str = '') -> dict:
     state = data.get('state') or ''
     if state:
         _state_cache[state] = (time.time(), realm, proxy_name)
-    return {'state': state, 'authUrl': data.get('authUrl') or '', 'realm': realm, 'proxy': proxy_name}
+    return {
+        'state': state,
+        'authUrl': decorate_auth_url(str(data.get('authUrl') or ''), realm),
+        'realm': realm,
+        'proxy': proxy_name,
+    }
 
 
 def is_pending(state: str) -> bool:

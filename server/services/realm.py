@@ -32,6 +32,8 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import urllib.parse
+import uuid
 from pathlib import Path
 from typing import Literal
 
@@ -150,6 +152,89 @@ def cli_version() -> str:
     except Exception:  # noqa: BLE001
         pass
     return '2.137.1'
+
+
+# ── 登录（设备授权）链路的版本常量 ─────────────────────────────
+#
+# **独立于 `client_version()` / `cli_version()`**，这是刻意的：那两个是「业务链路
+# 出站 UA」的版本段，默认 5.5.4 / 2.137.1，可被 config upstream 覆盖；而登录链的
+# `version` 参数进的是**授权页自己的风控判定**（`console/auth/risk-context`），
+# 真机实测的取值与业务 UA 不是同一个数字。
+#
+# 2026-11-14 真机抓包（Chrome 地址栏原文，参考仓 misakano 320f5d4d / 0e863d83）：
+#
+#   CN  /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
+#   GL  /login/?platform=workbuddy-ai&state=…&version=5.9.4
+#
+# 两个站点都带 version（与各自桌面端包版本同源），但 loginSessionId **只有 CN**
+# ——官方 `appendHostLoginJourneyParams` 里 `platform !== 'workbuddy'` 直接 return。
+#
+# 为什么不复用 config：这两个值属于「真机指纹」，跟着分发包版本走，不该让部署方
+# 随手改；改错会让授权页按旧客户端渲染并埋点（参考仓记录：落后两个小版本即触发）。
+LOGIN_VERSION_CN = '5.9.3'
+LOGIN_VERSION_GLOBAL = '5.9.4'
+
+
+def login_version(realm: Realm) -> str:
+    """登录授权链接里的 `version` 参数值（CN 5.9.3 / Global 5.9.4）。"""
+    return LOGIN_VERSION_GLOBAL if realm == GLOBAL else LOGIN_VERSION_CN
+
+
+def login_platform(realm: Realm) -> str:
+    """登录授权 `?platform=` 的取值（真机 CN workbuddy / Global workbuddy-ai）。
+
+    **不是** "CLI"：那是分发包 `product.json` **顶层** platform 字段的值，与
+    设备授权用的 `authentication.attributes.platform` 同名不同层，取错了层两边
+    真机形态都不符（参考仓 96b816da 的实测结论）。
+    """
+    return 'workbuddy-ai' if realm == GLOBAL else 'workbuddy'
+
+
+def login_session_id(realm: Realm) -> str:
+    """登录会话标识（uuid v4 形态）；国际版返回空串。
+
+    官方由客户端本地生成、只做透传（授权页读它再编进 signin-callback），不是
+    服务端签发的凭证，所以本地随机即可。用 v4 形状只是为了与真机同一形态。
+    国际版真机链接里没有这个参数，硬塞等于发一个官方不认识的字段。
+    """
+    if realm == GLOBAL:
+        return ''
+    return str(uuid.uuid4())
+
+
+def decorate_auth_url(url: str, realm: Realm) -> str:
+    """按真机形态给授权链接补 `version` / `loginSessionId`。
+
+    为什么不改调用方而是集中在这里：`authUrl` 由腾讯签发后直接回给前端渲染成
+    二维码，Python 侧唯一的落点就是 `tencent.start_login`；放在 realm 层是为了
+    与 `login_platform()` 同处一地，将来若 Go 侧也要补，语义只有一个出处。
+
+    三条纪律：
+      1. **已有参数一律不覆盖**——上游若哪天自己带上 version，以它为准（错值比缺值
+         更容易被判异常，别用本地常量顶掉服务端签发值）。
+      2. 解析失败原样返回——不能因为补参数把能用的链接弄坏。
+      3. 空值不加：`version` 为空、`loginSessionId` 为空（国际版）都不写字段。
+    """
+    if not url:
+        return url
+    parsed = urllib.parse.urlsplit(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    present = {k for k, _ in pairs}
+    extra: list[tuple[str, str]] = []
+    ver = login_version(realm)
+    if ver and 'version' not in present:
+        extra.append(('version', ver))
+    if 'loginSessionId' not in present:
+        sid = login_session_id(realm)
+        if sid:
+            extra.append(('loginSessionId', sid))
+    if not extra:
+        return url
+    query = urllib.parse.urlencode(pairs + extra)
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
 
 
 def _ua(realm: Realm) -> str:

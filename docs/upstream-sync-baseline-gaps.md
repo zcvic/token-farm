@@ -1229,6 +1229,15 @@ L1419 另有一处点名调用判 hidden；Go `handler.go` 与 `internal/server`
 一份常量**，改业务链路时容易漏掉它。版本串确实会进风控判定（参考仓记录：落后
 两个小版本时登录页按旧客户端渲染并埋点）。
 
+**落地状态（2026-11-14，部分）**：**Python 登录链已对齐**。参考仓
+`320f5d4d` / `0e863d83` 的真机实测结论搬进了 `server/services/realm.py`：
+`LOGIN_VERSION_CN = '5.9.3'` / `LOGIN_VERSION_GLOBAL = '5.9.4'`（独立于业务 UA 的
+`client_version()`，默认 `5.5.4`）、`login_session_id()`（只 CN 给 uuid，GL 空串）、
+`login_platform()`（CN `workbuddy` / GL `workbuddy-ai`，不再是 `CLI`），
+`decorate_auth_url()` 给 `start_login` 返回的链接补参数且不覆盖服务端已有值。
+**Go 侧 `cmd/login` 仍未动**：它还停在 `platform=CLI` + `CodeBuddy/2.63.2` UA +
+缺 `x-domain`/哨兵头，只补 `version` 会形成半对齐；要动就整条按本节对齐。
+
 **成本/风险**：低，但要真实抓包复核，不要凭 npm dist-tag 猜。
 
 ### P2-5　`internal/probe`（测量工具）

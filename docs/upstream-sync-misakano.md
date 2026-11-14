@@ -58,6 +58,12 @@
 > 只读状态端点，不改流量分布、不碰 transport；A-9/A-14 的 Go 内嵌持久作业
 > 与 A-15～A-18 的调度健壮性仍未做（见 A.5）。
 
+> **2026-11 登录与协议批**（参考仓 `7a48d72e` 之后的 8 个非 merge 提交）：
+> 取 2 项、跳 4 项、暂缓 1 项，逐项说明见 **C.1**。已落地的是登录授权链接补真机参数
+> （`320f5d4d` + `0e863d83`）与 Anthropic 结构化输出映射（`fa4d62ce`）；
+> 6020/6021 网关内等一轮（`b957e32b`）因依赖本地没有的 headkeepalive 而暂缓。
+> 这一批同样不改流量分布、不引入依赖。
+
 ## 先看两套运行时的差异
 
 本项目是 **Python 面板 + Go 上游网关** 双运行时；参考仓是**单二进制 Go 程序，
@@ -2221,3 +2227,82 @@ B-1～B-24 同样是按旧基线整理的。`7a48d72e` 之后又筛出 18 项协
    下一批（`reserve_credits` → `model_fallback` → 6020/6021 →
    `account_priority`/`account_share` → `balance_window`）会改流量分布，必须灰度，
    与这批不是同一批。
+
+## 附录 C：`7a48d72e` 之后的提交（2026-11-14 扫）
+
+这一节只覆盖参考仓 `7a48d72e` → `10d01b48` 之间的 **8 个非 merge 提交**（另有
+3 个 merge，内容已被非 merge 覆盖，不单列）。判断口径同附录 A/B：看**本地缺不缺**，
+不看提交早不早。
+
+### C.1 逐项判定
+
+| 提交 | 标题 | 判定 | 落地状态 |
+|---|---|---|---|
+| `320f5d4d` | 授权链接补 `version` 与 `loginSessionId` | **值得（P1）** | ✅ 已同步（Python 登录链） |
+| `0e863d83` | 国际版也补 `version=5.9.4`；`loginSessionId` 只给 CN | **值得（P1）** | ✅ 已同步 |
+| `10d01b48` | `cmd/login` 的「不该带 version」断言跟随真机 | 测试跟随 | ✅ 随 P1 同口径（Python 侧无对应断言） |
+| `fa4d62ce` | `/v1/messages` 转发 `output_config.format` 为 `response_format` | **值得（P2）** | ✅ 已同步（Python `anthropic.py`） |
+| `b957e32b` | 6020/6021 带 `retry_after` 时网关内先等一轮 | **值得（P3），暂缓** | ⏸ 未做，见 C.3 |
+| `ff398789` | 余额趋势折线/柱状图对失效号用灰线 | 跳过 | — |
+| `1a294b73` | merge PR #215（同上） | 跳过 | — |
+| `1ad68a0e` | 日柱图共用色板 + 补回 `models.allowed` 断言 | 跳过 | — |
+| `eecc7299` | 手写二维码编码器补到 v9 | 跳过 | — |
+
+### C.2 已同步两项的落点与取舍
+
+**C-1 登录授权链接（`320f5d4d` + `0e863d83`）**
+
+参考仓改的是 `internal/loginsite/loginsite.go` 的 `DecorateAuthURL` 与 `Site.Version`；
+本地登录链在 Python（`server/services/tencent.py:start_login`），所以按语义重写在
+`server/services/realm.py`：
+
+| 项 | 真机口径 | 本地落点 |
+|---|---|---|
+| `version` | CN `5.9.3` / GL `5.9.4` | `LOGIN_VERSION_CN` / `LOGIN_VERSION_GLOBAL`、`login_version()` |
+| `loginSessionId` | **只 CN**（官方 `platform!=='workbuddy'` 直接 return） | `login_session_id()`，GL 返回空串 |
+| `?platform=` | CN `workbuddy` / GL `workbuddy-ai` | `login_platform()` |
+
+三处有意取舍：
+
+1. **不复用 `client_version()`**。那个是业务 UA 的版本段（默认 `5.5.4`，可被
+   `upstream.client_version` 覆盖），而登录 `version` 进的是授权页自己的风控判定，
+   真机取值与业务 UA 不是同一个数字。两者解耦，各自有自己的出处。
+2. **不覆盖服务端已给的参数**。上游若自己带上 `version`，以它为准——错值比缺值更
+   容易被判异常。
+3. **`?platform=` 一并改**。参考仓那处改动在更早的 `96b816da`（已记录在
+   `upstream-sync-baseline-gaps.md` 的 P2-4）；只补 `version` 而留着 `platform=CLI`
+   是半对齐状态，反而更不像真机。本批把这两半一起收口。
+
+**未做：Go 侧 `cmd/login`**。它还停在 `platform=CLI` + `CodeBuddy/2.63.2` UA +
+无 `x-domain`/哨兵头（P2-4 整条）。只补 `version` 会让它更自相矛盾；要动就按 P2-4
+一次性对齐三端点头族与 UA，不在本批范围。
+
+**C-2 Anthropic 结构化输出（`fa4d62ce`）**
+
+参考仓改 `internal/server/messages.go`（它有自己的 Go `/v1/messages`）；本地
+`/v1/messages` 在 Python `server/routers/anthropic.py`，所以只搬**语义**：
+
+- 新增 `_response_format()`：`output_config.format{type:"json_schema", schema}` →
+  `response_format{type:"json_schema", json_schema:{name:"response", strict:true, schema}}`；
+- 只认 `type == "json_schema"` 且 `schema` 是对象；其它形态一律不写字段（宁可
+  不约束，也不发上游看不懂的 `response_format` 把请求打成 400）；
+- 与 `output_config.effort` 并存，互不覆盖。
+
+### C.3 跳过与暂缓的理由
+
+- **`b957e32b`（6020/6021 网关内等一轮）**：参考仓那半个提交依赖它自己的
+  `headkeepalive.go`（已提交响应头后改写成 `rate_limit_error` + `statusCode=429`
+  的 error 帧）。本地 Go 侧**没有** headkeepalive（M-P1-7 仍未做），所以「已提交
+  响应头」那条路径无落点；剩下的「等一轮 + `features.busy_retry` /
+  `busy_wait_seconds`」可以单独做，但要先确认把本地 `RetryAfter>0` 直接 `break`
+  的行为（`upstream/internal/server/handler.go:1156`）改掉之后，客户端侧的超时
+  预算够不够。**留待与 M-P1-7 一起评估**，不单独引入一个只有半边语义的开关。
+- **`ff398789` / `1a294b73` / `1ad68a0e`（余额趋势灰线、色板口径、示例配置断言）**：
+  改的是参考仓**内嵌面板**（`internal/panel/app.js`）与它自己的示例配置断言。
+  本地面板是 Next.js，没有「按账号的余额曲线」视图（只有收支发散图），没有落点；
+  本地 `config.example.json` 也没有 `models.allowed` 这个键。
+- **`eecc7299`（二维码补到 v9）**：参考仓是手写编码器，CN 链接加了
+  `loginSessionId` 后从 107B 涨到 158B 越过 v6 上限 134B。本地用 `qrcode.react`
+  （`web/components/common/accounts/AddAccountDialog.tsx`），没有长度上限问题。
+  但**要注意**：本批给 CN 链接补了 `loginSessionId`，链接同样变长——已验证
+  `qrcode.react` 会按内容自动选版本，不需要额外处理。

@@ -525,6 +525,11 @@ def to_openai_request(body: dict) -> dict:
     effort = _reasoning_effort(body)
     if effort:
         out['reasoning_effort'] = effort
+    # 结构化输出（output_config.format → response_format）。放在 reasoning_effort
+    # 之后：两者同出 `output_config`，但一个是档位、一个是输出约束，互不覆盖。
+    fmt = _response_format(body)
+    if fmt is not None:
+        out['response_format'] = fmt
     if body.get('stop_sequences'):
         out['stop'] = body['stop_sequences']
     if isinstance(body.get('metadata'), dict) and body['metadata'].get('user_id'):
@@ -616,6 +621,44 @@ _EFFORT_MAP = {
     'xhigh': 'xhigh',
     'max': 'max',
 }
+
+
+def _response_format(body: dict) -> dict | None:
+    """把 Anthropic 的结构化输出 `output_config.format` 映射成上游的 `response_format`。
+
+    为什么必须映射：`output_config` 此前只被读走 `effort`，`format` 整段丢弃。
+    Claude 系客户端（Claude Code 的 guardian、结构化抽取类调用）会用它要求
+    「只回一个符合 schema 的 JSON」，而丢掉它之后上游只看到自然语言的 messages，
+    模型自由发挥——客户端拿到不是 JSON 的正文，判定失败并重试，用户看到的是
+    「结构化输出不生效」。参考仓同一处映射（其 `responseFormatFromMessages`）。
+
+    Anthropic 的形状是 `{type: "json_schema", schema: {...}}`，没有 OpenAI 的
+    `name` / `strict`；这里补齐成 OpenAI 形状（`name` 固定 `response`，
+    `strict: true` 表示必须严格符合 schema），schema 本身**原样**透传。
+
+    只认 `type == "json_schema"` 且有 schema 对象的形态：其它取值（未来新增的
+    类型、或畸形输入）一律不写字段，让上游按默认自由生成——宁可不约束，也不要
+    发一个上游看不懂的 `response_format` 把整个请求打成 400。
+    """
+    cfg = body.get('output_config')
+    if not isinstance(cfg, dict):
+        return None
+    fmt = cfg.get('format')
+    if not isinstance(fmt, dict):
+        return None
+    if str(fmt.get('type') or '').strip().lower() != 'json_schema':
+        return None
+    schema = fmt.get('schema')
+    if not isinstance(schema, dict):
+        return None
+    return {
+        'type': 'json_schema',
+        'json_schema': {
+            'name': 'response',
+            'strict': True,
+            'schema': schema,
+        },
+    }
 
 
 def _reasoning_effort(body: dict) -> str | None:

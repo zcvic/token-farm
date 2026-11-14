@@ -586,5 +586,132 @@ class GlobalConfigSectionTest(unittest.TestCase):
         self.assertEqual(realm.chat_base('global'), 'https://intl.example.com')
 
 
+class LoginAuthUrlTest(unittest.TestCase):
+    """扫码授权链接的真机形态（参考仓 2026-11-14 实测：`320f5d4d` / `0e863d83`）。
+
+    2026-11-14 真机抓到的两条链接（state / nonce 脱敏）：
+
+        CN  /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
+        GL  /login/?platform=workbuddy-ai&state=…&version=5.9.4
+
+    两个要点：
+      1. **两边都带 version**，取值与各自桌面端包版本同源（CN 5.9.3 / GL 5.9.4）；
+      2. `loginSessionId` **只有 CN 带** —— 官方 `appendHostLoginJourneyParams` 里
+         `platform !== 'workbuddy'` 直接 return，硬塞给国际版等于发一个官方不认识的字段。
+    """
+
+    def test_version_is_per_realm(self) -> None:
+        self.assertEqual(realm.login_version('cn'), '5.9.3')
+        self.assertEqual(realm.login_version('global'), '5.9.4')
+
+    def test_platform_follows_real_client_not_cli(self) -> None:
+        """`?platform=` 取 authentication.attributes.platform，**不是**顶层 platform（"CLI"）。"""
+        self.assertEqual(realm.login_platform('cn'), 'workbuddy')
+        self.assertEqual(realm.login_platform('global'), 'workbuddy-ai')
+
+    def test_session_id_only_for_cn(self) -> None:
+        sid = realm.login_session_id('cn')
+        self.assertEqual(len(sid), 36, f'应是 uuid 形态：{sid}')
+        self.assertEqual(sid.count('-'), 4)
+        self.assertEqual(realm.login_session_id('global'), '',
+                         '国际版真机链接没有 loginSessionId')
+
+    def test_decorate_adds_version_and_session_for_cn(self) -> None:
+        url = realm.decorate_auth_url(
+            'https://www.workbuddy.cn/login?platform=workbuddy&state=abc', 'cn')
+        q = self._query(url)
+        self.assertEqual(q['version'], '5.9.3')
+        self.assertEqual(len(q['loginSessionId']), 36)
+        self.assertEqual(q['state'], 'abc', '原有参数不能被弄丢')
+        self.assertEqual(q['platform'], 'workbuddy')
+
+    def test_decorate_adds_version_only_for_global(self) -> None:
+        url = realm.decorate_auth_url(
+            'https://www.workbuddy.ai/login/?platform=workbuddy-ai&state=abc', 'global')
+        q = self._query(url)
+        self.assertEqual(q['version'], '5.9.4')
+        self.assertNotIn('loginSessionId', q)
+        self.assertEqual(q['state'], 'abc')
+
+    def test_decorate_never_overrides_upstream_values(self) -> None:
+        """服务端若自己带了 version，以它为准 —— 不用本地常量顶掉签发值。"""
+        url = realm.decorate_auth_url(
+            'https://x/login?state=a&version=6.0.0&loginSessionId=fixed', 'cn')
+        q = self._query(url)
+        self.assertEqual(q['version'], '6.0.0')
+        self.assertEqual(q['loginSessionId'], 'fixed')
+
+    def test_decorate_leaves_unparsable_url_alone(self) -> None:
+        """解析不了就原样返回：补参数不能把能用的链接弄坏。"""
+        for raw in ('', 'not a url', '/login?state=a'):
+            self.assertEqual(realm.decorate_auth_url(raw, 'cn'), raw)
+
+    def _query(self, url: str) -> dict:
+        import urllib.parse
+        return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+
+
+class StartLoginRequestTest(unittest.TestCase):
+    """`start_login` 出站请求与返回链接的真机形态。"""
+
+    def setUp(self) -> None:
+        tencent._state_cache.clear()
+        self.addCleanup(tencent._state_cache.clear)
+
+    def _run(self, realm_name: str) -> tuple[dict, dict]:
+        import asyncio
+
+        seen: dict = {}
+
+        class _Resp:
+            def json(self) -> dict:
+                return {'code': 0, 'data': {
+                    'state': 'st-1',
+                    'authUrl': 'https://www.workbuddy.cn/login?platform=workbuddy&state=st-1',
+                }}
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, params=None, json=None, headers=None):
+                seen['url'] = url
+                seen['params'] = params
+                return _Resp()
+
+        class _Ctx:
+            async def __aenter__(self):
+                return _Client()
+
+            async def __aexit__(self, *a):
+                return False
+
+        with mock.patch.object(config, 'http_client', lambda *a, **k: _Ctx()):
+            out = asyncio.run(tencent.start_login(realm_name))
+        return out, seen
+
+    def test_cn_sends_workbuddy_platform(self) -> None:
+        out, seen = self._run('cn')
+        self.assertEqual(seen['params'], {'platform': 'workbuddy'},
+                         '旧值 platform=CLI 取的是 product.json 顶层字段，不是授权那个')
+        self.assertIn('/v2/plugin/auth/state', seen['url'])
+        self.assertEqual(out['realm'], 'cn')
+
+    def test_global_sends_workbuddy_ai_platform(self) -> None:
+        _, seen = self._run('global')
+        self.assertEqual(seen['params'], {'platform': 'workbuddy-ai'})
+
+    def test_returned_url_carries_version(self) -> None:
+        out, _ = self._run('cn')
+        import urllib.parse
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(out['authUrl']).query))
+        self.assertEqual(q['version'], '5.9.3')
+        self.assertIn('loginSessionId', q)
+        self.assertEqual(q['state'], 'st-1')
+
+
 if __name__ == '__main__':
     unittest.main()

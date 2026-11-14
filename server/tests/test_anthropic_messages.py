@@ -245,6 +245,69 @@ class RequestTranslationTest(unittest.TestCase):
         self.assertEqual(out['user'], 'u1')
 
 
+class StructuredOutputTest(unittest.TestCase):
+    """`output_config.format` → 上游 `response_format`（参考仓 `fa4d62ce`）。
+
+    为什么要有这层：`output_config` 此前只被读走 `effort`，`format` 整段丢弃。
+    客户端（Claude Code 的 guardian、结构化抽取类调用）用它要求「只回一个符合
+    schema 的 JSON」；丢掉之后上游只看到自然语言 messages，模型自由发挥 →
+    客户端拿到不是 JSON 的正文，判失败重试。
+    """
+
+    SCHEMA = {'type': 'object', 'properties': {'ok': {'type': 'boolean'}},
+              'required': ['ok']}
+
+    def _body(self, fmt: object) -> dict:
+        return {'model': 'x', 'max_tokens': 10, 'messages': [],
+                'output_config': {'format': fmt}}
+
+    def test_json_schema_maps_to_response_format(self) -> None:
+        out = to_openai_request(self._body({'type': 'json_schema', 'schema': self.SCHEMA}))
+        self.assertEqual(out['response_format'], {
+            'type': 'json_schema',
+            'json_schema': {'name': 'response', 'strict': True, 'schema': self.SCHEMA},
+        })
+
+    def test_schema_is_passed_through_verbatim(self) -> None:
+        """schema 必须原样透传 —— 改写等于替客户端改了约束。"""
+        schema = {'type': 'array', 'items': {'enum': ['a', 'b']}, 'minItems': 1}
+        out = to_openai_request(self._body({'type': 'json_schema', 'schema': schema}))
+        self.assertEqual(out['response_format']['json_schema']['schema'], schema)
+
+    def test_effort_and_format_coexist(self) -> None:
+        """同出 `output_config`，但一个是档位、一个是输出约束，不能互相覆盖。"""
+        body = {'model': 'x', 'max_tokens': 10, 'messages': [],
+                'output_config': {'effort': 'high',
+                                  'format': {'type': 'json_schema', 'schema': self.SCHEMA}}}
+        out = to_openai_request(body)
+        self.assertEqual(out['reasoning_effort'], 'high')
+        self.assertIn('response_format', out)
+
+    def test_no_output_config_means_no_field(self) -> None:
+        out = to_openai_request({'model': 'x', 'max_tokens': 10, 'messages': []})
+        self.assertNotIn('response_format', out)
+
+    def test_other_format_types_are_not_forwarded(self) -> None:
+        """只认 json_schema：其它取值宁可不约束，也别发上游看不懂的字段。"""
+        for fmt in (
+            {'type': 'text'},
+            {'type': 'json_object'},
+            {'type': 'json_schema'},                      # 缺 schema
+            {'type': 'json_schema', 'schema': 'not-a-dict'},
+            {'schema': self.SCHEMA},                      # 缺 type
+            None,
+            'json_schema',
+        ):
+            out = to_openai_request(self._body(fmt))
+            self.assertNotIn('response_format', out, f'{fmt!r} 不该写出 response_format')
+
+    def test_malformed_output_config_is_ignored(self) -> None:
+        for cfg in (None, 'high', ['json_schema'], 3):
+            body = {'model': 'x', 'max_tokens': 10, 'messages': [], 'output_config': cfg}
+            out = to_openai_request(body)
+            self.assertNotIn('response_format', out, f'{cfg!r} 不该写出 response_format')
+
+
 class ResponseTranslationTest(unittest.TestCase):
     """OpenAI 响应 → Anthropic 响应。"""
 
