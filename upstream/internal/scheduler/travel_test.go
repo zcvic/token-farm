@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,9 +23,16 @@ type travelStub struct {
 	state       string // /travel/status 的 data 原文
 	firstStatus int    // /buddy/first 的 HTTP 状态码（非 0 时按业务错误返回）
 
+	quotaAffordable int  // /buddy/quota 的 affordable
+	quotaMax        int  // /buddy/quota 的 max_open_count
+	quotaErr        bool // /buddy/quota 返回 500
+	openErr         bool // /buddy/open 返回 500
+
 	infoCalls, statusCalls, departCalls atomic.Int32
 	claimCalls, firstCalls, agreeCalls  atomic.Int32
-	location, record                    atomic.Int64
+	quotaCalls, openCalls               atomic.Int32
+	location, record, openCount         atomic.Int64
+	openToken                           atomic.Value // string
 }
 
 func (s *travelStub) handler() http.Handler {
@@ -33,6 +41,30 @@ func (s *travelStub) handler() http.Handler {
 		case "/activity/growth/buddy/info":
 			s.infoCalls.Add(1)
 			fmt.Fprintf(w, `{"code":0,"msg":"ok","data":{"buddy":%s}}`, s.buddy)
+		case "/activity/growth/buddy/quota":
+			s.quotaCalls.Add(1)
+			if s.quotaErr {
+				w.WriteHeader(500)
+				w.Write([]byte(`{"code":500,"msg":"boom"}`))
+				return
+			}
+			fmt.Fprintf(w, `{"code":0,"msg":"ok","data":{"affordable":%d,"max_open_count":%d}}`,
+				s.quotaAffordable, s.quotaMax)
+		case "/activity/growth/buddy/open":
+			s.openCalls.Add(1)
+			var body struct {
+				Count       int    `json:"count"`
+				ClientToken string `json:"client_token"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			s.openCount.Store(int64(body.Count))
+			s.openToken.Store(body.ClientToken)
+			if s.openErr {
+				w.WriteHeader(500)
+				w.Write([]byte(`{"code":500,"msg":"boom"}`))
+				return
+			}
+			w.Write([]byte(`{"code":0,"msg":"ok","data":{"results":[{"instance":{"name":"橘猫"}}]}}`))
 		case "/activity/growth/buddy/travel/status":
 			s.statusCalls.Add(1)
 			fmt.Fprintf(w, `{"code":0,"msg":"ok","data":%s}`, s.state)
@@ -272,6 +304,207 @@ func TestRunTravelStateMachine(t *testing.T) {
 			}
 			if tc.wantClaim > 0 && stub.record.Load() != tc.wantRecord {
 				t.Errorf("record_id=%d want %d", stub.record.Load(), tc.wantRecord)
+			}
+		})
+	}
+}
+
+// runTravelStub 跑一趟旅行巡检，返回调度器；stub 的 server 随测试关闭。
+func runTravelStub(t *testing.T, stub *travelStub) {
+	t.Helper()
+	fastTravel(t)
+	srv := stub.server()
+	t.Cleanup(srv.Close)
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.RunTravelNow()
+}
+
+// TestRunTravelIdleOpensBlindBoxBeforeDepart 有猫 + idle：先开盲盒再派出（开盒不是
+// 派出的前置，顺序反了会在开盒失败后挡住当天旅行）。
+func TestRunTravelIdleOpensBlindBoxBeforeDepart(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{
+		buddy:           `{"id":7,"name":"档案喵"}`,
+		state:           `{"state":"idle","daily_limit_reached":false}`,
+		quotaAffordable: 3, quotaMax: 5,
+	}
+	var mu sync.Mutex
+	var order []string
+	base := stub.handler()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/activity/growth/buddy/open" ||
+			r.URL.Path == "/activity/growth/buddy/travel/depart" {
+			mu.Lock()
+			order = append(order, r.URL.Path)
+			mu.Unlock()
+		}
+		base.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.RunTravelNow()
+
+	if n := stub.quotaCalls.Load(); n != 1 {
+		t.Errorf("quota calls=%d want 1", n)
+	}
+	if n := stub.openCalls.Load(); n != 1 {
+		t.Errorf("open calls=%d want 1", n)
+	}
+	if n := stub.departCalls.Load(); n != 1 {
+		t.Errorf("depart calls=%d want 1（开盒不影响派出）", n)
+	}
+	if got := stub.openCount.Load(); got != 3 {
+		t.Errorf("open count=%d want 3（min(affordable,max_open)）", got)
+	}
+	if tok, _ := stub.openToken.Load().(string); !strings.HasPrefix(tok, "buddy-open-") {
+		t.Errorf("client_token=%q want prefix buddy-open-", tok)
+	}
+	if len(order) != 2 || order[0] != "/activity/growth/buddy/open" ||
+		order[1] != "/activity/growth/buddy/travel/depart" {
+		t.Errorf("写调用顺序=%v want [open depart]", order)
+	}
+}
+
+// TestRunTravelArrivedDoesNotOpenBox arrived 先领奖，本轮不开盒也不派出。
+func TestRunTravelArrivedDoesNotOpenBox(t *testing.T) {
+	stub := &travelStub{
+		buddy:           `{"id":7,"name":"档案喵"}`,
+		state:           `{"state":"arrived","record_id":42,"reward_credit":9}`,
+		quotaAffordable: 5, quotaMax: 5,
+	}
+	runTravelStub(t, stub)
+
+	if n := stub.quotaCalls.Load(); n != 0 {
+		t.Errorf("quota calls=%d want 0（arrived 不查盲盒配额）", n)
+	}
+	if n := stub.openCalls.Load(); n != 0 {
+		t.Errorf("open calls=%d want 0", n)
+	}
+	if n := stub.claimCalls.Load(); n != 1 {
+		t.Errorf("claim calls=%d want 1", n)
+	}
+	if n := stub.departCalls.Load(); n != 0 {
+		t.Errorf("depart calls=%d want 0（领奖本轮不派出）", n)
+	}
+}
+
+// TestRunTravelTravelingDoesNotOpenBox 在途/未知状态不开盒（避免打乱状态机）。
+func TestRunTravelTravelingDoesNotOpenBox(t *testing.T) {
+	cases := []struct{ name, state string }{
+		{"traveling", `{"state":"traveling","record_id":42}`},
+		{"unknown", `{"state":"teleporting"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &travelStub{
+				buddy: `{"id":7,"name":"档案喵"}`, state: tc.state,
+				quotaAffordable: 5, quotaMax: 5,
+			}
+			runTravelStub(t, stub)
+			if n := stub.quotaCalls.Load(); n != 0 {
+				t.Errorf("quota calls=%d want 0", n)
+			}
+			if n := stub.openCalls.Load(); n != 0 {
+				t.Errorf("open calls=%d want 0", n)
+			}
+			if n := stub.departCalls.Load(); n != 0 {
+				t.Errorf("depart calls=%d want 0", n)
+			}
+		})
+	}
+}
+
+// TestRunTravelZeroAffordableStillDeparts 能量不足（affordable=0）只跳过开盒，照常派出。
+func TestRunTravelZeroAffordableStillDeparts(t *testing.T) {
+	stub := &travelStub{
+		buddy:           `{"id":7,"name":"档案喵"}`,
+		state:           `{"state":"idle","daily_limit_reached":false}`,
+		quotaAffordable: 0, quotaMax: 5,
+	}
+	runTravelStub(t, stub)
+
+	if n := stub.openCalls.Load(); n != 0 {
+		t.Errorf("open calls=%d want 0（能量不足）", n)
+	}
+	if n := stub.departCalls.Load(); n != 1 {
+		t.Errorf("depart calls=%d want 1（盲盒不阻断派出）", n)
+	}
+}
+
+// TestRunTravelQuotaErrorStillDeparts 配额查询失败只跳过开盒，照常派出。
+func TestRunTravelQuotaErrorStillDeparts(t *testing.T) {
+	stub := &travelStub{
+		buddy:    `{"id":7,"name":"档案喵"}`,
+		state:    `{"state":"idle","daily_limit_reached":false}`,
+		quotaErr: true,
+	}
+	runTravelStub(t, stub)
+
+	if n := stub.openCalls.Load(); n != 0 {
+		t.Errorf("open calls=%d want 0（配额未知不开）", n)
+	}
+	if n := stub.departCalls.Load(); n != 1 {
+		t.Errorf("depart calls=%d want 1（配额失败不阻断派出）", n)
+	}
+}
+
+// TestRunTravelOpenErrorStillDeparts 开盒失败照常派出。
+func TestRunTravelOpenErrorStillDeparts(t *testing.T) {
+	stub := &travelStub{
+		buddy:           `{"id":7,"name":"档案喵"}`,
+		state:           `{"state":"idle","daily_limit_reached":false}`,
+		quotaAffordable: 2, quotaMax: 5, openErr: true,
+	}
+	runTravelStub(t, stub)
+
+	if n := stub.openCalls.Load(); n != 1 {
+		t.Errorf("open calls=%d want 1（有配额就尝试）", n)
+	}
+	if n := stub.departCalls.Load(); n != 1 {
+		t.Errorf("depart calls=%d want 1（开盒失败不阻断派出）", n)
+	}
+}
+
+// TestRunTravelDailyLimitStillOpensBoxes 当日旅行名额已满不影响开盲盒（两套配额独立）。
+func TestRunTravelDailyLimitStillOpensBoxes(t *testing.T) {
+	stub := &travelStub{
+		buddy:           `{"id":7,"name":"档案喵"}`,
+		state:           `{"state":"idle","daily_limit_reached":true}`,
+		quotaAffordable: 1, quotaMax: 5,
+	}
+	runTravelStub(t, stub)
+
+	if n := stub.openCalls.Load(); n != 1 {
+		t.Errorf("open calls=%d want 1（旅行名额满仍可开盒）", n)
+	}
+	if n := stub.departCalls.Load(); n != 0 {
+		t.Errorf("depart calls=%d want 0（当日已派过）", n)
+	}
+}
+
+// TestRunTravelBuddyOpenCountCapped 开盒次数取 min(affordable, max_open_count, 单轮上限 5)。
+func TestRunTravelBuddyOpenCountCapped(t *testing.T) {
+	cases := []struct {
+		name                string
+		affordable, maxOpen int
+		want                int64
+	}{
+		{"单轮上限 5", 9, 9, 5},
+		{"上游 max_open_count 更小", 9, 2, 2},
+		{"affordable 更小", 2, 5, 2},
+		{"max_open_count 缺失按不限", 4, 0, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &travelStub{
+				buddy:           `{"id":7,"name":"档案喵"}`,
+				state:           `{"state":"idle","daily_limit_reached":false}`,
+				quotaAffordable: tc.affordable, quotaMax: tc.maxOpen,
+			}
+			runTravelStub(t, stub)
+			if got := stub.openCount.Load(); got != tc.want {
+				t.Errorf("open count=%d want %d", got, tc.want)
 			}
 		})
 	}

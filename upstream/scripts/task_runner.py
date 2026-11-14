@@ -1121,8 +1121,74 @@ def build_event(auth, kind, obj_id, meta, idx):
 # 400 自动降级 web 域：POST https://www.workbuddy.cn/activity/growth/tasks/{code}/claim，
 # 带 Origin/Referer/x-client-platform: web（fork ClaimReward 同款，web_claim_fallback）。
 # --------------------------------------------------------------------------
-def _claim_parse(auth, code, uid8, stats, gap, st, r, via_web=False):
-    """解析 claim 响应信封；业务判定成功/已领/失败。via_web 仅用于日志标注。"""
+def _claim_has_value(value):
+    """回执字段是否代表真实到账：0 / 空串 / 占位字面量都不算。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, (list, tuple, dict, set)):
+        return bool(value)
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or value in ("{}", "[]", "null", "None", "false", "False"):
+            return False
+        try:
+            return float(value) > 0
+        except ValueError:
+            return True
+    return value is not None
+
+
+def _claim_receipt_confirmed(data):
+    """领奖回执是否足以证明到账：实际奖励字段 >0 或 claimed=true。
+
+    `reward_credit` / `reward_energy` 在**任务行**里是配置值，但在 claim 回执里
+    是实际发放额（上游两种形态都出现过），所以回执侧认、回读任务行侧不认。
+    """
+    if not isinstance(data, dict):
+        return False
+    claimed = data.get("claimed")
+    if claimed is True or str(claimed).strip().lower() == "true":
+        return True
+    return any(_claim_has_value(data.get(k)) for k in
+               ("credit", "energy", "reward_credit", "reward_energy", "reward", "rewards"))
+
+
+def _claim_readback(auth, code, mp=False):
+    """领奖后回读任务：只认 claimed / claimed=true / 实际奖励字段。
+
+    回执 200 + code=0 但没有奖励字段时，上游可能只是静默成功、也可能根本没入账；
+    回读一次是唯一能区分的证据。读不到（列表失败 / 任务不在列表 / 仍未完成）返回
+    None——调用方不得把它记成新入账。
+    """
+    uid8 = str(auth.get("uid") or "")[:8]
+    try:
+        t = _mp_task_status(auth, code) if mp else tc.task_status(auth, code)
+    except Exception as e:
+        print(f"[task_runner] {uid8} {code}: claim 回读失败: {e}")
+        return None
+    if not isinstance(t, dict):
+        return None
+    status = str(t.get("accept_status") or t.get("status") or "").lower()
+    claimed = t.get("claimed")
+    claimed_true = claimed is True or str(claimed).strip().lower() == "true"
+    # 任务行里的 reward_credit/reward_energy 是配置值，不是到账凭据；只认
+    # actual_ / credited_ / granted_ 前缀的实际发放字段。
+    actual_reward = any(_claim_has_value(t.get(k)) for k in (
+        "actual_credit", "credited_credit", "granted_credit",
+        "actual_energy", "credited_energy", "granted_energy"))
+    if status == "claimed" or claimed_true or actual_reward:
+        return t
+    return None
+
+
+def _claim_parse(auth, code, uid8, stats, gap, st, r, via_web=False, mp=False):
+    """解析 claim 响应信封；业务判定成功/已领/失败。via_web 仅用于日志标注。
+
+    回执没有实际奖励字段时回读一次任务列表（有界：一次请求，失败即停）。读不到
+    claimed 就不记新入账——上游存在 200 + code=0 但静默丢弃的形态。
+    """
     tag = " web" if via_web else ""
     if st != 200 or not isinstance(r, dict) or r.get("code") != 0:
         msg = r.get("msg") if isinstance(r, dict) else r
@@ -1137,10 +1203,22 @@ def _claim_parse(auth, code, uid8, stats, gap, st, r, via_web=False):
         stats["already"] += 1
         time.sleep(gap)
         return 2
-    print(f"[task_runner] {uid8} {code}: claim{tag} 200 ok(credit=+{credit} energy=+{energy})")
+    if _claim_receipt_confirmed(data):
+        print(f"[task_runner] {uid8} {code}: claim{tag} 200 ok(credit=+{credit} energy=+{energy})")
+        stats["ok"] += 1
+        stats["credit"] += credit
+        stats["energy"] += energy
+        time.sleep(gap)
+        return 1
+    time.sleep(1.0)  # 服务端归账留时（回执未给奖励字段时才需要回读）
+    task = _claim_readback(auth, code, mp=mp)
+    if task is None:
+        print(f"[task_runner] {uid8} {code}: claim{tag} 200 未确认到账 -> 失败（回读未确认领取），不计入账")
+        stats["fail"] += 1
+        time.sleep(gap)
+        return 0
+    print(f"[task_runner] {uid8} {code}: claim{tag} 200 回读确认已领（回执未给到账额）")
     stats["ok"] += 1
-    stats["credit"] += credit
-    stats["energy"] += energy
     time.sleep(gap)
     return 1
 
@@ -1172,7 +1250,7 @@ def claim_one(auth, code, uid8, stats, gap, mp=False):
         print(f"[task_runner] {uid8} {code}: claim {st} {msg} -> ERR")
         stats["fail"] += 1
         return 0
-    return _claim_parse(auth, code, uid8, stats, gap, st, r)
+    return _claim_parse(auth, code, uid8, stats, gap, st, r, mp=mp)
 
 
 # --------------------------------------------------------------------------
@@ -1419,7 +1497,7 @@ def process_minichat_task(auth, code, opts, stats, uid8):
                if isinstance(r, dict) else r)
         print(f"[task_runner] {uid8} {code}: accept {st} {res}")
         time.sleep(opts.gap)
-        if st != 200 or res != "accepted":
+        if st != 200 or res not in ("accepted", "already_accepted"):
             stats["fail"] += 1
             return
         # accept 之前的 progress 是空的（target 下发 0），兜底 target 会让多元任务少报：
@@ -1576,7 +1654,8 @@ def _accept_with_verify(auth, code, uid8, gap) -> bool:
     此时上报事件全部不归账，任务永远点不亮）。
 
     返回 True=accept 已生效（本轮或此前）；False=重试后仍未生效。
-    判定以回读 accept_status 为准（响应 status 只是初筛）。
+    判定以回读 accept_status 为准（响应 status 只是初筛）。`already_accepted`
+    是幂等成功态：此前已接过、本轮无需再登记，不能当成失败反复重试。
     """
     for attempt in (1, 2):
         st, r = tc.accept_tasks(auth, [code])
@@ -1589,7 +1668,8 @@ def _accept_with_verify(auth, code, uid8, gap) -> bool:
         # 回读确认登记生效（响应可能说 accepted 但服务端未落账）
         t = tc.task_status(auth, code) or {}
         ast = t.get("accept_status") or "not_accepted"
-        ok = (st == 200 and status == "accepted" and ast != "not_accepted")
+        ok = (st == 200 and status in ("accepted", "already_accepted")
+              and ast in ("accepted", "completed", "claimed"))
         print(f"[task_runner] {uid8} {code}: accept 尝试{attempt} {st} status={status} "
               f"回读={ast}{' -> 生效' if ok else ''}")
         if ok:

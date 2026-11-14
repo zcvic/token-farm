@@ -439,7 +439,15 @@ WorkBuddy 桌面端新版本把 auth 文件里的 `accessToken` / `refreshToken`
 - `4fb7cb42` `feat(scheduler): 补上盲盒消费与 10105 活跃会话自救`
 - 参考文件：`internal/upstream/travel.go`、`internal/scheduler/travel.go`
 
-**本地现状**
+**落地（2026-11）**
+
+已按「旅行巡检同腿」落地，逐项见 A.1.2。与本节原计划的差异：
+
+- quota 是 **GET**（88lin / niyou 两份 MIT 实现一致），不是 POST；
+- `open` 一次请求带 `count`，次数取 `min(affordable, max_open_count, 5)`；
+- 只在 `idle` 开盒；`arrived` 先领奖且本轮不派出；开盒失败不阻断派出。
+
+**本地现状（落地前）**
 
 - `upstream/internal/upstream/travel.go` 只有 status / depart / claim / info /
   first / agreement，没有 `buddy/quota`、`buddy/open`；
@@ -1723,7 +1731,7 @@ transport（`upstream/transport.go`），Python 侧有
 | 项 | 本地现状 | 参考实现 | 判定 | 建议动作 | 成本/风险 |
 |---|---|---|---|---|---|
 | A-1 新手礼包 / 补偿领取 | `scheduler.go:866` `claimGrowthBonus` 直接 `ClaimGift` + `ClaimCompensation`，业务错误静默；`claimGrowthRewards` 在 `scheduler.go:802` 对 global 提前 `return`，global 连礼包都不领 | `scheduler/benefit.go:23` `claimGiftQuiet`：`GetGiftStatus` → `Pending()` → `ClaimGift`；`gift\|uid\|endTime` guard 防同期重复；`scheduler/streak.go:28-32` 对 global 单独 `claimGiftQuiet`（礼包是 billing 域，国际号实测 200） | **缺失**（含 global 漏领）→ ✅ **已同步**（见 A.1.1） | 补 `upstream.GetGiftStatus`（`POST /billing/meter/check-gift-claimed`，**不带 `/v2`**）；scheduler 改为先查后领；把 global 的礼包领取移到 early return 之前。补偿活动已于 2026-10 结束，本地保留手动兜底即可，不必恢复状态查询 | 低；每号每天多一次只读请求。企业/禁用号查询失败应静默，其余 WARN |
-| A-2 补签范围 | `scheduler.go:881` `makeupYesterday` 只判昨日；`growth_bonus.go:99` `UseMakeupCard`；补签成功重读 streak 挑档 | `scheduler/streak.go:103` `makeupMissed` + `streak_extras.go:36` `HeatmapBrokenDates`：取本月所有 `score==0`，从最近一天往回补，受 `schedule.makeup_cards_per_round` 上限 | **弱化** → ✅ **已同步** | 加 `HeatmapBrokenDates`；按日期倒序补；遇到上游拒绝即停（注册前日期同样是 0 分，无法与漏签区分）；加每轮上限配置 | 低到中；补签是改历史的写操作，必须封顶、必须可停 |
+| A-2 补签范围 | `scheduler.go:881` `makeupYesterday` 只判昨日；`growth_bonus.go:99` `UseMakeupCard`；补签成功重读 streak 挑档 | `scheduler/streak.go:103` `makeupMissed` + `streak_extras.go:36` `HeatmapBrokenDates`：取本月所有 `score==0`，从最近一天往回补，受 `schedule.makeup_cards_per_round` 上限 | **弱化** → ✅ **已同步**（launch_date / makeup_dates 收窄见 A.1.2） | 加 `HeatmapBrokenDates`；按日期倒序补；遇到上游拒绝即停（注册前日期同样是 0 分，无法与漏签区分）；加每轮上限配置 | 低到中；补签是改历史的写操作，必须封顶、必须可停 |
 | A-3 连登兑换档位 | `scheduler.go:848` `growthEligibleTier` 从高到低只挑**一个**已达标未领档，每日一轮 | `scheduler/streak.go:40` 遍历 `full.RedemptionStatus.Tiers`，跳过 `locked`/`claimed`，其余**全部** redeem | **弱化** → ✅ **已同步** | 改为遍历所有 `available` 档；保留每日 `rewardClaimedToday` 闸；日志逐档记录 credit/energy/cards/chances | 低；只对 available 写，避免重复 redeem |
 | A-4 抽奖次数 | `scheduler.go:907` `claimGrowthLottery` 只 `GrowthLotteryDraw` **一次** | `scheduler/streak.go:70` 按当前 `chances` 循环抽完 | **弱化** → ✅ **已同步** | 循环抽到 chances 用尽，失败即停；每次新 `client_token`；加单轮上限保护（例如 50） | 低；无次数/活动关闭按正常态静默 |
 | A-5 成长奖励触发点 | `claimGrowthRewards` 只在 `runActivity`（`scheduler.go:750`）里调用；activity 关闭、上报失败或不足 `ActivityReportCount` 条时完全不领 | `RunStreakBonusNow` 在签到排程末尾调用（`scheduler/streak.go:17`），与 activity 解耦；面板也可手动触发 | **弱化 / 结构差异** → ✅ **已同步** | 在 `runCheckinNow` 每号签到+余额后调用 `claimGrowthRewards`，或做独立 `RunGrowthNow`；activity 只负责点亮与自检。保留每日闸防双触发 | 低；签到与 activity 可能同日各触发一次，有 `rewardClaimedToday` 兜底 |
@@ -1809,15 +1817,70 @@ A-1～A-8 与 B-8/B-9 **八项已同步**，来源提交见
 - Python：`server/tests/test_tasklog.py` 的 `StreakBonusLogTest`（12 例）与
   `GlobalCheckinLogTest`（4 例）。
 
+### A.1.2 补签窗口、盲盒与领奖回读补强（2026-11 P0）
+
+这一轮补 A-2 的残余（`launch_date` / `makeup_dates`）、A-13（盲盒），以及
+A-10 的两处判据（accept 幂等态、claim 回读）。盲盒/补签窗口的语义来源是
+MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
+（后者明确致谢 88lin）；misakano 仓只作计划条目参考，
+`yreidev/workbuddy2api-panel`（AGPL-3.0）只读语义、未复制代码。
+
+**盲盒（A-13 / P1-2）**
+
+- `upstream/internal/upstream/travel.go`：新增 `BuddyQuota`
+  （`GET /activity/growth/buddy/quota` → `data.affordable` / `max_open_count`）
+  与 `BuddyOpen`（`POST .../buddy/open`，body `{count, client_token}`，
+  `client_token` 每次新建 `buddy-open-<uuid>`；`data.results[]` 的
+  `instance.name` / `template.name` 只用于日志）。
+  - **quota 是 GET，不是 POST**：两份 MIT 参考实现都用 GET；P1-2 原计划的
+    「POST quota」是文档笔误。
+- `upstream/internal/scheduler/travel.go`：有猫 + `idle` 时**先开盒再派出**；
+  `arrived` 先领奖且本轮不派出、不开盒；`traveling` / 未知状态不开盒。
+  次数取 `min(affordable, max_open_count, 5)`；quota 失败、能量不足、open
+  失败都只记日志，**不阻断派出**；当日旅行名额已满仍可开盒（两套配额独立）。
+- 单轮上限 `buddyOpenPerRoundCap = 5`；不另起高频任务，只跟随旅行巡检。
+
+**补签窗口（A-2 残余）**
+
+- `GrowthStreakFull` 增加 `launch_date` 与 `streak.makeup_dates`。
+- `HeatmapBrokenDates` 改为 `(auth, launchDate, makeupDates)`：下界取
+  `max(月首, launch_date)`，并排除 `makeup_dates` 已补过的日期；`launch_date`
+  缺失/非法、`makeup_dates` 含非法日期一律报错（fail-closed，不消耗卡）。
+- `makeupMissed` 先读 streak（拿窗口与卡余额），有卡才读 heatmap；无卡 /
+  热力图失败 / 无候选时直接复用刚读到的 state，不再多打一次 streak。
+
+**领奖回读与 accept 幂等态（A-10 补强）**
+
+- `upstream/scripts/task_runner.py`：
+  - accept 成功态改为 `accepted` / `already_accepted`，回读必须落在
+    `accepted` / `completed` / `claimed`；mp accept 分支同口径。
+  - claim 回执必须带实际奖励字段或 `claimed=true`；否则回读一次任务列表，
+    只认 `claimed` / `claimed=true` / `actual_*` 实际发放字段。读不到不记
+    新入账（计 fail），避免 `200 + code=0` 的静默丢弃被记成假账；任务行里的
+    `reward_credit` / `reward_energy` 是配置值，不作为到账凭据。
+
+**测试**
+
+- Go：`upstream/travel_test.go`（quota 解析、open 的 count/token、业务错误）、
+  `scheduler/travel_test.go`（idle 开盒后派出、arrived/traveling 不开盒、
+  `affordable=0` / quota / open 失败仍派出、单轮上限与 `max_open_count` 夹取、
+  旅行名额满仍开盒）、`upstream/growth_bonus_test.go`（`launch_date` 下界、
+  `makeup_dates` 排除、缺失/非法 fail-closed）、`scheduler/growth_bonus_test.go`
+  （窗口/已补签的集成用例）。`go build` / `go vet` / `go test ./...` 全绿。
+- Python：`server/tests/test_task_runner_claim_readback.py`（回执有奖励不读回、
+  空回执回读 `claimed`、读不到不记入账、任务行配置奖励不算凭据、mp 回读走 mp
+  口径、`already_accepted` 成功且不重试、mp accept 认 `already_accepted`）；
+  `test_task_summary.py` 补两条新文案的分类。
+
 ### A.2 任务执行与调度
 
 | 项 | 本地现状 | 参考实现 | 判定 | 建议动作 | 成本/风险 |
 |---|---|---|---|---|---|
 | A-9 成长任务中心自动化 | Python `server/services/dailyplan.py` + `taskrun.py` + `upstream/scripts/task_runner.py` 有任务列表/接受/领奖/小程序/桌面事件；`full` 默认关闭；状态在进程内，无持久作业、无断点恢复 | `scheduler/growth.go` + `panel/taskjobs.go`：每日排程启动**持久化后台作业**，per-account 锁，调度器不等待完整扫描；`sweep.go` 分钟级补领清扫；`runstamps.go` 重启不重打 | **架构差异 + 部分弱化** | 不搬 Go 内嵌面板。在 Python 侧补「定时 growth 队列 + per-account 锁 + 状态持久化 + claim sweep」；把 `full` 拆成 scan/accept/action/claim 四段，允许只跑安全段 | 中；重复动作与写风控是主要风险 |
-| A-10 任务列表/接受/领奖 API | `task_runner.py` 已覆盖 `/activity/growth/tasks`、`/tasks/accept`、`/tasks/{code}/claim`、web fallback、小程序任务 | `upstream/tasks.go`、`upstream/mp_events.go` | **已覆盖（架构不同）** | 不搬 Go 文件；只补 Python 侧调度、锁与持久化 | 低 |
+| A-10 任务列表/接受/领奖 API | `task_runner.py` 已覆盖 `/activity/growth/tasks`、`/tasks/accept`、`/tasks/{code}/claim`、web fallback、小程序任务 | `upstream/tasks.go`、`upstream/mp_events.go` | **已覆盖（架构不同）** | 不搬 Go 文件；只补 Python 侧调度、锁与持久化。判据补强（`already_accepted` / claim 回读）见 A.1.2 | 低 |
 | A-11 桌面任务事件链 | `task_runner.py` 有 `RichMeow_Chat` 等桌面事件组，也发 `appearance_skin_apply` | `upstream/desktop.go` `desktopReport` + 桌面指纹；`SetAppearanceTheme` 走独立 API | **部分覆盖** | 先补 A-12 的真实主题应用；事件链/指纹按任务完成率再决定是否全量对齐 | 低到中 |
 | A-12 外观任务（Hp_Appearance） | `task_runner.py:889` 只发 `appearance_skin_apply` 事件，没有 `POST /v2/user-asset/appearance/set` | `desktop.go` `SetAppearanceTheme`：先真正应用主题（`kind:"theme"` + `resource_key`），再发事件；参考仓注释明确这是「独有 API」 | **弱化（可能点不亮）** | 在 Python skin 任务里补真实 apply 调用，成功后再发事件；apply 失败降级为仅事件并记日志 | 低 |
-| A-13 盲盒消费 | 本地无 `buddy/quota` / `buddy/open` | 参考仓 M-P1-2 已列：`internal/upstream/travel.go` + `scheduler/travel.go` | **缺失** | 见主清单 P1-2，不重复展开 | 低 |
+| A-13 盲盒消费 | 本地无 `buddy/quota` / `buddy/open` | 参考仓 M-P1-2 已列：`internal/upstream/travel.go` + `scheduler/travel.go` | **缺失** → ✅ **已同步**（2026-11 P0，见 A.1.2） | 见主清单 P1-2，不重复展开 | 低 |
 | A-14 补领清扫 | 无分钟级 sweep；Python `dailyplan` 的 `claim` 是小时级/手动 | `scheduler/sweep.go` + `panel/tasksweep.go`：只 accept 待接受、只 claim 已达标未领 | **缺失** | 在 Python 侧加独立周期任务；只做只读列表 + 安全写（accept/claim），不跑行为链 | 中；必须与手动任务共用 per-account 锁 |
 | A-15 重启补跑标记 | 无；进程重启后 `missedToday` 会把当天时点全判为「已过、未跑」，可能重复打签到/旅行/活跃 | `scheduler/runstamps.go`：按天落一个小文件，重启不重打 | **缺失** | 优先补；只记日期不记时刻，旧日期写过即丢 | 低 |
 | A-16 账号级摊开 | `random_schedule.go` 只给账号间 gap 加 jitter；同一任务仍是顺序/并发集中打 | `scheduler/spread.go`：按 `hash(task\|uid\|day)` 在窗口内摊开，冲突时推开 | **弱化** | 补账号级偏移；偏移当天确定性，重启不重排 | 低到中；只解决时间相关性，不是防封 |
@@ -1829,7 +1892,7 @@ A-1～A-8 与 B-8/B-9 **八项已同步**，来源提交见
 1. ~~**第一批（只读 + 低风险）**：A-1 礼包状态查询、A-6/A-7 签到活动状态、A-2 的 `HeatmapBrokenDates` 只读部分。~~
 2. ~~**第二批（闭环）**：A-5 成长奖励解耦、A-3 全部档兑换、A-4 抽完次数、A-2 补签范围、A-1 global 礼包。~~
    —— 两批已在 **2026-11 成长任务批**一起落地，逐项见 **A.1.1**。
-3. **第三批（任务系统）**：A-9 的 Python 侧持久作业与锁、A-12 外观 API、A-14 补领清扫、A-15～A-18 调度健壮性。
+3. **第三批（任务系统）**：A-9 的 Python 侧持久作业与锁、A-12 外观 API、A-14 补领清扫、A-15～A-18 调度健壮性（A-13 盲盒已提前落地，见 A.1.2）。
 4. **最后再评估**：B-6 活跃上报通道切换。没有 A/B 实测数据不要动。
 
 #### A.3.1 取舍：成长任务里哪些真值得做
@@ -2306,3 +2369,4 @@ B-1～B-24 同样是按旧基线整理的。`7a48d72e` 之后又筛出 18 项协
   （`web/components/common/accounts/AddAccountDialog.tsx`），没有长度上限问题。
   但**要注意**：本批给 CN 链接补了 `loginSessionId`，链接同样变长——已验证
   `qrcode.react` 会按内容自动选版本，不需要额外处理。
+

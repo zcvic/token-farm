@@ -178,6 +178,12 @@ bb6d581a52ebb499d5bbab71b5669b5c4796ee88
 96a33f134dcde4334b681a5d08b1fec6390eb374
 # （本批逐项对照是在参考仓 10d01b48 上复核的；那个 HEAD 本身没有移植，
 #  按本文约定不写提交号，只在 docs/upstream-sync-misakano.md 的 A.1.1 里注明。）
+#
+# ---- 2026-11 成长任务补强（A-13 盲盒 + A-2 残余 + claim/accept 判据）
+#      无新增参考仓提交：盲盒与补签窗口的语义取自 MIT 许可的
+#      88lin/workbuddy-auto-signin、niyouqianma/workbuddy2api-hub；
+#      misakano 仓的 P1-2 只作为计划条目。逐项见
+#      docs/upstream-sync-misakano.md 的 A.1.2。按本文约定不写未同步的提交号。
 
 # ---- 2026-11 登录与协议批：附录 C 的 C-1 / C-2
 #      仓库：https://github.com/misakano7545/workbuddy2api-panel
@@ -208,3 +214,4 @@ bb6d581a52ebb499d5bbab71b5669b5c4796ee88
 320f5d4daf65c6acffb3c724c023a959150cd8eb
 0e863d8380d837e1568fce6e14dcfbc02382635c
 fa4d62ceb81fc6714224947a2ec8cd781e47e7db
+

@@ -102,8 +102,12 @@ func HeatmapDayScore(cells []HeatmapCell, date string) (int, bool) {
 // 与 GrowthStreakWithCards / GrowthRewardState 同端点不同切片：一次请求同时供
 // 「补签判据（卡片余额）」与「挑档（redemption_status）」使用，省掉一次往返。
 type GrowthStreakFull struct {
-	Streak struct {
-		Days int `json:"days"`
+	// LaunchDate 活动上线日（2006-01-02）：补签窗口的下界。上线前的日子 heatmap
+	// 同样是 0 分，不能当漏签（会白烧补签卡）。
+	LaunchDate string `json:"launch_date"`
+	Streak     struct {
+		Days        int      `json:"days"`
+		MakeupDates []string `json:"makeup_dates"` // 已补签日期，不能再补
 	} `json:"streak"`
 	MakeupCards      GrowthMakeupCards      `json:"makeup_cards"`
 	RedemptionStatus GrowthRedemptionStatus `json:"redemption_status"`
@@ -122,16 +126,30 @@ func (c *Client) GrowthStreakFull(a *auth.Auth) (*GrowthStreakFull, error) {
 	return &st, nil
 }
 
-// HeatmapBrokenDates 返回**本月**（今天所在月的 1 号起）到昨天（不含今天）之间
-// score==0 的日期，升序。
+// HeatmapBrokenDates 返回**可补签**的漏签日期：活动上线日（launch_date）与本月
+// 1 号中较晚者，到昨天（不含今天）之间 score==0 的日期，升序。
 //
-// 下界只能取月首，不能更宽：score==0 同时表示「那天漏签」与「那天账号还不存在」
-// （探针实测：注册前的日子也是 0 分，heatmap 的 range 是近 365 天），只有上游能区分
-// 两者——所以这里只做时间窗收窄，交给 UseMakeupCard 的拒绝兜底。
+// 两个必排除项：
+//   - launch_date 之前：注册/活动上线前的日子 heatmap 也是 0 分，补不了。
+//   - streak.makeup_dates：已经补过，heatmap 可能滞后仍显示 0 分。
 //
-// 今天不算：当天未结束，0 分不代表漏签。today 由响应给出，不读宿主本机时钟
-// （宿主若为 UTC，本地 08:00 前会算错天）。
-func (c *Client) HeatmapBrokenDates(a *auth.Auth) ([]string, error) {
+// launchDate 缺失/非法或 makeupDates 含非法日期时返回 error（fail-closed）：
+// 猜错窗口会把上线前/已补过的日子当漏签，白烧补签卡。今天不算——当天未结束，
+// 0 分不代表漏签。today 由响应给出，不读宿主本机时钟（宿主若为 UTC，本地 08:00
+// 前会算错天）。
+func (c *Client) HeatmapBrokenDates(a *auth.Auth, launchDate string, makeupDates []string) ([]string, error) {
+	launch, ok := dateOnly(launchDate)
+	if !ok {
+		return nil, fmt.Errorf("streak 缺有效 launch_date（%q，不敢猜活动起点）", launchDate)
+	}
+	madeUp := make(map[string]struct{}, len(makeupDates))
+	for _, raw := range makeupDates {
+		d, ok := dateOnly(raw)
+		if !ok {
+			return nil, fmt.Errorf("streak.makeup_dates 含非法日期 %q", raw)
+		}
+		madeUp[d] = struct{}{}
+	}
 	data, err := c.growthJSON(a, http.MethodGet, heatmapPath, nil)
 	if err != nil {
 		return nil, err
@@ -145,26 +163,46 @@ func (c *Client) HeatmapBrokenDates(a *auth.Auth) ([]string, error) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	if len(resp.Today.Date) < 10 {
+	today, ok := dateOnly(resp.Today.Date)
+	if !ok {
 		// 缺 today.date 就无法界定「本月 / 今天」，宁可报错也不猜宿主时区——
 		// 猜错的后果是把今天或上月最后几天当成漏签，白烧补签卡。
 		return nil, fmt.Errorf("heatmap 缺 today.date（结构未知，不敢猜窗口）")
 	}
-	today := resp.Today.Date[:10]
 	monthStart := today[:8] + "01"
+	start := monthStart
+	if launch > start {
+		start = launch // 字符串比较即日期比较（同为 2006-01-02 定长）
+	}
 	var out []string
 	for _, cell := range resp.Cells {
-		d := cell.Date
-		if len(d) < 10 {
+		d, ok := dateOnly(cell.Date)
+		if !ok {
 			continue
 		}
-		d = d[:10]
-		if cell.Score == 0 && d >= monthStart && d < today {
-			out = append(out, d)
+		if cell.Score != 0 || d < start || d >= today {
+			continue
 		}
+		if _, done := madeUp[d]; done {
+			continue
+		}
+		out = append(out, d)
 	}
 	sort.Strings(out) // 上游是否保证升序未验证
 	return out, nil
+}
+
+// dateOnly 取日期前 10 位（2006-01-02）并校验。上游同一字段可能带时分/时区
+// （heatmap 实测有 `...T00:00:00+08:00`），只比较日期部分。
+func dateOnly(s string) (string, bool) {
+	if len(s) < 10 {
+		return "", false
+	}
+	d := s[:10]
+	if _, err := time.Parse("2006-01-02", d); err != nil {
+		return "", false
+	}
+	return d, true
 }
 
 // UseMakeupCard 对指定日期使用补签卡（target_date 格式 2006-01-02，CST 自然日）。

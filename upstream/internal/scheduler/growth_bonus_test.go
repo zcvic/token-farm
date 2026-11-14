@@ -25,6 +25,8 @@ type bonusChainStub struct {
 	daysAfter  int      // 补签成功后重读的 days（0 = 与 days 相同）
 	cards      int      // 补签卡余额
 	broken     []string // 漏签日期（升序，2006-01-02 形态）
+	launchDate string   // streak.launch_date（空 = 默认 2026-01-01）
+	madeUp     []string // streak.makeup_dates（已补签日期）
 	noToday    bool     // heatmap 缺 today.date
 	heatErr    bool     // heatmap 500
 	makeupFail int      // >0：第 N 次 use 起返回业务错误（0 = 从不失败）
@@ -62,7 +64,7 @@ func newBonusChainStub() *bonusChainStub {
 		}
 	}
 	return &bonusChainStub{
-		days: 8, cards: len(broken), broken: broken,
+		days: 8, cards: len(broken), broken: broken, madeUp: []string{},
 		giftActive: true, giftNum: 66, giftCredit: 66, giftEnd: "2026-12-31 23:59:59",
 	}
 }
@@ -96,10 +98,20 @@ func (s *bonusChainStub) handler() http.Handler {
 			if s.makeupCalls.Load() > 0 && s.daysAfter > 0 {
 				days = s.daysAfter
 			}
-			fmt.Fprintf(w, `{"code":0,"data":{"streak":{"days":%d},"makeup_cards":{"balance":%d,"max":5},`+
+			launch := s.launchDate
+			if launch == "" {
+				launch = "2026-01-01"
+			}
+			madeUp := s.madeUp
+			if madeUp == nil {
+				madeUp = []string{}
+			}
+			rawMadeUp, _ := json.Marshal(madeUp)
+			fmt.Fprintf(w, `{"code":0,"data":{"launch_date":"%s","streak":{"days":%d,"makeup_dates":%s},`+
+				`"makeup_cards":{"balance":%d,"max":5},`+
 				`"redemption_status":{"tier_7d_status":"available","tier_14d_status":"locked","tier_28d_status":"locked",`+
 				`"remaining_days":%d,"tiers":[{"tier":"7d","days":7,"credit":0,"energy":2,"cards":1,"chances":1}]}}}`,
-				days, s.cards, days)
+				launch, days, rawMadeUp, s.cards, days)
 		case "/activity/growth/makeup-cards/use":
 			n := s.makeupCalls.Add(1)
 			var b struct {
@@ -280,6 +292,41 @@ func TestStreakBonusMakeupRestoresTierForRedeem(t *testing.T) {
 
 	if n := stub.redeemCalls.Load(); n != 1 {
 		t.Errorf("redeem calls=%d want 1（补签恢复天数 → 7d 档当日可兑）", n)
+	}
+}
+
+// TestStreakBonusMakeupSkipsBeforeLaunchDate launch_date 之前的 0 分不算漏签：
+// 上线前 / 注册前的日子不消耗补签卡。
+func TestStreakBonusMakeupSkipsBeforeLaunchDate(t *testing.T) {
+	stub := newBonusChainStub()
+	stub.launchDate = travelDay(time.Now()) // 今天上线：本月过去的日子都在上线前
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+
+	s.RunStreakBonusNow()
+
+	if n := stub.makeupCalls.Load(); n != 0 {
+		t.Errorf("makeup calls=%d want 0（launch_date 之前不补）", n)
+	}
+}
+
+// TestStreakBonusMakeupSkipsMadeUpDates makeup_dates 里已补过的日期不再重复消耗卡。
+func TestStreakBonusMakeupSkipsMadeUpDates(t *testing.T) {
+	stub := newBonusChainStub()
+	if len(stub.broken) < 2 {
+		t.Skip("月初运行，本月不足两天可测（跨月窗口）")
+	}
+	stub.madeUp = append([]string{}, stub.broken[:len(stub.broken)-1]...) // 只留最近一天
+	srv := bonusChainServer(t, stub)
+	s, _ := bonusChainScheduler(t, srv)
+
+	s.RunStreakBonusNow()
+
+	if n := stub.makeupCalls.Load(); n != 1 {
+		t.Errorf("makeup calls=%d want 1（已补签日期不再补）", n)
+	}
+	if len(stub.makeupDates) != 1 || stub.makeupDates[0] != stub.broken[len(stub.broken)-1] {
+		t.Errorf("makeup dates=%v want [%s]", stub.makeupDates, stub.broken[len(stub.broken)-1])
 	}
 }
 

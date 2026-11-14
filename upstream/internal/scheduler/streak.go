@@ -135,21 +135,25 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) bool {
 // 上游拒绝即停：注册前的日子同样是 0 分，无法与漏签区分，只能由拒绝兜底。
 // 无卡 / 无漏签 / 查询失败均静默（不影响主流程）。
 //
+// 先读 streak 再读 heatmap：launch_date 与 makeup_dates 都在 streak 里，补签窗口
+// 必须用它们收窄（上线前/已补过的日子 heatmap 可能仍是 0 分）。刚读到的 state
+// 在「无卡 / 无漏签 / heatmap 失败」时仍然有效，调用方可直接复用省一次往返。
+//
 // 返回：
 //   - state：补签前的连登状态（已读过一次，调用方可直接复用省一次往返）；nil 表示
-//     没读过（热力图失败/无漏签），调用方需自己再读。
+//     没读到 streak（连带补签判据都拿不到），调用方需自己再读。
 //   - wrote：本轮至少成功补签一天（补签改了天数，state 已过期，调用方必须重读）。
 func (s *Scheduler) makeupMissed(a *auth.Auth) (*upstream.GrowthStreakFull, bool) {
-	broken, err := s.cfg.Upstream.HeatmapBrokenDates(a)
-	if err != nil || len(broken) == 0 {
-		return nil, false
-	}
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
 	if err != nil {
 		return nil, false
 	}
 	if full.MakeupCards.Balance <= 0 {
 		// 有漏签但无卡：状态本身有效，直接交给调用方挑档（省一次重复读）。
+		return full, false
+	}
+	broken, err := s.cfg.Upstream.HeatmapBrokenDates(a, full.LaunchDate, full.Streak.MakeupDates)
+	if err != nil || len(broken) == 0 {
 		return full, false
 	}
 	label := logfmt.Label(a.UID, a.Nickname)

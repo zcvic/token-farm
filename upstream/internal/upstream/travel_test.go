@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"workbuddy2api/internal/auth"
@@ -211,6 +212,89 @@ func TestIsBuddyTaskIncompleteNegative(t *testing.T) {
 		if got := IsBuddyTaskIncomplete(c.err); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestBuddyQuotaParsesFields 盲盒配额：affordable / max_open_count。
+func TestBuddyQuotaParsesFields(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet {
+			return nil, errors.New("want GET")
+		}
+		if err := travelPath(r, "/activity/growth/buddy/quota"); err != nil {
+			return nil, err
+		}
+		return jsonResp(200, `{"code":0,"msg":"ok","data":{"affordable":3,"max_open_count":5,"balance":42}}`), nil
+	})
+	q, err := c.BuddyQuota(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("buddy quota: %v", err)
+	}
+	if q.Affordable != 3 || q.MaxOpenCount != 5 {
+		t.Errorf("quota=%+v want affordable=3 max_open_count=5", q)
+	}
+}
+
+// TestBuddyOpenSendsCountAndToken 开盒请求带 count 与每次新建的 client_token，
+// 并解析 results[].instance.name（缺失回落 template.name）。
+func TestBuddyOpenSendsCountAndToken(t *testing.T) {
+	var got []byte
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost {
+			return nil, errors.New("want POST")
+		}
+		if err := travelPath(r, "/activity/growth/buddy/open"); err != nil {
+			return nil, err
+		}
+		got, _ = io.ReadAll(r.Body)
+		return jsonResp(200, `{"code":0,"msg":"ok","data":{"results":[`+
+			`{"instance":{"name":"橘猫","rarity":"R"}},`+
+			`{"template":{"name":"布偶"}}]}}`), nil
+	})
+	names, err := c.BuddyOpen(&auth.Auth{AccessToken: "at", UID: "u1"}, 3)
+	if err != nil {
+		t.Fatalf("buddy open: %v", err)
+	}
+	var body struct {
+		Count       int    `json:"count"`
+		ClientToken string `json:"client_token"`
+	}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("open body: %v (%s)", err, got)
+	}
+	if body.Count != 3 {
+		t.Errorf("count=%d want 3 (body=%s)", body.Count, got)
+	}
+	if !strings.HasPrefix(body.ClientToken, "buddy-open-") {
+		t.Errorf("client_token=%q want prefix buddy-open-", body.ClientToken)
+	}
+	if len(names) != 2 || names[0] != "橘猫" || names[1] != "布偶" {
+		t.Errorf("names=%v want [橘猫 布偶]", names)
+	}
+}
+
+// TestBuddyOpenDefaultsToOne 非法 count 兜底为 1（上游要求 count>=1）。
+func TestBuddyOpenDefaultsToOne(t *testing.T) {
+	var got []byte
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		got, _ = io.ReadAll(r.Body)
+		return jsonResp(200, `{"code":0,"data":{}}`), nil
+	})
+	if _, err := c.BuddyOpen(&auth.Auth{AccessToken: "at", UID: "u1"}, 0); err != nil {
+		t.Fatalf("buddy open: %v", err)
+	}
+	if !bytes.Contains(got, []byte(`"count":1`)) {
+		t.Errorf("open body=%s want count=1", got)
+	}
+}
+
+// TestBuddyOpenBusinessError 无猫/无活动时上游业务错误透传（调用方静默）。
+func TestBuddyOpenBusinessError(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(403, `{"code":403,"msg":"no active buddy"}`), nil
+	})
+	if _, err := c.BuddyOpen(&auth.Auth{AccessToken: "at", UID: "u1"}, 1); err == nil {
+		t.Fatal("403 应返回错误")
 	}
 }
 

@@ -21,6 +21,8 @@ const (
 	buddyInfoPath      = "/activity/growth/buddy/info"
 	buddyFirstPath     = "/activity/growth/buddy/first"
 	buddyAgreementPath = "/activity/growth/buddy/agreement"
+	buddyQuotaPath     = "/activity/growth/buddy/quota"
+	buddyOpenPath      = "/activity/growth/buddy/open"
 	streakPath         = "/activity/growth/streak"
 )
 
@@ -93,6 +95,66 @@ func (c *Client) TravelClaim(a *auth.Auth, recordID int64) (int64, error) {
 		_ = json.Unmarshal(data, &resp)
 	}
 	return resp.RewardCredit, nil
+}
+
+// BuddyQuota 盲盒可开配额（GET /activity/growth/buddy/quota → data）。
+// Affordable 是「当前能量能开几次」，MaxOpenCount 是上游允许的单次上限。
+type BuddyQuota struct {
+	Affordable   int `json:"affordable"`
+	MaxOpenCount int `json:"max_open_count"`
+}
+
+// BuddyQuota 查询盲盒配额。只读；无猫 / 无活动时上游返回业务错误，调用方静默。
+func (c *Client) BuddyQuota(a *auth.Auth) (*BuddyQuota, error) {
+	data, err := c.growthJSON(a, http.MethodGet, buddyQuotaPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var q BuddyQuota
+	if err := json.Unmarshal(data, &q); err != nil {
+		return nil, err
+	}
+	return &q, nil
+}
+
+// BuddyOpen 开盲盒（POST /activity/growth/buddy/open，body {count, client_token}）。
+// 返回开出物品名（取 data.results[].instance.name，缺失回落 template.name）；名称
+// 缺失不算失败——上游只保证 code==0，日志按调用方请求的 count 记即可。
+func (c *Client) BuddyOpen(a *auth.Auth, count int) ([]string, error) {
+	if count < 1 {
+		count = 1
+	}
+	data, err := c.growthJSON(a, http.MethodPost, buddyOpenPath, map[string]any{
+		"count":        count,
+		"client_token": growthClientToken("buddy-open"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Results []struct {
+			Instance struct {
+				Name string `json:"name"`
+			} `json:"instance"`
+			Template struct {
+				Name string `json:"name"`
+			} `json:"template"`
+		} `json:"results"`
+	}
+	if len(data) > 0 {
+		_ = json.Unmarshal(data, &resp) // 回执形状随活动版本变化，解析失败不视为开盒失败
+	}
+	names := make([]string, 0, len(resp.Results))
+	for _, r := range resp.Results {
+		if r.Instance.Name != "" {
+			names = append(names, r.Instance.Name)
+			continue
+		}
+		if r.Template.Name != "" {
+			names = append(names, r.Template.Name)
+		}
+	}
+	return names, nil
 }
 
 // BuddyInfo 查询当前猫档案；返回 (nil, nil) 表示无猫（data.buddy 为 null）。

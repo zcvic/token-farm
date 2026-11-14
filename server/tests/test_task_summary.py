@@ -24,6 +24,9 @@ class ClassifyTest(unittest.TestCase):
             # 本轮真正入账的收尾行：没有「已领/claimed」字样，靠 `claim N ok` 识别。
             ('claim 200 ok(credit=+300 energy=+5)', 'claimed'),
             ('claim 200 already_claimed(credit=+0 energy=+0)', 'claimed'),
+            # 回执未给到账额、靠回读确认领取：仍是已领，但走另一句文案。
+            ('claim 200 回读确认已领（回执未给到账额）', 'claimed'),
+            ('claim 200 未确认到账 -> 失败（回读未确认领取），不计入账', 'failed'),
             ('query 1/5 -> 可点亮 need=4 id源=专家市场 ids=[ex_1]，dry-run 跳过',
              'pending'),
             ('query 3/5 -> 可领(claim)，dry-run 跳过', 'pending'),

@@ -5,6 +5,7 @@ package scheduler
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -21,6 +22,10 @@ const (
 	travelStateIdle      = "idle"
 	travelStateTraveling = "traveling"
 	travelStateArrived   = "arrived"
+
+	// buddyOpenPerRoundCap 单轮单账号最多开几个盲盒：开盒是消耗能量的写操作，
+	// 上游 quota 异常（affordable 离谱）时不能变成无限消耗。正常单次上限是 5。
+	buddyOpenPerRoundCap = 5
 )
 
 // travelAccountDelay 账号间限速：全量账号约 40s，避免上游风控。测试可置 0。
@@ -109,14 +114,51 @@ func (s *Scheduler) travelOne(a *auth.Auth) {
 	}
 	switch ts.State {
 	case travelStateArrived:
+		// 到站先领奖；领完本轮不再派出/开盒（奖励动作与旅行动作分开，避免状态竞态）。
 		s.travelClaim(a, ts)
 	case travelStateIdle:
+		// 空闲：先开盲盒再派出。开盒消耗能量换 Buddy，与旅行名额互不影响；
+		// quota/开盒失败都不阻断派出（盲盒是增益，不是派出的前置）。
+		s.travelOpenBoxes(a)
 		s.travelDepart(a, ts)
 	case travelStateTraveling:
 		log.Printf("travel %s: skip (traveling record=%d)", logfmt.Label(a.UID, a.Nickname), ts.RecordID)
 	default:
 		log.Printf("travel %s: skip (unknown state %q)", logfmt.Label(a.UID, a.Nickname), ts.State)
 	}
+}
+
+// travelOpenBoxes 空闲时开盲盒。只在 idle 调用：traveling 途中开盒会打乱状态机，
+// arrived 需先领奖（本轮不 depart 也不开盒）；未知状态同样不开。
+// quota 查询失败 / 能量不足 / 开盒失败都只记日志，由调用方继续派出。
+func (s *Scheduler) travelOpenBoxes(a *auth.Auth) {
+	label := logfmt.Label(a.UID, a.Nickname)
+	q, err := s.cfg.Upstream.BuddyQuota(a)
+	if err != nil {
+		log.Printf("travel %s: buddy-quota: %v", label, err)
+		return
+	}
+	n := q.Affordable
+	if q.MaxOpenCount > 0 && q.MaxOpenCount < n {
+		n = q.MaxOpenCount
+	}
+	if n > buddyOpenPerRoundCap {
+		n = buddyOpenPerRoundCap
+	}
+	if n <= 0 {
+		log.Printf("travel %s: skip buddy-open (energy insufficient affordable=%d)", label, q.Affordable)
+		return
+	}
+	names, err := s.cfg.Upstream.BuddyOpen(a, n)
+	if err != nil {
+		log.Printf("travel %s: buddy-open count=%d: %v", label, n, err)
+		return
+	}
+	if len(names) > 0 {
+		log.Printf("travel %s: buddy-open ok count=%d names=%s", label, n, strings.Join(names, ","))
+		return
+	}
+	log.Printf("travel %s: buddy-open ok count=%d", label, n)
 }
 
 // travelDepart 空闲且未达当日上限时派出（每日 1 次，自然日 00:00 CST 重置）。

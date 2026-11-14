@@ -14,14 +14,14 @@ import (
 
 // bonusStub 模拟补签卡 + 礼包/补偿端点（growth 域走 chatBase、billing 域走 billingBase）。
 type bonusStub struct {
-	heatErr     bool // heatmap 返回 500
-	makeupErr   bool // makeup-cards/use 返回业务错误（无卡/无漏签）
-	giftCredit  int64
-	compCredit  int64
-	heatCalls   atomic.Int32
-	makeupBody  atomic.Value
-	giftCalls   atomic.Int32
-	compCalls   atomic.Int32
+	heatErr    bool // heatmap 返回 500
+	makeupErr  bool // makeup-cards/use 返回业务错误（无卡/无漏签）
+	giftCredit int64
+	compCredit int64
+	heatCalls  atomic.Int32
+	makeupBody atomic.Value
+	giftCalls  atomic.Int32
+	compCalls  atomic.Int32
 	// makeupTarget 传入的 target_date（断言用）。
 }
 
@@ -261,7 +261,7 @@ func TestHeatmapBrokenDatesWindow(t *testing.T) {
 		`]}}`)
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"})
+	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-10-01", nil)
 	if err != nil {
 		t.Fatalf("HeatmapBrokenDates: %v", err)
 	}
@@ -276,13 +276,90 @@ func TestHeatmapBrokenDatesWindow(t *testing.T) {
 	}
 }
 
+// TestHeatmapBrokenDatesLaunchDateFloor launch_date 晚于月首时，上线前的 0 分不算漏签。
+func TestHeatmapBrokenDatesLaunchDateFloor(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14"},"cells":[`+
+		`{"date":"2026-11-05","score":0},`+ // 上线前：不算
+		`{"date":"2026-11-08","score":0},`+ // 上线前一天：不算
+		`{"date":"2026-11-09T00:00:00+08:00","score":0},`+ // 上线当天：算
+		`{"date":"2026-11-10","score":0}`+ // 算
+		`]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-11-09", nil)
+	if err != nil {
+		t.Fatalf("HeatmapBrokenDates: %v", err)
+	}
+	want := []string{"2026-11-09", "2026-11-10"}
+	if len(got) != len(want) {
+		t.Fatalf("got=%v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got=%v want %v", got, want)
+		}
+	}
+}
+
+// TestHeatmapBrokenDatesExcludesMadeUp 已补签日期即使 heatmap 仍显示 0 分也不再补。
+func TestHeatmapBrokenDatesExcludesMadeUp(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14"},"cells":[`+
+		`{"date":"2026-11-09","score":0},`+
+		`{"date":"2026-11-10","score":0},`+
+		`{"date":"2026-11-11","score":0}`+
+		`]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-10-01",
+		[]string{"2026-11-09", "2026-11-10T00:00:00+08:00"})
+	if err != nil {
+		t.Fatalf("HeatmapBrokenDates: %v", err)
+	}
+	want := []string{"2026-11-11"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("got=%v want %v（已补签日期不再补）", got, want)
+	}
+}
+
+// TestHeatmapBrokenDatesMissingLaunchDate 缺 launch_date → 报错不猜（上线前 0 分会白烧卡）。
+func TestHeatmapBrokenDatesMissingLaunchDate(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14"},"cells":[`+
+		`{"date":"2026-11-09","score":0}]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "", nil); err == nil {
+		t.Fatal("缺 launch_date 应报错")
+	}
+}
+
+// TestHeatmapBrokenDatesInvalidLaunchDate 非法 launch_date → 报错不猜。
+func TestHeatmapBrokenDatesInvalidLaunchDate(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14"},"cells":[]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-13-40", nil); err == nil {
+		t.Fatal("非法 launch_date 应报错")
+	}
+}
+
+// TestHeatmapBrokenDatesInvalidMadeUp makeup_dates 结构异常 → 报错（fail-closed）。
+func TestHeatmapBrokenDatesInvalidMadeUp(t *testing.T) {
+	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14"},"cells":[]}}`)
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-10-01",
+		[]string{"not-a-date"}); err == nil {
+		t.Fatal("非法 makeup_dates 应报错")
+	}
+}
+
 // TestHeatmapBrokenDatesSorted 上游不保证顺序：输出必须升序。
 func TestHeatmapBrokenDatesSorted(t *testing.T) {
 	srv := heatmapServer(t, `{"code":0,"data":{"today":{"date":"2026-11-14"},"cells":[`+
 		`{"date":"2026-11-09","score":0},{"date":"2026-11-02","score":0},{"date":"2026-11-05","score":0}]}}`)
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"})
+	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-10-01", nil)
 	if err != nil {
 		t.Fatalf("HeatmapBrokenDates: %v", err)
 	}
@@ -302,7 +379,7 @@ func TestHeatmapBrokenDatesMissingToday(t *testing.T) {
 	srv := heatmapServer(t, `{"code":0,"data":{"cells":[{"date":"2026-11-09","score":0}]}}`)
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}); err == nil {
+	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-10-01", nil); err == nil {
 		t.Fatal("缺 today.date 应报错")
 	}
 }
@@ -313,7 +390,7 @@ func TestHeatmapBrokenDatesEmpty(t *testing.T) {
 		`{"date":"2026-11-13","score":1}]}}`)
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"})
+	got, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-10-01", nil)
 	if err != nil {
 		t.Fatalf("HeatmapBrokenDates: %v", err)
 	}
@@ -331,7 +408,7 @@ func TestHeatmapBrokenDatesError(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}); err == nil {
+	if _, err := c.HeatmapBrokenDates(&auth.Auth{UID: "u1", AccessToken: "at"}, "2026-10-01", nil); err == nil {
 		t.Fatal("500 应返回错误")
 	}
 }
@@ -343,7 +420,8 @@ func TestGrowthStreakFull(t *testing.T) {
 			http.Error(w, "not found", 404)
 			return
 		}
-		w.Write([]byte(`{"code":0,"data":{"streak":{"days":20},"makeup_cards":{"balance":3,"max":5},` +
+		w.Write([]byte(`{"code":0,"data":{"launch_date":"2026-06-17","streak":{"days":20,"makeup_dates":["2026-11-01"]},` +
+			`"makeup_cards":{"balance":3,"max":5},` +
 			`"redemption_status":{"tier_7d_status":"claimed","tier_14d_status":"available",` +
 			`"tier_28d_status":"locked","remaining_days":8,` +
 			`"tiers":[{"tier":"7d","days":7},{"tier":"14d","days":14},{"tier":"28d","days":28}]}}}`))
@@ -357,6 +435,12 @@ func TestGrowthStreakFull(t *testing.T) {
 	}
 	if st.Streak.Days != 20 {
 		t.Errorf("days=%d want 20", st.Streak.Days)
+	}
+	if st.LaunchDate != "2026-06-17" {
+		t.Errorf("launch_date=%q want 2026-06-17", st.LaunchDate)
+	}
+	if len(st.Streak.MakeupDates) != 1 || st.Streak.MakeupDates[0] != "2026-11-01" {
+		t.Errorf("makeup_dates=%v want [2026-11-01]", st.Streak.MakeupDates)
 	}
 	if st.MakeupCards.Balance != 3 || st.MakeupCards.Max != 5 {
 		t.Errorf("cards=%d/%d want 3/5", st.MakeupCards.Balance, st.MakeupCards.Max)

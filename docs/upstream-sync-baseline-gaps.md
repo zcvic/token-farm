@@ -85,7 +85,7 @@
 | 编号 | 能力 | 状态 | 来源提交 |
 |---|---|---|---|
 | M-A-1 | 新手礼包先查状态再领（`Pending()` 才领） | ✅ 已同步（`scheduler/benefit.go`；`gift\|uid\|endTime` guard） | `16f39d26` |
-| M-A-2 | 补签范围：昨日 → 本月漏签由近及远 | ✅ 已同步（`HeatmapBrokenDates` + `makeupMissed`；拒绝即停） | `d6272fa3` |
+| M-A-2 | 补签范围：昨日 → 本月漏签由近及远 | ✅ 已同步（`HeatmapBrokenDates` + `makeupMissed`；拒绝即停；`launch_date`/`makeup_dates` 收窄见 misakano A.1.2） | `d6272fa3` |
 | M-A-3 | 连登兑换：每日一档 → 全部已解锁档 | ✅ 已同步（跳过 `locked`/`claimed`） | `1cb4568e` |
 | M-A-4 | 抽奖：一次 → 抽完 chances（单轮上限 50） | ✅ 已同步 | `1cb4568e` |
 | M-A-5 | 成长奖励与活跃上报解耦 | ✅ 已同步（`checkinAll` 末尾 `RunStreakBonusNow`） | `1cb4568e` |
@@ -1371,7 +1371,7 @@ allowed 过滤后的结果）。
 |---|---|---|
 | 11140 风控连坐保护 | M-P0-1 | `internal/server/restrict.go`、`internal/upstream/restrict.go` |
 | 覆盖凭据前先验证 | M-P1-1 | `internal/panel/import.go` |
-| 盲盒消费 | M-P1-2 / M-A-13 | `internal/upstream/travel.go`、`scheduler/travel.go` |
+| 盲盒消费 | M-P1-2 / M-A-13 | `internal/upstream/travel.go`、`scheduler/travel.go`（✅ 已同步，见 misakano A.1.2） |
 | 截断自动续写 | M-P1-3 | `internal/server/continue.go` |
 | `/v2/chat/busy` | M-P1-4 / M-B-17 | `internal/server/busy.go`、`internal/upstream/modelbusy.go` |
 | 媒体接口（图/视频/去水印） | M-P2-1 | `images.go`、`videos.go`、`watermark.go` |
