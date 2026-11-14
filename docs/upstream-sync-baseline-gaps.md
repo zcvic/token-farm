@@ -116,13 +116,31 @@
 | G-M2-4 | 登录页 `usernamePlaceholder` 本地化 | ✅ 已同步（五份 locale） | `89d0dc82` |
 | G-M2-5 | 出站 HTTP/2 的界面入口 | ✅ 已同步（`UPSTREAM_FIELDS` + `_sanitize_section` 布尔白名单） | `89d0dc82` |
 | G-M2-6 | 表格默认居中 + `wb-table-left` / `wb-first-left` | ⏸ 未取（纯视觉，改全站表格观感，需单独评估） | `074f29c0` / `9e85234f` |
-| G-M2-7 | Windows 启动器「开机自启时同时启动项目」 | ⏸ 未取（下一批；C# 改动本地无法自动化验证） | `76e82c59` |
+| G-M2-7 | Windows 启动器「开机自启时同时启动项目」 | ✅ 已同步（`StartProject(quiet)` + `autostart_project` 偏好；本地额外加固四处） | `76e82c59` |
 
 > G-M2-5 的 Go 侧其实早已齐全：`cmd/server/config.go` 的
 > `upstream.http2` → `main.go` 的 `ConfigureHTTP2(cfg.Upstream.HTTP2)` →
 > `internal/upstream/transport.go`，`config.example.json` 也有该项。
 > 缺的只是面板入口——不登记布尔白名单时，界面上的开关会被
 > `_sanitize_section` 当成未知键静默忽略，保存还显示成功。
+
+G-M2-7 的四处**有意偏离**参考仓（都是「自启时不该静默失效、也不该多写一次磁盘」的同一类问题）：
+
+1. **端口占用也走 quiet**：参考仓只把「配置无效」「写配置失败」两处改成日志，
+   端口占用仍无条件 `MessageBox.Show`。开机自启撞上端口占用（机器上另有一个
+   实例时很常见）会卡在一个没人点的模态框上，托盘里也看不出发生了什么。
+2. **用独立的 `_bootedByAutostart` 记「本次是自启拉起的」**：托盘初始化失败时
+   启动器会回退为显示窗口并把 `_startHidden` 置 false（issue #269 的既定行为）。
+   若「是否自启拉起」读 `_startHidden`，用户在「同时启动项目」上打的勾就在
+   这类机器上静默失效——正是最难复现的环境差异。
+3. **启动时机从 `Shown` 改到 `OnHandleCreated` + `BeginInvoke`**：实测（.NET
+   Framework 4.x）窗口被 `SetVisibleCore(false)` 拦下、从未显示时，`OnLoad` 与
+   `OnShown` 都**不会触发**，只有 `OnHandleCreated` 会走。参考仓挂在 `Shown`
+   里，等于它的「同时启动项目」在真正的自启场景下永远不执行——只有托盘注册
+   失败、窗口被迫显示时才碰巧生效。`BeginInvoke` 的回调在消息循环转起来后
+   必定执行，且此时句柄已就绪；用 `_bootStartPosted` 防句柄重建时重复启动。
+4. **`LoadConfig` 回填勾选状态时静音 `CheckedChanged`**：`CheckBox.Checked = …`
+   会触发事件，参考仓没挡，等于每次打开启动器都把 `launcher.conf` 重写一遍。
 
 **部署注意**（G-P1-16 的镜像写入）：写入发生在**面板容器**里，目标是上游仓库目录
 下的 `config.json`。默认部署把整个上游仓库以读写方式挂进面板
@@ -1491,13 +1509,13 @@ M-P2-14 → M-P2-15 → M-P1-11 → M-P1-6 → M-P1-8 → M-P1-14 → M-P1-12（
 的 `failKeepBinding`）→ M-P1-15 → M-P0-2。`go build` / `go vet` /
 `go test ./... -count=1` 全过，九项全部落地。
 
-### 2026-11 第二批补漏（已落地，未提交）
+### 2026-11 第二批补漏（已落地）
 
 七项 G-M2-1～G-M2-7，来源是 manager 仓 `80b4b21..8b5a4df4` 里被整批记为已取、
-实际只落地一半的子项。前五项（登录页表单安全、代理 hint 展示、代理作用域警示、
-登录页 placeholder 本地化、出站 HTTP/2 界面入口）合成一个提交一次回归；后两项
-（表格居中、Windows 启动器自启启动项目）未取，理由见文首表格。明细见文首
-「2026-11 第二批补漏」小节。
+实际只落地一半的子项，外加一笔基线之前的启动器缺口（`76e82c59`）。前五项（登录页
+表单安全、代理 hint 展示、代理作用域警示、登录页 placeholder 本地化、出站 HTTP/2
+界面入口）合成一个提交 `ec830c88`；G-M2-7（Windows 启动器自启启动项目）单独一个
+提交，因为它要动 C# 且需要编译验证。G-M2-6（表格居中）未取，理由见文首表格。
 
 ### 第二批（改流量分布，需要灰度）
 

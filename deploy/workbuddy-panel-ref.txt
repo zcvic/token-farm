@@ -120,6 +120,35 @@ b64773e85c4f9dcb1e73cf6d4f2010fa55ff66a8
 c58f75c17d17406d8ce35451f15ac221e0d69a1e
 89d0dc8290cca9841084d352b81cae9dc18bafd2
 
+# ---- 2026-11 第三批：Windows 启动器「开机自启时同时启动项目」
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      提交：76e82c59（issue #388；早于基线 80b4b21，属基线之前的存量缺口，
+#            按「本地缺不缺」收录）
+#      问题：启动器的开机自启只把窗口静默到托盘，项目本身仍要用户手点
+#            「启动项目」——那自启就没有意义。
+#      已取：
+#        · `MainForm.cs` 加 `_chkAutostartProject`（勾选写 launcher.conf 的
+#          `autostart_project`，未勾开机自启时禁用）+ `_autoStartOnBoot`
+#          （自启拉起时按偏好自动启动项目）；
+#        · `OnStartClick` 抽出 `StartProject(bool quiet)`：quiet 时错误只写日志、
+#          `_openBrowserOnHealthy = !quiet`（不自动开浏览器）；
+#        · 新增 `test_windows_scripts.py` 的 WindowsAutostartProjectTest 6 个用例。
+#      本地额外加固（参考仓没有，属有意偏离）：
+#        · 端口占用分支也走 quiet（参考仓那里仍无条件 MessageBox.Show）——
+#          自启撞上端口占用会卡在没人点的对话框上；
+#        · 用独立的 `_bootedByAutostart` 记「本次是自启拉起的」：托盘初始化
+#          失败会把 `_startHidden` 清成 false（既定回退行为），若读它则
+#          「同时启动项目」在这类机器上静默失效；
+#        · 启动时机从 `Shown` 改到 `OnHandleCreated` + `BeginInvoke`：实测
+#          （.NET Framework 4.x）窗口被 `SetVisibleCore(false)` 拦下、从未
+#          显示时，`OnLoad` / `OnShown` 都不触发，只有 `OnHandleCreated` 会走。
+#          参考仓挂在 `Shown` 里，等于它的「同时启动项目」在真正的自启场景下
+#          永远不执行，只有托盘注册失败、窗口被迫显示时才碰巧生效；
+#        · `LoadConfig` 回填勾选状态时用 `_autostartLoading` 静音
+#          `OnAutostartProjectChanged`（参考仓没挡）：否则每次打开启动器都会
+#          把 launcher.conf 重写一遍。
+76e82c593039da1b9f919a26110dab5c9aea8b44
+
 # ---- 2026-11 成长任务批：附录 A 的 A-1～A-8 + 附录 B 的 B-8/B-9
 #      仓库：https://github.com/misakano7545/workbuddy2api-panel
 #      范围：连登管家闭环（补签 / 礼包 / 全档兑换 / 抽完次数）+ 两个只读状态

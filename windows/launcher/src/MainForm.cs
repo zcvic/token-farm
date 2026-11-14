@@ -37,6 +37,7 @@ namespace TokenFarmLauncher
         private TextBox _txtPort;
         private Button _btnSave;
         private CheckBox _chkAutostart;
+        private CheckBox _chkAutostartProject;
         private Button _btnUpdate;
         private TextBox _log;
 
@@ -49,6 +50,9 @@ namespace TokenFarmLauncher
         private bool _credentialLookupRunning;
         private bool _autostartLoading;
         private bool _startHidden;
+        private bool _bootedByAutostart;
+        private bool _autoStartOnBoot;
+        private bool _bootStartPosted;
         private bool _updating;
         private readonly EventWaitHandle _wake;
         private string _currentHost = EnvConfig.DefaultHost;
@@ -65,6 +69,15 @@ namespace TokenFarmLauncher
             _root = root;
             _settings = new AppSettings(LauncherPaths.SettingsFile);
             _startHidden = startHidden;
+            // 「这次是开机自启拉起的」必须单独记：托盘初始化失败时 _startHidden 会被
+            // 清成 false（回退为显示窗口），但「同时启动项目」这个偏好仍然该生效。
+            _bootedByAutostart = startHidden;
+            // 偏好提前读好：OnHandleCreated 只判断 _autoStartOnBoot，不依赖后续初始化顺序。
+            if (_bootedByAutostart)
+            {
+                _autoStartOnBoot = string.Equals(
+                    _settings.Get("autostart_project", "0"), "1", StringComparison.Ordinal);
+            }
             _wake = wake;
 
             Text = LauncherPaths.AppName;
@@ -114,6 +127,23 @@ namespace TokenFarmLauncher
             }
 
             Shown += delegate { ProbeAsync(); };
+        }
+
+        /// 开机自启时窗口从不显示，**实测 `Shown` 不会触发**（`SetVisibleCore(false)`
+        /// 拦下首次显示后，OnLoad / OnShown 都不走），所以自启启动只能挂在这里。
+        /// 句柄此时已就绪，`BeginInvoke` 排队的回调会在消息循环转起来后必定执行。
+        /// 用 `_bootStartPosted` 防重：句柄重建时 OnHandleCreated 会再次进来。
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            if (!_autoStartOnBoot || _bootStartPosted) { return; }
+            _bootStartPosted = true;
+            BeginInvoke((Action)delegate
+            {
+                _autoStartOnBoot = false;
+                AppendLog("[RUN] 开机自启：按偏好自动启动项目。");
+                StartProject(true);
+            });
         }
 
         /// 开机静默启动：Application.Run 会请求显示窗口，这里拦下第一次，
@@ -199,6 +229,14 @@ namespace TokenFarmLauncher
             _chkAutostart.CheckedChanged += OnAutostartChanged;
             _content.Controls.Add(_chkAutostart);
 
+            // issue #388：开机自启只驻留托盘，项目仍要用户手点「启动项目」——
+            // 那自启就没有意义。只有勾了开机自启才允许这一项。
+            _chkAutostartProject = new CheckBox();
+            _chkAutostartProject.Text = "开机自启时同时启动项目（不弹出面板）";
+            _chkAutostartProject.SetBounds(40, 228, 380, 22);
+            _chkAutostartProject.CheckedChanged += OnAutostartProjectChanged;
+            _content.Controls.Add(_chkAutostartProject);
+
             // 检查更新（issue #288）：查最新 Release → 下载安装包 + 校验 sha256 → 启动安装向导。
             _btnUpdate = new Button();
             _btnUpdate.Text = "检查更新";
@@ -208,7 +246,7 @@ namespace TokenFarmLauncher
 
             var logLabel = new Label();
             logLabel.Text = "输出日志";
-            logLabel.SetBounds(24, 236, 432, 20);
+            logLabel.SetBounds(24, 260, 432, 20);
             _content.Controls.Add(logLabel);
 
             _log = new TextBox();
@@ -216,7 +254,7 @@ namespace TokenFarmLauncher
             _log.ReadOnly = true;
             _log.ScrollBars = ScrollBars.Vertical;
             _log.BackColor = SystemColors.Window;
-            _log.SetBounds(24, 258, 432, 178);
+            _log.SetBounds(24, 282, 432, 154);
             _content.Controls.Add(_log);
         }
 
@@ -224,6 +262,9 @@ namespace TokenFarmLauncher
         /// 不能让界面显示「已开启」而注册表里其实没有。
         private void OnAutostartChanged(object sender, EventArgs e)
         {
+            // 未勾开机自启时「同时启动项目」没有意义（项目不会被自启唤起），
+            // 直接禁用而不是留着可勾——留着会让人以为它独立生效。
+            _chkAutostartProject.Enabled = _chkAutostart.Checked;
             if (_autostartLoading) { return; }
             try
             {
@@ -246,6 +287,17 @@ namespace TokenFarmLauncher
                 MessageBox.Show(this, "设置开机自启失败：" + ex.Message, "开机自启",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        /// 记住「开机自启时同时启动项目」。只有开机自启生效时才允许勾选；
+        /// 勾选状态本身不写注册表，运行时由构造函数里的 _autoStartOnBoot 决定。
+        private void OnAutostartProjectChanged(object sender, EventArgs e)
+        {
+            // 与开机自启同理：LoadConfig 回填勾选状态时不能反写偏好文件。
+            if (_autostartLoading) { return; }
+            _settings.Set("autostart_project", _chkAutostartProject.Checked ? "1" : "0");
+            try { _settings.Save(); }
+            catch (Exception ex) { AppendLog("[WARN] 保存启动偏好失败：" + ex.Message); }
         }
 
         private Button MakeActionButton(string text, int x, EventHandler onClick)
@@ -392,7 +444,10 @@ namespace TokenFarmLauncher
             // 初始勾选状态不能触发写入：用 _autostartLoading 静音 CheckedChanged。
             _autostartLoading = true;
             _chkAutostart.Checked = Autostart.IsEnabled();
+            _chkAutostartProject.Checked =
+                string.Equals(_settings.Get("autostart_project", "0"), "1", StringComparison.Ordinal);
             _autostartLoading = false;
+            _chkAutostartProject.Enabled = _chkAutostart.Checked;
         }
 
         private string AddressUrl()
@@ -444,13 +499,23 @@ namespace TokenFarmLauncher
 
         private void OnStartClick(object sender, EventArgs e)
         {
+            StartProject(false);
+        }
+
+        /// <summary>
+        /// 启动项目。quiet=true 用于开机自启：出错只写日志，不弹窗、不打开浏览器 ——
+        /// 登录时没人会盯着一个模态框点确定。
+        /// </summary>
+        private void StartProject(bool quiet)
+        {
             string host = _txtHost.Text.Trim();
             int port;
             string error;
             if (!EnvConfig.TryValidateHost(host, out error) ||
                 !EnvConfig.TryValidatePort(_txtPort.Text, out port, out error))
             {
-                MessageBox.Show(this, error, "配置无效", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (quiet) { AppendLog("[ERROR] 自启动配置无效：" + error); }
+                else { MessageBox.Show(this, error, "配置无效", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
                 return;
             }
             try
@@ -460,7 +525,8 @@ namespace TokenFarmLauncher
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, "写入配置失败：" + ex.Message, "启动", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (quiet) { AppendLog("[ERROR] 自启动写入配置失败：" + ex.Message); }
+                else { MessageBox.Show(this, "写入配置失败：" + ex.Message, "启动", MessageBoxButtons.OK, MessageBoxIcon.Error); }
                 return;
             }
             _currentHost = host;
@@ -474,10 +540,19 @@ namespace TokenFarmLauncher
             if (!HealthProbe.Check(EnvConfig.ToConnectHost(host), port, 1000) &&
                 PortCheck.InUse(host, port))
             {
-                MessageBox.Show(this,
-                    "端口 " + port + " 已被其他程序占用，无法在此端口启动。\n" +
-                    "请更换端口（或先停掉占用它的程序）后重试。",
-                    "启动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                // 与上面两处同理：开机自启时弹模态框等于让启动器卡在没人点的对话框上，
+                // 用户看到的只是「项目没起来」且没有任何可见线索。
+                if (quiet)
+                {
+                    AppendLog("[ERROR] 自启动失败：端口 " + port + " 已被其他程序占用。");
+                }
+                else
+                {
+                    MessageBox.Show(this,
+                        "端口 " + port + " 已被其他程序占用，无法在此端口启动。\n" +
+                        "请更换端口（或先停掉占用它的程序）后重试。",
+                        "启动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
                 SetState(ProjectState.Stopped, null);
                 return;
             }
@@ -508,7 +583,7 @@ namespace TokenFarmLauncher
                                     }
                                     _wait = WaitKind.Healthy;
                                     _waitSince = DateTime.Now;
-                                    _openBrowserOnHealthy = true;
+                                    _openBrowserOnHealthy = !quiet;
                                     AppendLog("[RUN] 服务进程已拉起，等待健康检查…");
                                     UpdateButtons();
                                 });

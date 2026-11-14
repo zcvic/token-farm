@@ -330,6 +330,116 @@ class WindowsHostSettingsTest(unittest.TestCase):
         self.assertIn("'--host', $bindHost", src)
 
 
+class WindowsAutostartProjectTest(unittest.TestCase):
+    """issue #388：开机自启不能只驻留托盘，还要能按偏好自动启动项目。
+
+    为什么值得一组测试：这条链是「注册表写成功 → 下次登录静默到托盘 →
+    Shown 里按偏好拉起项目」，中间任何一环断了都不会报错，用户只会看到
+    「开机后项目没起来」，而启动器自己一切正常。C# 在本地跑不了单测
+    （需要 Windows Forms + 真注册表），所以只能钉住源码里的关键结构。
+    """
+
+    def _src(self, name: str) -> str:
+        path = _ROOT / 'windows' / 'launcher' / 'src' / name
+        self.assertTrue(path.is_file(), f'缺少 {path}')
+        return path.read_text(encoding='utf-8-sig')
+
+    def test_preference_is_persisted_and_gated(self) -> None:
+        src = self._src('MainForm.cs')
+        self.assertIn('autostart_project', src)
+        self.assertIn('_chkAutostartProject.Enabled = _chkAutostart.Checked', src,
+                      '「同时启动项目」必须在未勾开机自启时禁用')
+
+    def test_initial_load_does_not_rewrite_preference(self) -> None:
+        """LoadConfig 回填勾选状态时不能反写偏好文件。
+
+        `CheckBox.Checked = ...` 会触发 CheckedChanged；不静音的话，每次打开
+        启动器都会把 launcher.conf 重写一遍（还多一次磁盘写入）。参考仓没挡。
+        """
+        src = self._src('MainForm.cs')
+        start = src.index('private void LoadConfig()')
+        end = src.index('private string AddressUrl()')
+        body = src[start:end]
+        self.assertIn('_autostartLoading = true;', body)
+        self.assertIn('_chkAutostartProject.Checked', body)
+        # 静音必须包住 autostart_project 的回填
+        mute = body.index('_autostartLoading = true;')
+        unmute = body.index('_autostartLoading = false;')
+        self.assertLess(mute, body.index('_chkAutostartProject.Checked'))
+        self.assertLess(body.index('_chkAutostartProject.Checked'), unmute,
+                        '回填勾选状态发生在静音区间之外，会反写偏好文件')
+        handler = src.index('private void OnAutostartProjectChanged')
+        hbody = src[handler:src.index('private Button MakeActionButton', handler)]
+        self.assertIn('if (_autostartLoading) { return; }', hbody,
+                      '偏好写入没有静音保护')
+
+    def test_boot_starts_project_quietly(self) -> None:
+        src = self._src('MainForm.cs')
+        self.assertIn('StartProject(true)', src,
+                      '开机自启没有调用静默启动')
+        self.assertIn('_openBrowserOnHealthy = !quiet', src,
+                      '静默启动不该自动打开浏览器')
+        self.assertIn('if (quiet) { AppendLog', src,
+                      '静默启动出错时不该弹模态框')
+
+    def test_boot_flag_survives_tray_failure(self) -> None:
+        """托盘初始化失败会清掉 _startHidden，但不能连带清掉「同时启动项目」。
+
+        托盘注册失败时启动器回退为显示窗口（issue #269 的既定行为），此时
+        `_startHidden` 被置 false。如果「是否自启拉起」也读它，用户在
+        「同时启动项目」上打的勾就在这类机器上静默失效——正是最难复现的
+        那类环境差异。所以要用独立的 `_bootedByAutostart` 记。
+        """
+        src = self._src('MainForm.cs')
+        self.assertIn('_bootedByAutostart = startHidden;', src,
+                      '缺少独立的自启标记：托盘失败时 _startHidden 会被清掉')
+        self.assertIn('if (_bootedByAutostart)', src,
+                      '自启偏好判定没有用独立标记')
+
+    def test_boot_start_is_not_hooked_to_shown(self) -> None:
+        """自启启动不能挂在 `Shown` 上。
+
+        实测（.NET Framework 4.x，Windows 11）：窗口被 `SetVisibleCore(false)`
+        拦下、从未显示时，`OnLoad` 和 `OnShown` 都**不会触发**，只有
+        `OnHandleCreated` 会走。参考仓把启动挂在 `Shown` 里，也就是说它的
+        「同时启动项目」在真正的自启场景下永远不会执行——只有托盘注册失败、
+        窗口被迫显示时才碰巧生效。本地改挂 `OnHandleCreated` + `BeginInvoke`。
+        """
+        src = self._src('MainForm.cs')
+        shown = src.index('Shown += delegate')
+        shown_end = src.index('};', shown)
+        self.assertNotIn('StartProject(true)', src[shown:shown_end],
+                         '启动仍挂在 Shown 上：静默自启时 Shown 不触发，项目不会起来')
+        self.assertIn('protected override void OnHandleCreated(EventArgs e)', src)
+        handle = src.index('protected override void OnHandleCreated(EventArgs e)')
+        body = src[handle:src.index('private Panel _content;', handle)]
+        self.assertIn('StartProject(true)', body,
+                      'OnHandleCreated 里没有自启启动')
+        self.assertIn('_bootStartPosted', body,
+                      '缺少防重标记：句柄重建会重复启动项目')
+
+    def test_quiet_mode_does_not_block_on_port_conflict(self) -> None:
+        """端口被占用时也不能弹模态框。
+
+        这是本地比参考仓多做的一处：上游只把「配置无效」「写配置失败」两处
+        改成 quiet 分支，端口占用仍然无条件 MessageBox.Show。开机自启撞上
+        端口占用（常见于机器上另有一个实例）时，启动器会卡在一个没人点的
+        对话框上，而且托盘里看不出发生了什么。
+        """
+        src = self._src('MainForm.cs')
+        start = src.index('private void StartProject(bool quiet)')
+        end = src.index('private void OnRestartClick')
+        body = src[start:end]
+        self.assertIn('已被其他程序占用', body)
+        self.assertIn('自启动失败：端口', body,
+                      '端口占用分支没有 quiet 处理：开机自启会卡在模态框上')
+        # 该分支里 MessageBox 必须被 else 包着，不能无条件执行
+        conflict = body[body.index('PortCheck.InUse'):]
+        conflict = conflict[:conflict.index('SetState(ProjectState.Stopped')]
+        self.assertIn('else', conflict,
+                      '端口占用提示没有 else 分支，quiet 时仍会弹窗')
+
+
 class WindowsAutostartTest(unittest.TestCase):
     """issue #269：Windows 启动器开机自启（HKCU Run + 静默到托盘 + 卸载清理）。"""
 
