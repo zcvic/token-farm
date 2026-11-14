@@ -779,6 +779,13 @@
     "upstreamHint": "綁定後，這把密鑰的請求只走該上游的帳號池；未綁定 = 預設上游",
     "upstreamTag": "上游：{name}",
     "upstreamDisabledSuffix": "（已停用）",
+    "preferredAccountLabel": "優先帳號（積分）",
+    "preferredAccountNone": "不指定（依帳號池自動選）",
+    "preferredAccountHint": "設定後，這把密鑰的請求會優先使用該帳號的積分；該帳號冷卻、被停用或已滿時自動回落到帳號池。",
+    "preferredAccountTag": "優先：{uid}",
+    "preferredAccountUnlisted": "已指定（不在目前清單）：{uid}",
+    "preferredAccountPlaceholder": "帳號 UID（留空 = 不指定）",
+    "preferredAccountLoadFailed": "讀不到該分組的帳號清單，可直接填寫帳號 UID；填錯只會在選號時自動回落。",
     "upstreamsFailed": "上游清單沒取到 —— 新建金鑰的「綁定上游」只會顯示預設項，先重試再建立。"
   },
   "upstreams": {

@@ -779,6 +779,13 @@
     "upstreamHint": "연결하면 이 키의 요청은 해당 업스트림 풀만 사용합니다. 연결하지 않으면 기본 업스트림입니다",
     "upstreamTag": "업스트림: {name}",
     "upstreamDisabledSuffix": "(중지됨)",
+    "preferredAccountLabel": "우선 계정 (크레딧)",
+    "preferredAccountNone": "지정 안 함 (계정 풀에서 자동 선택)",
+    "preferredAccountHint": "설정하면 이 키의 요청이 먼저 해당 계정의 크레딧을 사용합니다. 쿨다운 중이거나 비활성·만석이면 자동으로 계정 풀로 전환됩니다.",
+    "preferredAccountTag": "우선: {uid}",
+    "preferredAccountUnlisted": "지정됨 (현재 목록에 없음): {uid}",
+    "preferredAccountPlaceholder": "계정 UID (비우면 지정 안 함)",
+    "preferredAccountLoadFailed": "이 그룹의 계정 목록을 불러오지 못했습니다. UID를 직접 입력할 수 있으며, 잘못된 UID는 선택 시 자동으로 폴백될 뿐입니다.",
     "upstreamsFailed": "업스트림 목록을 불러오지 못했습니다. 새 키의 \"업스트림 연결\"에는 기본 항목만 표시됩니다. 다시 시도한 뒤 생성하세요."
   },
   "upstreams": {

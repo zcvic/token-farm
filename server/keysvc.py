@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import time
@@ -71,6 +72,37 @@ def _norm_upstream_id(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return uid if uid > 0 else None
+
+
+# 「优先账号」uid 的长度上限。上游 uid 是短串（实测 32 位十六进制），128 足够
+# 容下任何合法形态；再长的值只可能是脏数据，没必要让它进 HTTP 头。
+PREFERRED_ACCOUNT_MAX = 128
+# HTTP 头只接受可见 ASCII（0x21–0x7e，不含空格）：面板会把这个 uid 放进
+# `X-Preferred-Account` 转发给上游，非 ASCII / 空白 / 控制字符会让 httpx 直接抛错，
+# 而那条错误会以 502「上游不可用」的形式出现——与真正的原因完全对不上。
+_PREFERRED_ACCOUNT_RE = re.compile(r'^[\x21-\x7e]+$')
+
+
+def _norm_preferred_account(value: object) -> str:
+    """归一化「优先账号」uid：空 = 不指定；非法格式原样保留会让请求 502，所以必须拦。
+
+    与 `_norm_upstream_id` 的「脏值吃掉」不同：这里**非法值抛 ValueError**。
+    账号 uid 是用户从下拉里选的，写错不可能是正常操作；静默存成一个永远匹配不到
+    的字符串，只会让「设了但没生效」变成一个没人查得出来的问题。
+    路由层会把 ValueError 翻成 400（见 routers/keys.py 的 `_check_preferred_account`）。
+    """
+    if value is None:
+        return ''
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError('preferred_account 必须是账号 uid 字符串')
+    text = str(value).strip()
+    if not text:
+        return ''
+    if len(text) > PREFERRED_ACCOUNT_MAX:
+        raise ValueError(f'preferred_account 最长 {PREFERRED_ACCOUNT_MAX} 个字符')
+    if not _PREFERRED_ACCOUNT_RE.match(text):
+        raise ValueError('preferred_account 只能包含可见 ASCII 字符（不能有空格或换行）')
+    return text
 
 
 def _norm_credit_quota(value: object) -> float:
@@ -163,6 +195,13 @@ def _json_list(raw: object) -> list[str]:
     return [str(x) for x in parsed if x]
 
 
+def _row_get(row, name: str):
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
 def _parse(row) -> dict:
     return {
         'id': row['id'],
@@ -177,6 +216,9 @@ def _parse(row) -> dict:
         # 绑定的上游接入点（多上游 / 分组隔离）。None = 默认上游 —— 见 upstreamsvc
         # 的模块注释：默认上游不是数据库里的某一行，所以这里保持 None 而不是补 0。
         'upstream_id': _norm_upstream_id(row['upstream_id']),
+        # 优先消耗哪个账号的积分（空 = 不指定，按账号池自动选）。
+        # 这一列只影响上游选号，不改变任何「能不能调」的判定。
+        'preferred_account': str(_row_get(row, 'preferred_account') or ''),
         'quota': row['quota'],
         'used_tokens': row['used_tokens'],
         'quota_credit': row['quota_credit'],
@@ -217,6 +259,7 @@ def create_key(
     realm: str = '',
     quota_credit: float = 0,
     upstream_id: int | None = None,
+    preferred_account: str = '',
     *,
     _conn: sqlite3.Connection | None = None,
 ) -> dict:
@@ -237,8 +280,8 @@ def create_key(
     token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     sql = ('INSERT INTO api_keys(name, key_hash, key_plain, prefix, enabled, expires_at, '
            'max_ips, ip_allowlist, models, realm, quota, used_tokens, quota_credit, '
-           'used_credit, created_at, upstream_id) '
-           'VALUES(?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?)')
+           'used_credit, created_at, upstream_id, preferred_account) '
+           'VALUES(?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?)')
     args = (
         name,
         _hash(token),
@@ -253,6 +296,7 @@ def create_key(
         _norm_credit_quota(quota_credit),
         int(time.time()),
         _norm_upstream_id(upstream_id),
+        _norm_preferred_account(preferred_account),
     )
     if _conn is not None:
         key_id = int(_conn.execute(sql, args).lastrowid or 0)
@@ -319,6 +363,9 @@ def update_key(key_id: int, patch: dict) -> dict | None:
         # 显式传 null / 0 是**允许**的：管理员可以把密钥改回「默认上游」。
         # 与 realm 同口径，不能用真值判断（否则改不回默认上游）。
         fields['upstream_id'] = _norm_upstream_id(patch['upstream_id'])
+    if 'preferred_account' in patch:
+        # 同上：显式传 null / '' = 清除优先账号，必须允许。
+        fields['preferred_account'] = _norm_preferred_account(patch['preferred_account'])
     if fields:
         assignments = ', '.join(f'{k} = ?' for k in fields)
         db.execute(f'UPDATE api_keys SET {assignments} WHERE id = ?', (*fields.values(), key_id))

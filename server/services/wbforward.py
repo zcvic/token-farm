@@ -32,7 +32,7 @@ from typing import AsyncIterator
 from urllib.parse import urlsplit
 
 from .. import config, upstreamsvc
-from . import proxyroutes
+from . import proxyroutes, requestctx
 
 # ── 上游响应里那些「必须翻译」的细节 ──────────────────────
 _RETRY_AT_RE = re.compile(
@@ -138,6 +138,11 @@ def upstream_headers(upstream: dict | None = None) -> dict:
     多上游（密钥绑定上游）之后，请求头**必须按密钥解析出来的上游来构造** ——
     拿错上游的 api_key 会打到别的账号池上，而这正是本功能要隔离的东西。
     默认参数只为兼容「没有密钥」的调用方（探活 / 管理端调试台）。
+
+    `X-Preferred-Account`：这把密钥想优先消耗哪个账号的积分（见
+    `requestctx.preferred_account`）。**只由面板从已鉴权的密钥里填**，客户端的
+    同名请求头永远不会被转发（这里是从零构造的字典），所以不可被调用方伪造。
+    旧版上游不认识这个头，会直接忽略，行为与从前一致。
     """
     up = upstream if upstream is not None else upstreamsvc.default_upstream()
     headers = {'Content-Type': 'application/json'}
@@ -147,6 +152,9 @@ def upstream_headers(upstream: dict | None = None) -> dict:
     api_key = upstreamsvc.forward_api_key(up)
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
+    preferred = requestctx.preferred_account()
+    if preferred:
+        headers[requestctx.PREFERRED_ACCOUNT_HEADER] = preferred
     return headers
 
 

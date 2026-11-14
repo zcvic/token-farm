@@ -499,6 +499,13 @@ export interface ApiKey {
    */
   upstream_id?: number | null;
   /**
+   * 优先消耗哪个上游账号的积分（账号 uid）；空串 = 不指定，按账号池自动选。
+   *
+   * 只是「优先」：该账号不可用时上游会回落到普通选号，不会让密钥失败。
+   * 值由面板转成 `X-Preferred-Account` 头带给上游，客户端无法伪造。
+   */
+  preferred_account?: string;
+  /**
    * 来源红包的 id；null = 手工建的。
    *
    * 密钥列表按它分成两个 tab：红包一次生成一批、额度零碎，与手工建的混在

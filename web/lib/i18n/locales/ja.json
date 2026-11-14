@@ -779,6 +779,13 @@
     "upstreamHint": "紐付けると、このキーのリクエストはそのプールだけを使います。未設定なら既定のアップストリームです",
     "upstreamTag": "アップストリーム：{name}",
     "upstreamDisabledSuffix": "（停止中）",
+    "preferredAccountLabel": "優先アカウント（クレジット）",
+    "preferredAccountNone": "指定しない（アカウントプールから自動選択）",
+    "preferredAccountHint": "設定すると、このキーのリクエストはまずこのアカウントのクレジットを消費します。クールダウン中・無効・満杯の場合は自動的にプールへフォールバックします。",
+    "preferredAccountTag": "優先：{uid}",
+    "preferredAccountUnlisted": "指定済み（現在の一覧にありません）：{uid}",
+    "preferredAccountPlaceholder": "アカウント UID（空 = 指定しない）",
+    "preferredAccountLoadFailed": "このグループのアカウント一覧を取得できませんでした。UID を直接入力できます。誤った UID は選号時に自動でフォールバックするだけです。",
     "upstreamsFailed": "上流一覧を取得できませんでした。新しいキーの「上流の紐付け」には既定の上流しか出ません。再試行してから作成してください。"
   },
   "upstreams": {

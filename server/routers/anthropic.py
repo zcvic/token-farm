@@ -40,7 +40,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import config, db, iputil, keysvc, platforms, upstreamsvc
 from ..routers.security import get_config as get_security_config
-from ..services import platformcall
+from ..services import platformcall, requestctx
 # responses 只为复用推理凭据的编解码（`_encode_credential` / `_decode_credential`）：
 # Anthropic 的 `signature` 与 Responses 的 `encrypted_content` 语义完全相同——
 # 都是「客户端原样搬来搬去的不透明串」，两边编解码必须一致，否则同一轮对话在
@@ -281,6 +281,9 @@ def _authorize(request: Request, model: str | None, *,
         gateway._log_ip(ip, path, True, ua, 'rate_limited')
         return None, ip, _err(msg, 429, 'rate_limit_error')
 
+    # 与 gateway._authorize 同口径：把密钥的「优先账号」写进请求上下文，
+    # 供 `wbforward.upstream_headers` 带到出站请求上（见 requestctx 的说明）。
+    requestctx.set_preferred_account(key.get('preferred_account'))
     return key, ip, None
 
 

@@ -24,6 +24,33 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
+// preferredAccountHeader 面板用它告诉上游「这次请求优先消耗哪个账号的积分」。
+//
+// 为什么需要这个头：选号在上游，面板只负责鉴权与转发。一把密钥被管理员指定了
+// 优先账号后，面板必须能让上游知道——否则「优先」只能靠改全局权重实现，而那会
+// 影响所有密钥。
+//
+// **只是「优先」**：上游会先用 PickByUIDForModel 校验该账号（冷却 / 禁用 /
+// 在途占满 / 模型级 6004 限额 / 保底积分），不可用就静默回落到普通轮换。
+// 头由面板从**已鉴权的密钥**取值后重新构造，客户端伪造的同名头不会被转发。
+const preferredAccountHeader = "X-Preferred-Account"
+
+// preferredAccountFromRequest 读取并校验「优先账号」头。
+// 只接受可见 ASCII（0x21–0x7e，长度 ≤128）：这是 HTTP 头的安全子集，
+// 也避免把异常字节当成 uid 去查表。非法值按「未指定」处理，不影响请求。
+func preferredAccountFromRequest(r *http.Request) string {
+	uid := strings.TrimSpace(r.Header.Get(preferredAccountHeader))
+	if uid == "" || len(uid) > 128 {
+		return ""
+	}
+	for i := 0; i < len(uid); i++ {
+		if uid[i] < 0x21 || uid[i] > 0x7e {
+			return ""
+		}
+	}
+	return uid
+}
+
 // Config handler 依赖。
 type Config struct {
 	Pool *pool.Pool
@@ -705,6 +732,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	largeCtx := h.cfg.LargeRequestBytes > 0 && len(body) >= h.cfg.LargeRequestBytes
 	// rotate 是 0044 旧行为：放弃粘性、逐请求换号。sticky 是默认的缓存优先模式。
 	largeRotate := largeCtx && h.cfg.LargeRequestMode == "rotate"
+	// 面板按密钥指定的「优先账号」（可选）：表达「先花这个号的积分」。
+	// 与粘性分开保存——它**不写会话绑定**，只在每次选号时优先尝试；账号不可用时
+	// 由下面的普通轮换接手，所以一个坏号不会让整把密钥失败。
+	preferredUID := preferredAccountFromRequest(r)
 	stickyUID := ""
 	if h.cfg.Session != nil && stickyKey != "" {
 		// 传给 ResolveForModel 的是**完整**模型名（peek.Model，含 realm 前缀）。
@@ -860,9 +891,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	modelBlocksCleared := false
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
+		// 选号：**优先账号**（面板按密钥指定）优先于会话粘性——管理员明确要求
+		// 先花某个号的积分时，不该被「这个会话上次绑在别的号上」覆盖。
+		// PickByUIDForModel 已校验该模型可用性 + 在途未满 + 保底积分；它返回 nil
+		// 就说明这个号现在用不了，直接落到下面的粘性 / 普通轮换，不改任何绑定。
+		//
+		// tried 里已有它 = 本次请求已经试过并失败，不再重复尝试（否则会在一个
+		// 坏号上耗尽轮转次数，反而比不指定更差）。
 		var acct *auth.Auth
-		if stickyUID != "" {
+		if preferredUID != "" && !tried[preferredUID] {
+			if a := h.cfg.Pool.PickByUIDForModel(preferredUID, bareModel); a != nil &&
+				(realm == "" || a.Realm() == realm) {
+				acct = a
+			}
+		}
+		// 粘性号次之（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
+		if acct == nil && stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑。

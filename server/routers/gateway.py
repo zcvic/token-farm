@@ -804,6 +804,10 @@ def _authorize(request: Request, model: str | None,
                                     retry_after=RATE_WINDOW)
 
     _log_ip(ip, path, False, ua)
+    # 优先账号只从**已通过鉴权**的密钥里取：客户端的同名请求头不会被采信
+    # （本函数不读它）。写进请求上下文后由 `wbforward.upstream_headers` 统一
+    # 带到每一次出站请求上，见 requestctx 的说明。
+    requestctx.set_preferred_account(key.get('preferred_account'))
     return key, ip, None
 
 

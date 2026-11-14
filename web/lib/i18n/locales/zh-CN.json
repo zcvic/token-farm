@@ -779,6 +779,13 @@
     "upstreamHint": "绑定后，这把密钥的请求只走该上游的账号池；未绑定 = 默认上游",
     "upstreamTag": "上游：{name}",
     "upstreamDisabledSuffix": "（已停用）",
+    "preferredAccountLabel": "优先账号（积分）",
+    "preferredAccountNone": "不指定（按账号池自动选）",
+    "preferredAccountHint": "设置后，这把密钥的请求会优先使用该账号的积分；该账号冷却、被停用或已满时自动回落到账号池。",
+    "preferredAccountTag": "优先：{uid}",
+    "preferredAccountUnlisted": "已指定（不在当前列表）：{uid}",
+    "preferredAccountPlaceholder": "账号 UID（留空 = 不指定）",
+    "preferredAccountLoadFailed": "读不到该分组的账号列表，可直接填写账号 UID；填错只会在选号时自动回落。",
     "upstreamsFailed": "上游列表没取到 —— 新建密钥的「绑定上游」只会显示默认项，先重试再建。"
   },
   "upstreams": {

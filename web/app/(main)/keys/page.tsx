@@ -5,9 +5,9 @@ import {KeyRound, Plus, Trash2, Ban, CircleCheck, Pencil, RotateCcw, Copy, Check
 import {useHeartbeat} from '@/lib/use-heartbeat';
 import {useAsyncAll} from '@/lib/use-async-data';
 import {notify} from '@/lib/toast';
-import {keyApi, upstreamsApi, errText} from '@/lib/api';
+import {keyApi, upstreamsApi, errText, accountApi} from '@/lib/api';
 import {BASE_PATH} from '@/lib/base-path';
-import type {ApiKey, KeyImportResult, KeyImportStatus, UpstreamEndpoint} from '@/lib/types';
+import type {Account, ApiKey, KeyImportResult, KeyImportStatus, UpstreamEndpoint} from '@/lib/types';
 import {copyText, fmtDateTime, fmtNumber} from '@/lib/format';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {PageSectionTabs} from '@/components/common/layout/PageSectionTabs';
@@ -69,6 +69,8 @@ interface FormState {
   realm: Realm | '';
   /** 绑定的上游（账号池分组）：null = 默认上游。见 server/upstreamsvc.py */
   upstream_id: number | null;
+  /** 优先消耗哪个账号的积分（uid）；'' = 不指定，按账号池自动选 */
+  preferredAccount: string;
 }
 
 const emptyForm: FormState = {
@@ -82,6 +84,7 @@ const emptyForm: FormState = {
   quotaCredit: '0',
   realm: 'cn',
   upstream_id: null,
+  preferredAccount: '',
 };
 
 function toLines(v: string): string[] {
@@ -144,6 +147,16 @@ export default function KeysPage() {
   const [editing, setEditing] = useState<ApiKey | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [busy, setBusy] = useState(false);
+  /**
+   * 弹窗里「优先账号」下拉的候选：来自**密钥绑定分组的账号池**。
+   *
+   * 为什么不在首屏一起取：账号列表要问上游实例（每个分组一次），而绝大多数
+   * 密钥并不设优先账号。等到弹窗打开、且用户真的看到这个字段时再取，既不拖慢
+   * 首屏，也不会因为某个分组的上游暂时不可达而让整页错误。
+   */
+  const [accountOptions, setAccountOptions] = useState<Account[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountsFailed, setAccountsFailed] = useState(false);
   const [issued, setIssued] = useState<string | null>(null);
   /**
    * 「再复制一次」：正在查看的密钥（含明文）与正在请求的那一行。
@@ -221,6 +234,55 @@ export default function KeysPage() {
     }
   }, [unknownModels]);
 
+  /**
+   * 取「优先账号」候选。依赖 `formOpen` 与 `form.upstream_id`：
+   *   · 关着弹窗不发请求（没必要为一次编辑之外的浏览打上游）；
+   *   · 换分组必须重取——A 组的 uid 在 B 组没有意义，拿着旧选项会让用户
+   *     选到一个「看起来可选、实际永远匹配不到」的账号。
+   */
+  useEffect(() => {
+    if (!formOpen) return;
+    let cancelled = false;
+    setAccountsLoading(true);
+    setAccountsFailed(false);
+    accountApi.list(form.upstream_id)
+      .then((r) => {
+        if (!cancelled) setAccountOptions(r.accounts ?? []);
+      })
+      .catch(() => {
+        // 取不到就退回手填 uid：不能因为一次读账号失败就把这个字段变成
+        // 「只能用当前选项」——那样用户会以为功能不存在。
+        if (!cancelled) {
+          setAccountOptions([]);
+          setAccountsFailed(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAccountsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [formOpen, form.upstream_id]);
+
+  /**
+   * 「优先账号」候选按密钥的版本过滤：账号归属某个版本，跨版本的 uid 上游选号时
+   * 会被直接跳过——那和「没设置」在结果上一样，用户却以为自己设成功了。
+   * 密钥「不限制」时两版都可选，保持全量；账号自身没写版本的老数据也保留，
+   * 免得一次筛选把可选清单清空。
+   */
+  const preferredAccountOptions = form.realm
+    ? accountOptions.filter((a) => !a.realm || a.realm === form.realm)
+    : accountOptions;
+
+  /**
+   * 退回手填 uid 的时机：清单根本取不到（读失败），或该分组里没有可列账号且当前
+   * 也没设值。**已经设了值**时仍用下拉——否则一个跨版本的旧值会变成输入框，
+   * 看起来像「你手填了什么」，而用户当初是从列表里选的。
+   */
+  const preferredAccountManual =
+    accountsFailed || (preferredAccountOptions.length === 0 && !form.preferredAccount);
+
   // 密钥状态可能被下游调用改变（配额用尽、过期），心跳刷新保持同步。
   // 走 reload（刷新模式）：只把新数据换上去，**不**重走首屏流程——否则骨架会每
   // 60 秒闪一次。
@@ -230,6 +292,19 @@ export default function KeysPage() {
   function upstreamName(id: number): string {
     const hit = upstreams.find((u) => u.id === id);
     return hit ? hit.name : `#${id}`;
+  }
+
+  /**
+   * 换版本时清掉「优先账号」：uid 只在所属版本里有效，跨版本的号在上游选号时
+   * 会被直接跳过（结果等于没设）。切到「不限制」时两版都能调，保留原值。
+   * 与上面「换分组清空」同一条理由，只是分组换成版本。
+   */
+  function changeRealm(next: FormState['realm']) {
+    setForm((f) => ({
+      ...f,
+      realm: next,
+      preferredAccount: next === '' || next === f.realm ? f.preferredAccount : '',
+    }));
   }
 
   function openCreate() {
@@ -254,6 +329,7 @@ export default function KeysPage() {
       quotaCredit: String(k.quota_credit ?? 0),
       realm: k.realm || '',
       upstream_id: k.upstream_id ?? null,
+      preferredAccount: k.preferred_account || '',
     });
     setUnknownModels(null);
     setFormOpen(true);
@@ -290,6 +366,9 @@ export default function KeysPage() {
         // 绑定上游（多上游 / 分组隔离）：null = 默认上游，照传——
         // 后端以它区分「显式改回默认上游」与「本次没提交该字段」（PATCH 语义）。
         upstream_id: form.upstream_id,
+        // 优先账号：'' = 不指定（照传，编辑时才能清除已有设置；后端同样按
+        // 「字段是否出现」区分清除与未提交）。
+        preferred_account: form.preferredAccount.trim(),
       };
 
       // 新建：填了天数才设过期（0 = 永不过期，不下发 expires_at）
@@ -648,13 +727,27 @@ export default function KeysPage() {
                 <TableRow key={k.id} className="border-b border-border/40">
                   <TableCell className="pl-4 text-sm font-medium">
                     <div>{k.name}</div>
-                    {/* 只标「绑定了上游」的行：默认上游是绝大多数，每行都标等于没标，
-                        有值才说明这把钥匙走的是另一个账号池（见 server/upstreamsvc.py） */}
-                    {k.upstream_id ? (
-                      <div className="mt-0.5">
-                        <Badge variant="secondary" className="rounded-full text-[10px]">
-                          {t('keys.upstreamTag', {name: upstreamName(k.upstream_id)})}
-                        </Badge>
+                    {/* 只标「绑定了上游 / 指定了优先账号」的行：默认上游是绝大多数，
+                        每行都标等于没标，有值才说明这把钥匙走的是另一个账号池
+                        （见 server/upstreamsvc.py）或会先花某个号的积分 */}
+                    {k.upstream_id || k.preferred_account ? (
+                      <div className="mt-0.5 flex flex-wrap gap-1">
+                        {k.upstream_id ? (
+                          <Badge variant="secondary" className="rounded-full text-[10px]">
+                            {t('keys.upstreamTag', {name: upstreamName(k.upstream_id)})}
+                          </Badge>
+                        ) : null}
+                        {k.preferred_account ? (
+                          <Badge
+                            variant="secondary"
+                            className="rounded-full text-[10px]"
+                            title={k.preferred_account}
+                          >
+                            {t('keys.preferredAccountTag', {
+                              uid: k.preferred_account.slice(0, 8),
+                            })}
+                          </Badge>
+                        ) : null}
                       </div>
                     ) : null}
                   </TableCell>
@@ -954,7 +1047,7 @@ export default function KeysPage() {
                   <>
                     <Select
                       value={form.realm || '__all__'}
-                      onValueChange={(v) => setForm({...form, realm: (v === '__all__' ? '' : v) as FormState['realm']})}
+                      onValueChange={(v) => changeRealm((v === '__all__' ? '' : v) as FormState['realm'])}
                     >
                       <SelectTrigger aria-label={t('keys.realm')}>
                         <SelectValue />
@@ -1009,7 +1102,7 @@ export default function KeysPage() {
                         id="key-realm-unlimited"
                         checked={form.realm === ''}
                         disabled={!isAdmin}
-                        onCheckedChange={(on) => setForm({...form, realm: on ? '' : workbuddyRealm})}
+                        onCheckedChange={(on) => changeRealm(on ? '' : workbuddyRealm)}
                       />
                       {t('keys.realmAll')}
                     </label>
@@ -1023,7 +1116,13 @@ export default function KeysPage() {
                 <Select
                   value={form.upstream_id == null ? '__default__' : String(form.upstream_id)}
                   onValueChange={(v) =>
-                    setForm({...form, upstream_id: v === '__default__' ? null : Number(v)})
+                    setForm({
+                      ...form,
+                      upstream_id: v === '__default__' ? null : Number(v),
+                      // 换了分组就清掉优先账号：uid 是**分组内**的身份，
+                      // 旧分组的号在新池里匹配不到，留着只会静默失效。
+                      preferredAccount: '',
+                    })
                   }
                 >
                   <SelectTrigger aria-label={t('keys.upstreamLabel')}>
@@ -1042,6 +1141,61 @@ export default function KeysPage() {
                 </Select>
                 <p className="text-[11px] leading-4 text-muted-foreground">
                   {t('keys.upstreamHint')}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">
+                  {t('keys.preferredAccountLabel')}
+                </Label>
+                {/* 优先账号：请求先花这个号的积分。账号清单按**上面选的分组**取，
+                    因为 uid 是分组内的身份；换分组或换版本时上面会顺手清空这里。 */}
+                {accountsLoading ? (
+                  <div className="flex h-9 items-center rounded-md border px-3 text-xs text-muted-foreground">
+                    {t('common.loading')}
+                  </div>
+                ) : preferredAccountManual ? (
+                  // 读不到账号目录（该分组没有本地 auth 目录 / 上游暂不可达）或
+                  // 该分组没有可列账号时退回手填：功能仍然可用，只是没有可选项。
+                  <Input
+                    value={form.preferredAccount}
+                    placeholder={t('keys.preferredAccountPlaceholder')}
+                    onChange={(e) => setForm({...form, preferredAccount: e.target.value})}
+                  />
+                ) : (
+                  <Select
+                    value={form.preferredAccount || '__none__'}
+                    onValueChange={(v) =>
+                      setForm({...form, preferredAccount: v === '__none__' ? '' : v})
+                    }
+                  >
+                    <SelectTrigger aria-label={t('keys.preferredAccountLabel')}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">{t('keys.preferredAccountNone')}</SelectItem>
+                      {/* 当前值不在候选里（账号被删 / 换过分组 / 版本不符）时也要能
+                          显示出来，否则下拉会显示成「不指定」，用户会以为自己没设过。 */}
+                      {form.preferredAccount &&
+                      !preferredAccountOptions.some((a) => a.uid === form.preferredAccount) ? (
+                        <SelectItem value={form.preferredAccount}>
+                          {t('keys.preferredAccountUnlisted', {
+                            uid: form.preferredAccount.slice(0, 8),
+                          })}
+                        </SelectItem>
+                      ) : null}
+                      {preferredAccountOptions.map((a) => (
+                        <SelectItem key={a.uid} value={a.uid}>
+                          {a.nickname || a.uid}
+                          {a.nickname ? ` · ${a.uid.slice(0, 8)}` : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  {accountsFailed
+                    ? t('keys.preferredAccountLoadFailed')
+                    : t('keys.preferredAccountHint')}
                 </p>
               </div>
               <div className="space-y-1.5">

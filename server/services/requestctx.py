@@ -61,6 +61,37 @@ def current() -> str:
     return _current.get()
 
 
+# ── 密钥的「优先账号」────────────────────────────────────
+#
+# 一次请求里可能需要往**好几个**上游发子请求（组合成员、网关的多次尝试），
+# 而它们的转发头都由 `wbforward.upstream_headers` 构造。把「优先账号」放进
+# contextvar，就不必把 key 一路透传到每个调用点——漏传一处就会出现「主路径
+# 生效、组合路径不生效」这种只有用户能发现的漂移。
+#
+# 这个值来自已通过鉴权的密钥（不是客户端请求头），且只在本请求的上下文中
+# 存在；渲染成出站头之前再按 HTTP 头的可接受字符集过滤一遍，避免把坏数据
+# 变成 httpx 的编码异常（那会被报成「上游不可用」，误导排查方向）。
+PREFERRED_ACCOUNT_HEADER = 'X-Preferred-Account'
+_PREFERRED_ACCOUNT_MAX = 128
+
+_preferred_account: ContextVar[str] = ContextVar('preferred_account', default='')
+
+
+def set_preferred_account(uid: object) -> None:
+    """记录本请求应该优先消耗哪个上游账号的积分（空 / 非法 = 不指定）。"""
+    text = str(uid or '').strip()
+    if len(text) > _PREFERRED_ACCOUNT_MAX:
+        text = ''
+    elif text and not all(0x21 <= ord(ch) <= 0x7e for ch in text):
+        text = ''
+    _preferred_account.set(text)
+
+
+def preferred_account() -> str:
+    """本请求的优先账号 uid；没有指定时为空串。"""
+    return _preferred_account.get()
+
+
 class RequestIdMiddleware:
     """纯 ASGI 中间件：生成/透传 ID、写入响应头、供给 contextvar。"""
 

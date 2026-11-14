@@ -806,6 +806,13 @@
     "upstreamHint": "Once bound, this key only uses that upstream account pool; unbound = default upstream",
     "upstreamTag": "Upstream: {name}",
     "upstreamDisabledSuffix": " (disabled)",
+    "preferredAccountLabel": "Preferred account (credits)",
+    "preferredAccountNone": "None (automatic pool selection)",
+    "preferredAccountHint": "When set, requests from this key try this account first so its credits are spent first; if the account is cooling down, disabled or busy, requests fall back to the pool automatically.",
+    "preferredAccountTag": "Preferred: {uid}",
+    "preferredAccountUnlisted": "Set (not in this list): {uid}",
+    "preferredAccountPlaceholder": "Account UID (empty = none)",
+    "preferredAccountLoadFailed": "Could not load this group's accounts; enter the UID directly. A wrong UID simply falls back during pool selection.",
     "upstreamsFailed": "Could not load the upstream list — new keys will only offer the default upstream. Retry before creating one."
   },
   "upstreams": {

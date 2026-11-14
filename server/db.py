@@ -715,6 +715,16 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 存量密钥为空串 = 取不回明文：那一版只存哈希，界面上要说清「去重建一把」，
     # 而不是显示一个空密钥让人以为复制坏了。
     ('api_keys', 'key_plain', "TEXT NOT NULL DEFAULT ''"),
+    ('api_keys', 'key_plain', "TEXT NOT NULL DEFAULT ''"),
+    # 这把密钥**优先消耗**哪个账号的积分（账号 uid）。
+    #
+    # 空串 = 不指定，完全保持升级前的行为（由上游按余额/快过期/闲置加权选号）。
+    # 为什么存 uid 而不是账号文件名：文件名会随「手动停用」改后缀（.disabled），
+    # 而 uid 是账号身份本身；上游的选号入口（PickByUIDForModel）也只认 uid。
+    #
+    # **只是「优先」不是「只走」**：该账号冷却 / 被禁用 / 在途占满 / 该模型被限流
+    # 时，上游会静默回落到普通选号，否则一把密钥就能因为一个坏号而整体 503。
+    ('api_keys', 'preferred_account', "TEXT NOT NULL DEFAULT ''"),
     # 入站请求被拦的**原因**（issue #33）。
     #
     # 此前这张表只有一个 blocked 布尔：界面显示「已拦截」，但看不出是「没带

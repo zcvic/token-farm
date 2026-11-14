@@ -61,6 +61,18 @@ def _check_name(name: str | None) -> None:
         raise HTTPException(status_code=400, detail='密钥名称不能只有空格')
 
 
+def _check_preferred_account(value: object) -> None:
+    """校验「优先账号」uid 是否可安全放进转发头。
+
+    判据放在 keysvc（与写库时的归一化**同一份**实现）：路由再写一遍正则就是
+    第二份事实来源，改一处漏一处。这里只负责把 ValueError 翻成 400。
+    """
+    try:
+        keysvc._norm_preferred_account(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 class KeyIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     # 绑定的上游（多上游 / 分组隔离）：null / 0 / 省略 = 默认上游。
@@ -77,6 +89,9 @@ class KeyIn(BaseModel):
     # 版本归属：'' = 不限制（存量密钥的形态）。非 cn/global 的值由
     # keysvc._norm_realm 归一化成 ''——不报错，免得旧前端（不带该字段）被拒。
     realm: str = Field(default='', max_length=16)
+    # 优先消耗哪个账号的积分（账号 uid）。空 = 不指定，按账号池自动选。
+    # 只是「优先」：该账号不可用时上游会回落到普通选号，不会让密钥失败。
+    preferred_account: str = Field(default='', max_length=128)
 
 
 class KeyPatch(BaseModel):
@@ -91,6 +106,8 @@ class KeyPatch(BaseModel):
     quota: int | None = None
     quota_credit: float | None = None
     realm: str | None = None
+    # 显式传 null / '' = 清除优先账号（与 upstream_id / realm 同口径）。
+    preferred_account: str | None = Field(default=None, max_length=128)
 
 
 class WhitelistCheckIn(BaseModel):
@@ -146,6 +163,7 @@ def create_key(body: KeyIn, request: Request,
     _check_name(body.name)
     _check_ip_allowlist(body.ip_allowlist)
     _check_upstream(body.upstream_id)
+    _check_preferred_account(body.preferred_account)
     created = keysvc.create_key(
         name=body.name,
         expires_at=body.expires_at,
@@ -156,6 +174,7 @@ def create_key(body: KeyIn, request: Request,
         realm=body.realm,
         quota_credit=body.quota_credit,
         upstream_id=body.upstream_id,
+        preferred_account=body.preferred_account,
     )
     # 密钥是拿额度用的凭证，发放必须留痕（含来源 IP）
     upstream_name = '默认上游'
@@ -177,6 +196,8 @@ def update_key(key_id: int, body: KeyPatch, user: dict = Depends(security.requir
         _check_ip_allowlist(patch['ip_allowlist'])
     if 'upstream_id' in patch:
         _check_upstream(patch['upstream_id'])
+    if 'preferred_account' in patch:
+        _check_preferred_account(patch['preferred_account'])
     updated = keysvc.update_key(key_id, patch)
     if not updated:
         raise HTTPException(status_code=404, detail='密钥不存在')
