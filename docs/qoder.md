@@ -54,14 +54,17 @@ cp -a /path/to/qoder2api-hub/accounts/. /path/to/token-farm/data/platforms/qoder
 
 ## 2. 配置
 
-只有两个可选环境变量，都有合理默认值：
+只有三个可选环境变量，都有合理默认值：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `QODER_TIMEOUT` | `300` | 推理读超时（秒）。长回答 / 推理模型需要更久 |
 | `QODER_MANAGE_TIMEOUT` | `30` | 账号管理接口超时（秒）。刷新凭据、设备登录轮询仍要打上游 |
+| `QD_CN_VPC_ENDPOINT` | 空 | 国内版企业 VPC 专属域：填实例名（如 `acme`）或 `acme.vpc.qoder.com.cn` / `acme-openapi.vpc.qoder.com.cn` / `acme-gateway.vpc.qoder.com.cn`；留空走公网 `qoder.com.cn`。配置无效时内置网关启动即报错（不会带着错域名打上游） |
 
-`docker-compose.yml` 已透传这两个变量；不写就用默认值。
+`docker-compose.yml` 已透传这三个变量；不写就用默认值。企业 VPC 的**按账号**
+覆盖（同一网关混用多个实例与公网账号）在账号 JSON 的 `vpcEndpoint` 字段里，
+token-farm 的账号页暂不提供编辑入口，需要时按上游文档改账号文件。
 
 ---
 
@@ -105,9 +108,9 @@ cp -a /path/to/qoder2api-hub/accounts/. /path/to/token-farm/data/platforms/qoder
 | 每日签到 | 今日已签 / 该账号不支持时返回「已跳过」，不算失败 |
 | 积分 / 额度 | 平时读已登记的 `credits` 快照；点「刷新」时查一次实时余额 |
 
-**能力差异**：Qoder 没有账号权重与强制冷却 API，账号页会自动隐藏权重列、
-权重 / 冷却按钮，以及「清除冷却」。这些不是静默失败——后端方法本身会返回
-明确的「不支持」。
+**能力差异**：Qoder 有账号权重（与 Trae / WorkBuddy 同一口径，`0` = 恢复默认
+1.0，只影响选号分摊），但**没有强制冷却 API**：账号页会隐藏冷却按钮与「清除
+冷却」。这不是静默失败——后端方法本身会返回明确的「不支持」。
 
 ### 自动签到与令牌续期
 
@@ -174,15 +177,22 @@ cp -a /path/to/qoder2api-hub/accounts/. /path/to/token-farm/data/platforms/qoder
 
 ## 5. 升级内置的协议层
 
-`_vendor/` 里的文件与上游**只差导入语句**（绝对导入 → 包内相对导入）。升级：
+`_vendor/` 里的文件与上游**只差导入语句**（绝对导入 → 包内相对导入），外加
+一处本地补丁：**账号权重**（`qoder_accounts.py` 的 `normalize_weight` /
+`selection_weight` / `Account.weight` / `AccountPool.set_weight` 与
+`qoder_proxy.py` 的 `POST /accounts/weight`）。升级：
 
 ```bash
 python server/platforms/qoder/tools/vendor_qoder.py --source /path/to/qoder2api-hub
+python server/platforms/qoder/tools/vendor_qoder.py --check   # 无残留绝对导入、能编译
 ```
 
 脚本会重新拷贝模块、改写导入、更新版本号与 commit，并校验没有残留的绝对导入。
-升级后请一起核对 `server/platforms/qoder/embedded.py`：上游 `main()` 里如果新增
-了必要的初始化步骤，这里也要补上（脚本会提醒）。
+**重新 vendor 会覆盖账号权重补丁**，落点见 `_vendor/README.md` 的「与上游的
+差异」；`server/tests/test_qoder_vendor.py` 会直接守住这条补丁（离线断言，
+不联网）。升级后请一起核对 `server/platforms/qoder/embedded.py`：上游 `main()`
+里如果新增了必要的初始化步骤（例如 VPC 配置校验、usage 目录迁移、保温线程），
+这里也要补上（脚本会提醒）。
 
 来源、版本与收录清单见 `server/platforms/qoder/_vendor/README.md`。
 

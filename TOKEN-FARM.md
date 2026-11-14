@@ -311,7 +311,7 @@ MANAGER_REPO = os.environ.get('WB_MANAGER_REPO') or 'zcvic/token-farm'
 
 ## 三、参考源与能力同步
 
-本仓库有两个参考源，**都只读、都不合并**：
+本仓库有两个 git 参考源，**都只读、都不合并**：
 
 | 远端 | 指向 | 关系 | 怎么用 |
 |---|---|---|---|
@@ -322,6 +322,19 @@ MANAGER_REPO = os.environ.get('WB_MANAGER_REPO') or 'zcvic/token-farm'
 不再从外部仓库 fetch / merge。面板侧新能力的参考来源是
 `misakano7545/workbuddy2api-panel`，同样只挑对本项目有益的提交，记录在
 `deploy/workbuddy-panel-ref.txt`。
+
+Qoder 的协议层也是第三方源码（`shuishuipingan/qoder2api-hub`，MIT），但它走的是
+**源码副本**：协议层原样放在 `server/platforms/qoder/_vendor/`，由内置网关在
+进程内拉起。它的升级不是 `git am` 补丁，而是整目录重新 vendor：
+
+```bash
+python server/platforms/qoder/tools/vendor_qoder.py --source /path/to/qoder2api-hub
+python server/platforms/qoder/tools/vendor_qoder.py --check
+```
+
+已核对的上游基线与每批取舍记录在 `deploy/qoder-ref.txt`。唯一需要重新应用的
+本地补丁是账号权重（落点见 `_vendor/README.md`），
+`server/tests/test_qoder_vendor.py` 会守住它。
 
 两边的共同点是：**都没有共享提交历史**，`git merge` / `git pull` 不成立 ——
 只能挑单个提交，导出成补丁再应用。流程与注意事项见

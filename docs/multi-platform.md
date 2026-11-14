@@ -911,9 +911,10 @@ Qoder 的协议包含 COSY 签名、设备指纹、OAuth 设备授权、模型�
 3. **双区口径翻译**。网关用 `cn` / `intl`，token-farm 统计用 `cn` / `global`；
    `mapping.db_realm()` 是唯一的翻译点。模型列表把上游条目**按区域各列一条**
    （`qodercn/` / `qodercom/`），双区同名模型因此出现两条。
-4. **能力开关**。Qoder 没有账号权重 / 强制冷却 API，也没有本机回环回调，所以
-   `supports_weight` / `supports_cooling` / `supports_login_callback` 都为
-   false，前端据此隐藏按钮，而不是让用户点下去才收到 400。
+4. **能力开关**。Qoder 有账号权重（与 Trae / WorkBuddy 同一口径，只影响选号
+   分摊），但没有强制冷却 API，也没有本机回环回调，所以
+   `supports_cooling` / `supports_login_callback` 为 false，前端据此隐藏按钮，
+   而不是让用户点下去才收到 400。
 5. **会话粘性由网关执行，键由适配器传**。真实选号在网关进程里，厂商自带的
    亲和有两种：消息前缀（`messages[:2]` 的哈希）与会话 id。前者在客户端每轮
    重排 system 消息时会漂移，且厂商**不认识** `prompt_cache_key`。所以

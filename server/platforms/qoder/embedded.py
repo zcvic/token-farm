@@ -144,6 +144,21 @@ def _boot() -> Runtime:
             f'Qoder 内置网关加载失败：{exc}', status=500,
             code='qoder_gateway_load_failed') from exc
 
+    # VPC 专属域是上游 1.9.6 起的能力：实例名 / 专属域推导错误时，账号池会在
+    # 出网前拒绝全部请求，报错还会散落在每个账号上。启动时先挡一次，给出
+    # 明确的配置错误（上游 main() 里也是同样的处理）。
+    try:
+        vpc_error = qoder_accounts.vpc_config_error()
+    except Exception as exc:  # noqa: BLE001 —— 版本差异 / 内部结构变化
+        vpc_error = str(exc)
+    if vpc_error:
+        raise PlatformError(
+            f'Qoder VPC 配置无效（QD_CN_VPC_ENDPOINT）：{vpc_error}；'
+            '填实例名（如 acme）或 acme.vpc.qoder.com.cn / '
+            'acme-openapi.vpc.qoder.com.cn / acme-gateway.vpc.qoder.com.cn，'
+            '不需要企业专属域时留空。',
+            status=500, code='qoder_vpc_config_invalid')
+
     api_key = secrets.token_urlsafe(32)
 
     # 面板口令：内置网关只监听回环，但同机其他进程也能访问。上游默认口令是

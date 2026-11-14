@@ -6,17 +6,17 @@
 
 | 项 | 值 |
 | --- | --- |
-| 上游版本 | `1.7.12` |
-| 上游 commit | `a59f89e60a6bc34b92d1ef08467618e1b78f136d` |
+| 上游版本 | `1.9.9` |
+| 上游 commit | `d0f4837c8f38c090f6d76baadc3da2c09f5c66c0` |
 | 许可 | MIT（见 `LICENSE`） |
-| 第三方依赖 | 无（纯标准库） |
+| 第三方依赖 | 无必装依赖（Pillow 可选：缺失时图片原样透传，不做压缩） |
 
 ## 收录的文件
 
 | 文件 | 作用 |
 | --- | --- |
 | `qoder_proxy.py` | 网关主体：请求体构造、COSY 签名调用、SSE 管线、OpenAI / Anthropic 出口 |
-| `qoder_accounts.py` | 账号池：凭据刷新、设备登录、PAT 导入、冷却与熔断 |
+| `qoder_accounts.py` | 账号池：凭据刷新、设备登录、PAT 导入、冷却与熔断、VPC 端点 |
 | `qoder_sign.py` | COSY 签名与本地凭据解密 |
 | `qoder_fingerprint.py` | 设备指纹派生 |
 | `qoder_catalog.py` | 双区模型目录（配合两个 `qoder_catalog_*.json`） |
@@ -24,13 +24,19 @@
 | `qoder_settings.py` | 账号目录下的 `settings.json`（护栏、面板会话、API Key） |
 | `qoder_pricing.py`、`qoder_session_cache.py`、`qoder_activity.py` | 计费 / 会话缓存 / 活动日志 |
 | `qoder_agents.py`、`qoder_anthropic.py`、`qoder_webtools.py` | Agent 配置、Anthropic 桥、联网工具 |
+| `qoder_images.py` | 内联图片预处理（Pillow 可选；缺失时原样透传） |
+| `qoder_cache.py` | 面板统计结果的有界缓存 |
+| `qoder_routing.py` | 分层路由 / 账号作用域（配置在 `accounts/admin/routing.json`） |
+| `qoder_admin.py` | 上游管理接口的分组 / 总览视图（内置网关的 `/settings/admin*` 用） |
+| `qoder_keepalive.py` | 会话缓存保温（`QD_CACHE_KEEPALIVE`，默认关闭） |
+| `qoder_logpaths.py` | 日志 / usage 路径解析与旧目录迁移 |
 | `qoder_scheduler.py`、`qoder_updater.py` | 上游的定时调度与自更新（token-farm 不使用，仅为满足导入） |
 | `baseprompt.json` | 官方请求体骨架 |
 | `qoder_catalog_cn.json`、`qoder_catalog_intl.json` | 双区模型目录快照 |
 
 ## 与上游的差异
 
-**只有导入语句**。上游把仓库目录当作脚本目录（在 `sys.path` 上），所以写成
+**导入语句**：上游把仓库目录当作脚本目录（在 `sys.path` 上），所以写成
 `import qoder_accounts`；这里改成包内相对导入：
 
 ```python
@@ -39,7 +45,19 @@ from qoder_sign import x, y    ->  from .qoder_sign import x, y
 ```
 
 `server/platforms/qoder/tools/vendor_qoder.py` 负责这件事，可以重复执行。
-业务逻辑、常量、错误文案与上游逐字节一致，方便对上游的修复做 diff。
+
+**账号权重（本地补丁）**：上游没有账号权重概念，token-farm 需要与
+Trae / WorkBuddy 同一口径的按账号权重（`0` = 未设置，等效 `1.0`）：
+
+- `qoder_accounts.py`：`WEIGHT_MIN` / `WEIGHT_MAX`、`normalize_weight()`、
+  `selection_weight()`、`Account.weight`（写进账号 JSON 与 `public()`），
+  加权选号在 `_weighted_pick()` / `_rotate_pick()`，写入入口是
+  `AccountPool.set_weight()`；没有账号设置权重时仍走原来的纯轮转。
+- `qoder_proxy.py`：`POST /accounts/weight` 路由。
+
+重新 vendor 会覆盖这两处，必须按上面的落点重新应用；
+`server/tests/test_qoder_vendor.py` 用离线断言守住它。除这两类差异外，业务
+逻辑、常量、错误文案与上游逐字节一致，方便对上游的修复做 diff。
 
 ## 升级
 

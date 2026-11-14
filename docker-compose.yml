@@ -93,6 +93,10 @@ services:
       # Qoder 内置网关：协议层跑在本进程里，不需要额外服务，只有两个超时（秒）
       QODER_TIMEOUT: ${QODER_TIMEOUT:-300}
       QODER_MANAGE_TIMEOUT: ${QODER_MANAGE_TIMEOUT:-30}
+      # 国内版企业 VPC 专属域（可选）：填实例名（如 acme）或
+      # acme.vpc.qoder.com.cn / acme-openapi.vpc.qoder.com.cn /
+      # acme-gateway.vpc.qoder.com.cn；留空 = 走公网 qoder.com.cn。
+      QD_CN_VPC_ENDPOINT: ${QD_CN_VPC_ENDPOINT:-}
     ports:
       # **只监听本机**：管理端必须藏在反向代理之后。
       # 若确需直接从别的机器访问，改成 "7864:7864"，但请先确保有 HTTPS 与访问控制——

@@ -1,0 +1,50 @@
+# 已人工核对过的 qoder2api-hub 提交 —— 本仓库 Qoder 适配层的协议事实来源
+#
+# 仓库：https://github.com/shuishuipingan/qoder2api-hub （MIT）
+# 形态：不是 fork，也没有共享历史。协议层以**源码副本**放在
+#       server/platforms/qoder/_vendor/，整目录升级：
+#
+#         python server/platforms/qoder/tools/vendor_qoder.py --source /path/to/qoder2api-hub
+#         python server/platforms/qoder/tools/vendor_qoder.py --check
+#
+# 本地对上游只保留一处逻辑补丁：账号权重（落点见 _vendor/README.md）。
+# 重新 vendor 后必须重新应用，server/tests/test_qoder_vendor.py 守着它。
+#
+# 记录方式：一次同步写一段；未同步的提交号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/workbuddy-panel-ref.txt 同一约定）。
+
+# ---- 2026-11 第一批：1.7.12 (a59f89e) → 1.9.9 (d0f4837)，43 个非 merge 提交
+#      基线是上次 vendor 的版本（1.7.12，2026-11-01）；本次整目录升级到
+#      2026-11-13 的 v1.9.9。协议层升级后 embedded.py 补了 VPC 配置校验，
+#      docker-compose / .env.example 透传 QD_CN_VPC_ENDPOINT。
+#      已取（按能力，不是按提交逐个 cherry-pick；副本是整文件覆盖）：
+#        · usage 帧顺序 / 回读轮不再吞 usage / 顶层 cached_tokens（#124 后续）
+#        · 工具调用：同帧 tool_calls、坏 JSON 修复、无名调用、并行 index 复用、
+#          伪 XML <tool_call> 回读、namespace/MCP 展开与回程还原
+#        · Anthropic：工具参数双重编码、丢失后的静默结束、thinking block 粒度
+#        · 会话身份：business.id / chat_record_id / begin_at 稳定化（#128），
+#          session_id 与「一次提问」解耦（#136，缓存命中率不再 98%↔0%）
+#        · 错误归类：排队 / 额度 / 每日上限统一 429，不再被下游判成 Key 无效
+#        · 首字超时改换账号；思考档位双向 clamp；结构化工具历史补 Kimi 原生通道
+#        · 额度：端点自动探测、构成（套餐内/资源包/SOTA/共享池）、SOTA 合计、
+#          仅共享额度账号、已用额度展示
+#        · chunked 请求体（Claude Code / undici 的大请求不再 400 messages required）
+#        · 内联图片预处理（Pillow 可选，缺失时原样透传）
+#        · 会话缓存保温（QD_CACHE_KEEPALIVE，默认关闭；token-farm 不启动该线程）
+#        · 安全审计（#131）：白名单回写、Web 工具绕过授权/不记账、保留 uid、
+#          匿名注销、SSRF 三条绕过
+#        · 企业 VPC 专属域（QD_CN_VPC_ENDPOINT）与账号级多实例端点
+#        · 模型目录：QoDuck（app 场景独有）、harness catalog、占位符模板
+#        · 签到：活动列表抖动重试、同人去重按已领收尾、调度器 fired 持久化
+#        · 生命周期：PID1 SIGTERM、Windows 独占绑定、监听重试不退回 reuse
+#      未取：
+#        · 面板 / 看板（dashboard.html、i18n/、qoder_admin.py 的 UI 路由、
+#          赞助入口、统计页视觉重构、登录转场动效）：token-farm 有自己的前端，
+#          副本里这些路由只是死代码（qoder_admin.py 因 qoder_proxy 模块级导入
+#          而必须一起 vendor）；
+#        · 上游自更新 / Dockerfile / 启动停止脚本 / CI / tests 目录：不属于
+#          协议层，token-farm 的发布链自己管理；
+#        · Docker 默认 PID1 与 compose 相关改动：token-farm 以 uvicorn 启动，
+#          不使用上游 main()；
+#        · 锚点提交：d0f4837c8f38c090f6d76baadc3da2c09f5c66c0（v1.9.9）
+#          上一次基线：a59f89e60a6bc34b92d1ef08467618e1b78f136d（v1.7.12）
