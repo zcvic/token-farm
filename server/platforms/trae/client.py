@@ -566,9 +566,14 @@ def normalize_effort(effort: object) -> str | None:
     return _EFFORT_LEVELS.get(low)
 
 
-def _attach_effort(payload: dict, body: dict, *, nested: bool = False) -> None:
-    """挂思考强度：raw chat 放 `parameters`，solo 是平铺字段。"""
-    if not config.TRAE_REASONING_EFFORT:
+def _attach_effort(payload: dict, body: dict, *, nested: bool = False,
+                   enabled: bool | None = None) -> None:
+    """挂思考强度：raw chat 放 `parameters`，solo 是平铺字段。
+
+    `enabled=None` 表示调用方没传（协议层被单独调用 / 测试），沿用
+    `TF_TRAE_REASONING_EFFORT`；面板保存过就以面板值为准。
+    """
+    if not (config.TRAE_REASONING_EFFORT if enabled is None else enabled):
         return
     level = normalize_effort(requested_effort(body))
     if not level:
@@ -1061,7 +1066,9 @@ def _inject_tool_hint(messages: list[dict], tools: list[dict]) -> list[dict]:
 
 
 def build_chat_body(model: str, messages: object, body: dict,
-                    *, session_id: str | None = None) -> dict:
+                    *, session_id: str | None = None,
+                    protocol_hint: bool | None = None,
+                    reasoning_effort: bool | None = None) -> dict:
     """构造 llm_raw_chat 请求体。
 
     只透传**实测不会触发 4001** 的采样参数；未在协议里记录的字段一律不发。
@@ -1069,13 +1076,17 @@ def build_chat_body(model: str, messages: object, body: dict,
     `session_id` 是「用量明细」的归属键：带上它，上游才会在这次请求结束后落一条
     按会话分组的扣费明细（见 `client.fetch_request_credit`）；不带则只累加账户
     总额，逐条实付就查不到了。
+
+    `protocol_hint` / `reasoning_effort` 是面板可调的两个协议开关；`None` 沿用
+    环境变量（`TF_TRAE_TOOL_PROTOCOL_HINT` / `TF_TRAE_REASONING_EFFORT`）。
     """
     model_name = str(model or '').strip()
     if not model_name:
         raise PlatformError('model 不能为空', status=400, code='invalid_model')
     tools = normalize_tools(body.get('tools'))
     messages_norm = normalize_messages(messages)
-    if tools and config.TRAE_TOOL_PROTOCOL_HINT:
+    hint = config.TRAE_TOOL_PROTOCOL_HINT if protocol_hint is None else protocol_hint
+    if tools and hint:
         messages_norm = _inject_tool_hint(messages_norm, tools)
     payload: dict[str, Any] = {
         'model_name': model_name,
@@ -1103,7 +1114,7 @@ def build_chat_body(model: str, messages: object, body: dict,
         parameters[key] = value
     if parameters:
         payload['parameters'] = parameters
-    _attach_effort(payload, body, nested=True)
+    _attach_effort(payload, body, nested=True, enabled=reasoning_effort)
     _attach_tools(payload, tools, body)
     return payload
 
@@ -1260,13 +1271,20 @@ def solo_headers(account: dict) -> dict[str, str]:
 
 
 def build_solo_body(model: str, messages: object, body: dict,
-                    *, session_id: str | None = None) -> dict:
+                    *, session_id: str | None = None,
+                    max_tokens: int | None = None,
+                    protocol_hint: bool | None = None,
+                    reasoning_effort: bool | None = None) -> dict:
     """构造 `llm_utils_chat` 请求体（`function=solo_work_lite`）。
 
     `config_name` 与 `model` 要同时给：上游按 `config_name` 找模型配置、
     按 `model` 计费，缺一个就是 4023 / 4001。
 
     `session_id` 与 IDE 通道同样作用：它是「用量明细」的归属键。
+
+    `max_tokens` 只是**默认值**（面板的 `solo_max_tokens`）：客户端显式传了
+    `max_tokens` / `max_completion_tokens` / `max_output_tokens` 时以客户端为准。
+    三个开关传 `None` 时沿用 `TF_TRAE_*` 环境变量。
     """
     model_name = str(model or '').strip()
     if not model_name:
@@ -1275,7 +1293,8 @@ def build_solo_body(model: str, messages: object, body: dict,
     # SOLO 与 IDE 通道对工具历史的处理不同：这里必须保留原生 tool_calls /
     # tool 回执，否则多轮工具链会在第二轮断掉（见 `normalize_solo_messages`）。
     messages_norm = normalize_solo_messages(messages)
-    if tools and config.TRAE_TOOL_PROTOCOL_HINT:
+    hint = config.TRAE_TOOL_PROTOCOL_HINT if protocol_hint is None else protocol_hint
+    if tools and hint:
         messages_norm = _inject_tool_hint(messages_norm, tools)
     payload: dict[str, Any] = {
         'messages': messages_norm,
@@ -1289,15 +1308,16 @@ def build_solo_body(model: str, messages: object, body: dict,
         payload['chat_session_id'] = str(session_id)
     # 思考 token 与正文共享输出预算。客户端不传时不能空着——空着走上游
     # 默认值，思考一长就只剩 reasoning，正文和工具调用全被挤掉。
-    max_tokens = (body.get('max_tokens')
-                  or body.get('max_completion_tokens')
-                  or body.get('max_output_tokens')
-                  or config.TRAE_SOLO_MAX_TOKENS)
+    budget = (body.get('max_tokens')
+              or body.get('max_completion_tokens')
+              or body.get('max_output_tokens')
+              or max_tokens
+              or config.TRAE_SOLO_MAX_TOKENS)
     try:
-        payload['max_tokens'] = int(max_tokens)
+        payload['max_tokens'] = int(budget)
     except (TypeError, ValueError):
-        payload['max_tokens'] = int(config.TRAE_SOLO_MAX_TOKENS)
-    _attach_effort(payload, body)
+        payload['max_tokens'] = int(max_tokens or config.TRAE_SOLO_MAX_TOKENS)
+    _attach_effort(payload, body, enabled=reasoning_effort)
     _attach_tools(payload, tools, body)
     return payload
 

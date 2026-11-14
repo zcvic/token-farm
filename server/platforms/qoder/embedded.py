@@ -65,6 +65,59 @@ class Runtime:
     usage_dir: str
 
 
+# 平台设置 → 内置网关读取的环境变量。这几个开关网关都是**每次请求现读**的
+# （不是 import 期常量），所以保存后立即生效；空串 = 不下发，回落到网关默认。
+# 取值与上游对齐：tool_echo_mode(strict/lenient)、anthropic_thinking(off/empty)、
+# structured_tool_history(auto/on/off)、image_transcode(auto/off)、web_tools(0/1)。
+_ENV_SETTINGS: dict[str, str] = {
+    'tool_echo_mode': 'QD_TOOL_ECHO_MODE',
+    'anthropic_thinking': 'QD_ANTHROPIC_THINKING',
+    'structured_tool_history': 'QD_STRUCTURED_TOOL_HISTORY',
+    'image_transcode': 'QD_IMAGE_TRANSCODE',
+    'web_tools': 'QD_WEB_TOOLS',
+}
+
+# 面板接管之前，这些变量各自是什么值（None = 原本就没有）。改回「网关默认」时
+# 按这里恢复，而不是无条件 `pop`：运维自己设的 QD_* 属于网关默认的一部分，
+# 面板只该覆盖它，不该在重启后把它抹掉。
+_ENV_ORIGINAL: dict[str, str | None] = {}
+
+
+def apply_runtime_settings(values: dict | None = None) -> dict[str, str]:
+    """把 Qoder 平台设置映射成内置网关读的环境变量。
+
+    只有**在面板里显式保存过**的开关才会下发（`values` 为空时现读库）：
+    没碰过的开关保持环境变量原样，运维自己设的 `QD_*` 继续生效。
+
+    返回实际下发的键值，测试与排查用。值改回「网关默认」（空串）时恢复成面板
+    接管前的样子，避免「先设过 lenient、后来改回默认」之后环境里还留着旧值。
+    """
+    from .. import settings as runtime_settings
+
+    if values is None:
+        values = runtime_settings.load('qoder')
+    applied: dict[str, str] = {}
+    for field, env in _ENV_SETTINGS.items():
+        if field not in values or not runtime_settings.configured('qoder', field):
+            continue
+        raw = values[field]
+        if isinstance(raw, bool):
+            text = '1' if raw else '0'
+        else:
+            text = str(raw or '').strip().lower()
+        if text:
+            _ENV_ORIGINAL.setdefault(env, os.environ.get(env))
+            os.environ[env] = text
+            applied[env] = text
+        elif env in _ENV_ORIGINAL:
+            original = _ENV_ORIGINAL.pop(env)
+            if original is None:
+                os.environ.pop(env, None)
+            else:
+                os.environ[env] = original
+    return applied
+
+
 def data_dir() -> Path:
     """Qoder 的持久化目录：`<DATA_DIR>/platforms/qoder`。"""
     path = config.DATA_DIR / 'platforms' / 'qoder'
@@ -135,6 +188,13 @@ def _boot() -> Runtime:
     # 时才读环境变量；在导入之前设好，避免把状态写进 _vendor/ 源码目录。
     os.environ['ACCOUNTS_DIR'] = str(accounts)
     os.environ['QD_PROXY_USAGE_DIR'] = str(usage)
+    # 协议兼容开关（工具残片 / thinking / 结构化历史 / 图片 / Web 工具）：
+    # 网关每次请求现读环境变量，这里先按库里的设置灌一遍；保存时由适配器的
+    # `apply_runtime_settings()` 再刷一次，所以改完不用重启内置网关。
+    try:
+        apply_runtime_settings()
+    except Exception as exc:  # noqa: BLE001 —— 一条坏设置不该挡住网关启动
+        logger.warning('qoder: runtime settings apply failed: %s', exc)
 
     try:
         from ._vendor import qoder_accounts, qoder_settings

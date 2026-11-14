@@ -2149,6 +2149,37 @@ export interface PlatformUsage {
  *
  * 不做账号级推理并发——上游没有这个字段，而账号一多，每号一个数字等于没有上限。
  */
+
+/** 数值型运行参数：与后端 `platforms/settings.py` 的 `_INT_FIELDS` 同名同口径。 */
+export type PlatformNumericField =
+  | 'request_timeout' | 'idle_timeout' | 'max_accounts_try'
+  | 'session_affinity_ttl'
+  // Trae：模型目录缓存 / 刷新退避
+  | 'catalog_ttl' | 'catalog_retry_ttl' | 'catalog_timeout'
+  | 'catalog_backoff_base' | 'catalog_backoff_max'
+  // Trae：积分查询
+  | 'credits_ttl' | 'credits_timeout'
+  // Trae：429 / 5xx 冷却（0 = 旧行为：直接上抛）
+  | 'cooldown_429' | 'cooldown_5xx'
+  // Trae：SOLO 通道的默认输出预算
+  | 'solo_max_tokens';
+
+/** 布尔开关：会话 / 回写 / 本地 Web 工具 + Trae 的协议兼容开关。 */
+export type PlatformSwitchField =
+  | 'session_affinity' | 'desktop_sync' | 'web_tools'
+  | 'native_tools' | 'text_tool_rescue' | 'text_tool_tags'
+  | 'tool_protocol_hint' | 'degenerate_call_error' | 'rescue_tail_strict'
+  | 'reasoning_effort' | 'reasoning_as_content'
+  | 'empty_output_error' | 'strict_stream_end';
+
+/** 枚举型开关：空串统一表示「跟随上游 / 网关默认」。 */
+export type PlatformEnumField =
+  | 'tool_echo_mode' | 'anthropic_thinking' | 'structured_tool_history'
+  | 'image_transcode' | 'credit_meter';
+
+export type PlatformSettingField =
+  | PlatformNumericField | PlatformSwitchField | PlatformEnumField;
+
 export interface PlatformSettings {
   platform: string;
   max_in_flight: number;
@@ -2177,17 +2208,58 @@ export interface PlatformSettings {
   session_affinity_ttl: number;
   /** 刷新令牌后是否写回本机客户端（仅 Trae，默认开启） */
   desktop_sync: boolean;
+  /** 模型目录缓存时长（秒，仅 Trae，默认 6 小时） */
+  catalog_ttl: number;
+  /** 目录刷新失败后多久不再尝试（秒，默认 10 分钟） */
+  catalog_retry_ttl: number;
+  /** 首次隐式拉取目录的超时（秒，默认 10） */
+  catalog_timeout: number;
+  /** 目录刷新失败的指数退避起点 / 封顶（秒） */
+  catalog_backoff_base: number;
+  catalog_backoff_max: number;
+  /** 账号积分缓存（秒，默认 60）与查询超时（秒，默认 20） */
+  credits_ttl: number;
+  credits_timeout: number;
+  /** 429 / 5xx 时冻结账号的秒数（0 = 不冻结、直接上抛，默认 0） */
+  cooldown_429: number;
+  cooldown_5xx: number;
+  /** SOLO 通道的默认输出预算（token；客户端显式传 max_tokens 时以客户端为准） */
+  solo_max_tokens: number;
+  /**
+   * 实扣积分口径：空串 = 不计量，`delta` = 前后累计求差，`detail` = 按会话明细。
+   * 未保存过时跟随 `TF_TRAE_CREDIT_METER`。
+   */
+  credit_meter: string;
+  /**
+   * Trae 协议兼容开关（原先只能靠 `TF_TRAE_*` 环境变量改）。未保存过时回显
+   * 环境变量的现值；保存过就以面板为准。
+   */
+  native_tools: boolean;
+  text_tool_rescue: boolean;
+  text_tool_tags: boolean;
+  tool_protocol_hint: boolean;
+  degenerate_call_error: boolean;
+  rescue_tail_strict: boolean;
+  reasoning_effort: boolean;
+  reasoning_as_content: boolean;
+  empty_output_error: boolean;
+  strict_stream_end: boolean;
+  /**
+   * Qoder 内置网关的协议兼容开关：空串 = 跟随网关默认。
+   * 这些值由网关**每次请求现读**，保存后立即生效。
+   */
+  tool_echo_mode: string;
+  anthropic_thinking: string;
+  structured_tool_history: string;
+  image_transcode: string;
+  /** 本地 Web 工具（仅 Qoder，默认关闭）：唯一由模型驱动出网的能力 */
+  web_tools: boolean;
+  /** 枚举字段的可选值（含空串 = 跟随默认） */
+  enum_choices?: Partial<Record<PlatformEnumField, string[]>>;
   /** 以上数值字段的可填范围 */
-  runtime_limits: Record<
-    'request_timeout' | 'idle_timeout' | 'max_accounts_try' | 'session_affinity_ttl',
-    {min: number; max: number}
-  >;
+  runtime_limits: Record<PlatformNumericField, {min: number; max: number}>;
   /** 当前平台真正支持的字段；不支持的不要显示，而不是让用户点了才收到 400 */
-  capabilities: Record<
-    'request_timeout' | 'idle_timeout' | 'max_accounts_try'
-    | 'session_affinity' | 'session_affinity_ttl' | 'desktop_sync',
-    boolean
-  >;
+  capabilities: Record<PlatformSettingField, boolean>;
 }
 
 /** 跨平台模型目录里的一项（一个平台一份）。 */

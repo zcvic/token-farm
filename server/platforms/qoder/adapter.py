@@ -308,6 +308,15 @@ class QoderAdapter(PlatformAdapter):
             raw = self._require(str(account_id or ''))
         return mapping.public_account(raw)
 
+    def apply_runtime_settings(self, values: dict | None = None) -> None:
+        """把平台设置映射成内置网关读的环境变量（协议兼容开关）。
+
+        由 `/api/platforms/{name}/settings` 的保存路径调用：网关在**每次请求**
+        现读这些变量，所以保存后立即生效，不用重启内置网关。不传 `values`
+        时现读一遍库，与启动路径同一口径。
+        """
+        embedded.apply_runtime_settings(values)
+
     def set_account_disabled(self, account_id: str, disabled: bool,
                              reason: str = '') -> dict:
         raw = self.client.set_enabled(str(account_id or ''), not bool(disabled))

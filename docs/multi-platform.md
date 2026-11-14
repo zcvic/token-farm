@@ -216,6 +216,28 @@ registry.register(FooAdapter())
   没新数据就中止）同样按平台保存；Trae 另有 `max_accounts_try`（单次对话最多
   试几个账号）与 `desktop_sync`（刷新令牌后是否写回本机客户端）。这些值默认
   沿用适配器原来的常量，保存后下一次请求立即生效，不需要重启。
+- **缓存与冷却**（Trae）：模型目录缓存 `catalog_ttl`（默认 6 小时）、目录失败
+  冷却 `catalog_retry_ttl`（默认 10 分钟）、隐式拉取超时 `catalog_timeout`
+  （默认 10 秒）、刷新退避的起点 / 封顶 `catalog_backoff_base` /
+  `catalog_backoff_max`（默认 30 秒 / 30 分钟）、积分缓存 `credits_ttl`
+  （默认 60 秒）与积分查询超时 `credits_timeout`（默认 20 秒）。
+  `cooldown_429` / `cooldown_5xx` 是 429 / 5xx 时冻结账号的秒数，**默认 0**：
+  维持改动前的「直接上抛、不冻结也不换号」，只有大于 0 才启用强制冷却；
+  `4023 model is unknown` 是模型走错通道，永不冻结账号。
+- **输出与计量**（Trae）：`solo_max_tokens` 是 SOLO 通道客户端没传
+  `max_tokens` 时的默认预算（思考与正文共享）；`credit_meter` 选实扣积分口径
+  （不计量 / 累计差值 / 会话明细）。这两项的默认值仍实时跟随
+  `TF_TRAE_SOLO_MAX_TOKENS` 与 `TF_TRAE_CREDIT_METER`——**环境变量照常生效**，
+  只有面板显式保存过才以库里的值为准。
+- **Trae 协议开关**：原先只能用 `TF_TRAE_*` 环境变量改的十个兼容开关（原生
+  工具透传、正文 / 标签调用还原、工具协议提示、退化调用判错、尾部规则、思考
+  强度透传、思考内容兜底、空产出判错、严格结束判据）现在也在同一张表单里，
+  同样「未保存跟随环境变量、保存后以面板为准」，改完立即生效。
+- **协议兼容开关**（Qoder）：内置网关的工具残片收尾 / Anthropic 思考块 /
+  结构化工具历史 / 图片预处理 / 本地 Web 工具在同一张表单的「协议兼容」里，
+  默认「网关默认」= 与改动前完全一致。网关每次请求现读，保存即生效，不用重启
+  内置网关；本地 Web 工具是唯一由模型驱动出网的能力，默认关闭。详见
+  [`docs/qoder.md`](qoder.md) 的「协议兼容开关」。
 
 三种状态都只写平台自己的账号文件（`data/platforms/<平台>/accounts/*.json`），
 不会改动 WorkBuddy 的 `auths/`，也不会删除凭据。

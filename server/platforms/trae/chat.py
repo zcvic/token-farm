@@ -32,6 +32,15 @@ def new_id(prefix: str = 'chatcmpl') -> str:
     return f'{prefix}-{uuid.uuid4().hex[:24]}'
 
 
+def _flag(override: bool | None, default: bool) -> bool:
+    """调用方显式传了布尔就用它，否则沿用环境变量（`config.TRAE_*`）。
+
+    协议层的收尾开关既可能来自面板（适配器把 `protocol_switches` 传下来），
+    也可能来自直接调用本模块的旧代码 / 测试——后者不看数据库，必须保持旧行为。
+    """
+    return default if override is None else bool(override)
+
+
 def _pick_int(payload: dict, *names: str) -> int | None:
     for name in names:
         value = payload.get(name)
@@ -281,7 +290,10 @@ async def translate(events: AsyncIterator[tuple[str, Any]], *, model: str,
                     reasoning_as_content: bool = True,
                     text_tool_rescue: bool = True,
                     tool_names: object = (),
-                    strict_tail: bool = True) -> AsyncIterator[dict]:
+                    strict_tail: bool = True,
+                    degenerate_error: bool | None = None,
+                    strict_end: bool | None = None,
+                    empty_output_error: bool | None = None) -> AsyncIterator[dict]:
     """把 Trae 事件流翻译成 OpenAI chunk 流。
 
     `state` 由调用方持有，流结束后从这里读 usage / 错误 / 首字时间。
@@ -297,7 +309,14 @@ async def translate(events: AsyncIterator[tuple[str, Any]], *, model: str,
 
     `tool_names` 是客户端本轮声明的工具名：给了才启用**标签形态**的还原
     （`<execute code="...">`），并且只在标签能对上已声明工具时才动手。
+
+    `degenerate_error` / `strict_end` / `empty_output_error` 是面板可调的三个
+    收尾开关（见 `platforms/settings.py` 的 `_PROTOCOL_BOOLS`）。传 `None`
+    表示「沿用环境变量默认」，保持协议层被单独调用（含测试）时的旧行为。
     """
+    degenerate_error = _flag(degenerate_error, config.TRAE_DEGENERATE_CALL_ERROR)
+    strict_end = _flag(strict_end, config.TRAE_STRICT_STREAM_END)
+    empty_output_error = _flag(empty_output_error, config.TRAE_EMPTY_OUTPUT_ERROR)
     chunk_id = new_id()
     created = int(time.time())
     yield _delta_chunk(chunk_id, created, model, delta={'role': 'assistant'})
@@ -393,7 +412,7 @@ async def translate(events: AsyncIterator[tuple[str, Any]], *, model: str,
     # 客户端把它当成完整回复，Agent 循环静默停住；这里改成错误收尾。
     degenerate = False
     if (state.error is None and not saw_tools and text_tool_rescue
-            and config.TRAE_DEGENERATE_CALL_ERROR
+            and degenerate_error
             and (sniffer.degenerate
                  or text_tools.is_degenerate_call(''.join(raw_parts), tool_names))):
         degenerate = True
@@ -403,7 +422,7 @@ async def translate(events: AsyncIterator[tuple[str, Any]], *, model: str,
     # 上游没给 done 就断流（代理重置 / 连接被掐 / 上游提前关闭）不能伪装成
     # 正常结束：客户端会当成一条完整回复，用户看到的就是「说到一半没了」。
     truncated = False
-    if state.error is None and not state.saw_done and config.TRAE_STRICT_STREAM_END:
+    if state.error is None and not state.saw_done and strict_end:
         truncated = True
         state.error = '上游流提前结束（未收到 done 帧）'
 
@@ -433,10 +452,10 @@ async def translate(events: AsyncIterator[tuple[str, Any]], *, model: str,
     # 把它当成「模型答完了」，Agent 循环静默停住；这里改成明确错误。
     empty_output = False
     if (state.error is None and not state.saw_content and not saw_tools
-            and config.TRAE_EMPTY_OUTPUT_ERROR
+            and empty_output_error
             # 正文还原把整段文字当脚手架吞掉、但退化判错被显式关掉时，
             # 退回旧行为（空正文 + stop），别让新开关堵死原来的退路。
-            and not (raw_parts and not config.TRAE_DEGENERATE_CALL_ERROR)):
+            and not (raw_parts and not degenerate_error)):
         empty_output = True
         state.error = (
             '模型只返回了思考内容，没有正文或工具调用；本轮已中止，请重试'
@@ -474,7 +493,10 @@ async def aggregate(events: AsyncIterator[tuple[str, Any]], *, model: str,
                     reasoning_as_content: bool = True,
                     text_tool_rescue: bool = True,
                     tool_names: object = (),
-                    strict_tail: bool = True) -> dict:
+                    strict_tail: bool = True,
+                    degenerate_error: bool | None = None,
+                    strict_end: bool | None = None,
+                    empty_output_error: bool | None = None) -> dict:
     """把 Trae 事件流聚合成一个 OpenAI `chat.completion`。
 
     `text_tool_rescue` 与 `translate` 同义：正文里写出来的调用还原成
@@ -482,7 +504,13 @@ async def aggregate(events: AsyncIterator[tuple[str, Any]], *, model: str,
     整轮只剩空标签/半截调用时抛 `PlatformError`（502），不返回空正文 + `stop`。
 
     `tool_names` 与 `translate` 同义：标签形态的白名单。
+
+    `degenerate_error` / `strict_end` / `empty_output_error` 与 `translate` 同义：
+    `None` = 沿用环境变量，保持直接调用本模块时的旧行为。
     """
+    degenerate_error = _flag(degenerate_error, config.TRAE_DEGENERATE_CALL_ERROR)
+    strict_end = _flag(strict_end, config.TRAE_STRICT_STREAM_END)
+    empty_output_error = _flag(empty_output_error, config.TRAE_EMPTY_OUTPUT_ERROR)
     content: list[str] = []
     reasoning: list[str] = []
     merged: dict[int, dict] = {}
@@ -522,7 +550,7 @@ async def aggregate(events: AsyncIterator[tuple[str, Any]], *, model: str,
             break
 
     truncated = False
-    if state.error is None and not state.saw_done and config.TRAE_STRICT_STREAM_END:
+    if state.error is None and not state.saw_done and strict_end:
         truncated = True
         state.error = '上游流提前结束（未收到 done 帧）'
 
@@ -561,7 +589,7 @@ async def aggregate(events: AsyncIterator[tuple[str, Any]], *, model: str,
                 raise PlatformError(
                     '工具调用参数被截断（不是合法 JSON），本轮已中止，请重试',
                     status=502, code='truncated_tool_call')
-    if (text_tool_rescue and config.TRAE_DEGENERATE_CALL_ERROR and not tools
+    if (text_tool_rescue and degenerate_error and not tools
             and not state.error
             and text_tools.is_degenerate_call(raw_body, tool_names)):
         raise PlatformError(
@@ -578,8 +606,8 @@ async def aggregate(events: AsyncIterator[tuple[str, Any]], *, model: str,
 
     # 与流式同口径：空产出不能伪装成正常结束（客户端会静默停住）。
     if (not body and not tools and not state.error
-            and config.TRAE_EMPTY_OUTPUT_ERROR
-            and not (raw_body and not config.TRAE_DEGENERATE_CALL_ERROR)):
+            and empty_output_error
+            and not (raw_body and not degenerate_error)):
         only_thinking = bool(thinking.strip())
         raise PlatformError(
             '模型只返回了思考内容，没有正文或工具调用；本轮已中止，请重试'

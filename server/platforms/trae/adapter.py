@@ -32,13 +32,8 @@ SETTING_MODELS = 'platforms.trae.models'
 SETTING_MODELS_ATTEMPT = 'platforms.trae.models_attempt'
 # 历史用量版本归属的一次性回填标记（见 backfill_realm_stats）。
 SETTING_REALM_BACKFILL = 'platforms.trae.realm_backfill_done'
-_TTL = 6 * 3600              # 目录缓存 6 小时
-_IMPLICIT_TTL = 600          # 隐式拉取（/v1/models）失败后的冷却，避免每次请求都等超时
-_IMPLICIT_TIMEOUT = 10       # 隐式拉取的超时：客户端启动时等 45 秒是不行的
-_REFRESH_BASE = 30           # 刷新失败退避起点（秒）
-_REFRESH_MAX = 1800          # 退避封顶（秒）
-_CREDITS_TTL = 60            # 积分缓存（秒）：列表一次拉全部账号，别每刷新一次就打一遍上游
-_CREDITS_TIMEOUT = 20        # 积分接口的超时：它只是状态查询，不该拖住页面
+# 目录缓存 / 刷新退避 / 积分查询的节奏都在「平台配置」里可调，见
+# `platforms/settings.py` 的 catalog_* 与 credits_*（默认值等于这里原先的常量）。
 
 
 class _CreditMeter(NamedTuple):
@@ -261,7 +256,9 @@ class TraeAdapter(PlatformAdapter):
 
     def _note_failure(self, uid: str) -> None:
         count = (self._failures.get(uid) or (0, 0.0))[0] + 1
-        delay = min(_REFRESH_MAX, _REFRESH_BASE * (2 ** min(count - 1, 6)))
+        base = runtime_settings.catalog_backoff_base(self.name)
+        ceiling = runtime_settings.catalog_backoff_max(self.name)
+        delay = min(ceiling, base * (2 ** min(count - 1, 6)))
         self._failures[uid] = (count, time.time() + delay)
 
     def _clear_failure(self, uid: str) -> None:
@@ -500,8 +497,9 @@ class TraeAdapter(PlatformAdapter):
         `basic/bonus_usage_amount`）。两边都取不到时才抛错——返回 0 会被
         读成「积分用完了」。
 
-        结果缓存 60 秒：界面进一次页面就会问全部账号，不缓存等于每刷新一次
-        就往上游打一轮请求。签到 / 导入 / 删除会主动让缓存失效。
+        结果缓存默认 60 秒（`platforms.trae.credits_ttl` 可调）：界面进一次
+        页面就会问全部账号，不缓存等于每刷新一次就往上游打一轮请求。签到 /
+        导入 / 删除会主动让缓存失效。
         """
         account = self._require(account_id)
         uid = str(account.get('uid') or '')
@@ -511,6 +509,7 @@ class TraeAdapter(PlatformAdapter):
 
         realm = normalize_realm(account.get('realm'))
         ready = await self._ensure_token(account)
+        timeout = runtime_settings.credits_timeout(self.name)
 
         limit = used = 0.0
         has_quota = False
@@ -519,12 +518,12 @@ class TraeAdapter(PlatformAdapter):
         checked_in = False
         failures: list[PlatformError] = []
 
-        # 「刷新积分」按钮会清缓存，这里只做普通的 60 秒复用
+        # 「刷新积分」按钮会清缓存，这里只做普通的 TTL 复用
         if realm == 'intl':
             # 国际版是**美元额度**，与国内版积分池不是同一个接口/口径。
             try:
                 data = await client.fetch_intl_entitlement(
-                    ready, realm=realm, timeout=_CREDITS_TIMEOUT)
+                    ready, realm=realm, timeout=timeout)
                 usage = _dollar_usage(data)
                 if usage is not None:
                     limit = usage['limit']
@@ -541,7 +540,7 @@ class TraeAdapter(PlatformAdapter):
         else:
             try:
                 ent = await client.fetch_entitlement(ready, realm=realm,
-                                                     timeout=_CREDITS_TIMEOUT)
+                                                     timeout=timeout)
                 ent_usage = ent.get('ent_usage') if isinstance(ent, dict) else None
                 summary = ((ent_usage or {}).get('usage_summary')
                            if isinstance(ent_usage, dict) else None)
@@ -556,7 +555,7 @@ class TraeAdapter(PlatformAdapter):
         if REALMS[realm]['supports_checkin']:
             try:
                 status = await client.checkin_status(ready, realm=realm,
-                                                     timeout=_CREDITS_TIMEOUT)
+                                                     timeout=timeout)
                 checkin_credits = int(status.get('credits') or 0)
                 checked_in = bool(status.get('checked_in'))
             except PlatformError as exc:
@@ -589,7 +588,8 @@ class TraeAdapter(PlatformAdapter):
         }
         if failures:
             out['errors'] = [{'code': e.code, 'message': e.message} for e in failures]
-        self._credits[uid] = (time.time() + _CREDITS_TTL, out)
+        self._credits[uid] = (time.time()
+                              + runtime_settings.credits_ttl(self.name), out)
         return out
 
     # ── 模型目录 ──────────────────────────────────────────
@@ -600,7 +600,8 @@ class TraeAdapter(PlatformAdapter):
             return None
         if not isinstance(cached, dict):
             return None
-        if float(cached.get('fetched_at') or 0) + _TTL < time.time():
+        if float(cached.get('fetched_at') or 0) + runtime_settings.catalog_ttl(self.name) \
+                < time.time():
             return None
         models = cached.get('models')
         if not isinstance(models, list) or not models:
@@ -614,20 +615,19 @@ class TraeAdapter(PlatformAdapter):
         except Exception:  # noqa: BLE001 —— 缓存写不进去不影响本次返回
             pass
 
-    @staticmethod
-    def _implicit_live_allowed() -> bool:
+    def _implicit_live_allowed(self) -> bool:
         """首次启动（还没有缓存）时允许拉一次线上目录。
 
         为什么要允许：本地目录里有相当一部分模型对当前账号是**调不通**的
         （上游回 `4023 model is unknown`），客户端照着列表选一个就失败，比
-        「列表略少」糟糕得多。只在**完全没有缓存**时尝试，且失败后冷却
-        10 分钟，避免每次 `/v1/models` 都等超时。
+        「列表略少」糟糕得多。只在**完全没有缓存**时尝试，且失败后按
+        `catalog_retry_ttl`（默认 10 分钟）冷却，避免每次 `/v1/models` 都等超时。
         """
         try:
             last = float(db.get_setting(SETTING_MODELS_ATTEMPT, 0) or 0)
         except Exception:  # noqa: BLE001
             return False
-        return time.time() - last > _IMPLICIT_TTL
+        return time.time() - last > runtime_settings.catalog_retry_ttl(self.name)
 
     @staticmethod
     def _note_implicit_attempt() -> None:
@@ -811,7 +811,7 @@ class TraeAdapter(PlatformAdapter):
         models = self._cached_models() if not refresh else None
         if models is None and (refresh or self._implicit_live_allowed()):
             live = await self._live_models(
-                timeout=45 if refresh else _IMPLICIT_TIMEOUT)
+                timeout=45 if refresh else runtime_settings.catalog_timeout(self.name))
             self._note_implicit_attempt()
             if live:
                 self._save_models(live)
@@ -1013,6 +1013,38 @@ class TraeAdapter(PlatformAdapter):
         result.closer = closer
         return result
 
+    def _cool_down(self, uid: str, exc: PlatformError, channel: str) -> bool:
+        """按设置把出错的账号冻结一段时间；返回 True = 应换下一个账号。
+
+        三个前提，缺一不可：
+
+          · 状态码是 429（用 `cooldown_429`）或 >= 500（用 `cooldown_5xx`）；
+          · 对应阈值大于 0 —— 0 是默认值，表示**维持旧行为**（直接上抛，由
+            客户端重试），这里不能悄悄改变默认路径；
+          · 不是 `4023 model is unknown`：那是模型走错通道，账号本身没问题，
+            冻结它只会白白少一个可用账号。
+
+        冻结走 `store.set_cooling`，与界面上手动「强制冷却」同一份状态，所以
+        到账号页能看到原因与到期时间。写不进去（账号文件不存在等）就当没设置，
+        继续按旧行为抛错。
+        """
+        if _is_model_unknown(exc):
+            return False
+        if exc.status == 429:
+            seconds = runtime_settings.cooldown_429(self.name)
+        elif exc.status >= 500:
+            seconds = runtime_settings.cooldown_5xx(self.name)
+        else:
+            return False
+        if seconds <= 0 or not uid:
+            return False
+        try:
+            store.set_cooling(uid, time.time() + seconds,
+                              f'{channel} {exc.status}')
+        except (FileNotFoundError, ValueError, OSError):
+            return False
+        return True
+
     async def _chat_accounts(self, model: str, body: dict,
                              realm_hint: str | None = None) -> PlatformChat:
         wrapper_model = f'{self.model_prefix}{model}'
@@ -1057,6 +1089,10 @@ class TraeAdapter(PlatformAdapter):
                     if affinity and (exc.status in (401, 403, 429)
                                      or exc.status >= 500):
                         self._affinity.unbind(affinity)
+                    # 面板把 cooldown_429 / cooldown_5xx 设成 > 0 时，改为
+                    # 「把这个账号冻结 N 秒，换下一个」；0（默认）保持旧行为：直接上抛。
+                    if self._cool_down(uid, exc, channel):
+                        break
                     raise
                 if channel != preferred:
                     self._routes[model] = channel
@@ -1131,11 +1167,11 @@ class TraeAdapter(PlatformAdapter):
         """池级上限改了之后立刻生效，不用等 5 秒缓存。"""
         self._limiter.invalidate()
 
-    # ── 每请求实扣积分（TF_TRAE_CREDIT_METER）────────────────
+    # ── 每请求实扣积分（面板「实扣积分模式」/ TF_TRAE_CREDIT_METER）──
     async def _meter_start(self, account: dict) -> _CreditMeter | None:
         """请求前准备计量凭据；这次不做归属时返回 None。
 
-        两种口径（`TF_TRAE_CREDIT_METER` 的取值决定）：
+        两种口径（面板的 `credit_meter` 或 `TF_TRAE_CREDIT_METER` 的取值决定）：
 
         · `delta`（`1/true/on`）：前后各查一次账户累计求增量。**要抢一把账号
           级锁**，并发在途时分不清归属，只能跳过后来的请求。
@@ -1145,7 +1181,7 @@ class TraeAdapter(PlatformAdapter):
           同步的（流结束后首查即中），所以这里**不查基线、不抢锁**，请求前
           零上游开销。
         """
-        mode = config.TRAE_CREDIT_METER
+        mode = runtime_settings.credit_meter(self.name)
         if not mode:
             return None
         if str(mode).strip().lower() == 'detail':
@@ -1220,14 +1256,16 @@ class TraeAdapter(PlatformAdapter):
         # 这次实际用的是哪个版本的账号：统计/日志必须按它归档，而不是按模型名
         # ——`trae/<model>` 没有 `global:` 前缀，按名字只会永远落到国内版。
         realm = _db_realm(account.get('realm'))
-        # 判断依据是**客户端**声明了什么：关掉工具透传（`TRAE_NATIVE_TOOLS=0`）
+        # 协议兼容开关一次读全（面板优先，未设置时沿用 TF_TRAE_* 环境变量）。
+        flags = runtime_settings.protocol_switches(self.name)
+        # 判断依据是**客户端**声明了什么：关掉工具透传（`native_tools`）
         # 之后 body 里已经没有 tools，但客户端这一轮仍然在有工具的前提下对话，
         # 正文里的调用照样该还原。
         declared_tools = bool(body.get('tools'))
         # 标签形态的还原需要「客户端到底声明了哪些工具」当白名单；要在
-        # `TRAE_NATIVE_TOOLS=0` 剥掉 body 之前取。
+        # `native_tools` 剥掉 body 之前取。
         rescue_names = client.tool_names(body.get('tools')) if declared_tools else []
-        if not config.TRAE_NATIVE_TOOLS:
+        if not flags['native_tools']:
             # 总开关：确认上游行为变化后可以整体关掉工具透传，不必回滚代码。
             # 历史里的工具痕迹仍会折成正文（那是模型能看懂的纯文本，不属于
             # 这条通道的「工具字段」）。
@@ -1235,16 +1273,24 @@ class TraeAdapter(PlatformAdapter):
                     if key not in ('tools', 'tool_choice')}
         meter = await self._meter_start(account)
         session_id = meter.session_id if meter is not None else None
+        # 两个请求体构造函数都要拿这三个开关：solo 还多一个输出预算默认值。
+        build_flags = {
+            'session_id': session_id,
+            'protocol_hint': flags['tool_protocol_hint'],
+            'reasoning_effort': flags['reasoning_effort'],
+        }
         try:
             if channel == 'solo':
-                payload = client.build_solo_body(model, body.get('messages'), body,
-                                                 session_id=session_id)
+                payload = client.build_solo_body(
+                    model, body.get('messages'), body,
+                    max_tokens=runtime_settings.solo_max_tokens(self.name),
+                    **build_flags)
                 response = await client.open_solo_chat(
                     account, payload, timeout=request_timeout)
                 events = client.iter_solo_events(response, idle_timeout=idle_timeout)
             else:
                 payload = client.build_chat_body(model, body.get('messages'), body,
-                                                 session_id=session_id)
+                                                 **build_flags)
                 response = await client.open_chat(
                     account, payload, timeout=request_timeout)
                 events = client.iter_events(response, idle_timeout=idle_timeout)
@@ -1275,15 +1321,20 @@ class TraeAdapter(PlatformAdapter):
         state = chatmod.StreamState()
         # 只有客户端真的声明了 tools，正文里的调用才可能是「模型想调工具」；
         # 没声明工具的请求按纯文本处理，不做任何改写。
-        rescue = config.TRAE_TEXT_TOOL_RESCUE and declared_tools
-        rescue_tags = rescue_names if (rescue and config.TRAE_TEXT_TOOL_TAGS) else ()
+        rescue = flags['text_tool_rescue'] and declared_tools
+        rescue_tags = rescue_names if (rescue and flags['text_tool_tags']) else ()
+        tail_flags = {
+            'degenerate_error': flags['degenerate_call_error'],
+            'strict_end': flags['strict_stream_end'],
+            'empty_output_error': flags['empty_output_error'],
+        }
         if not stream:
             try:
                 result = await chatmod.aggregate(
                     chained(), model=wrapper_model, state=state,
-                    reasoning_as_content=config.TRAE_REASONING_AS_CONTENT,
+                    reasoning_as_content=flags['reasoning_as_content'],
                     text_tool_rescue=rescue, tool_names=rescue_tags,
-                    strict_tail=config.TRAE_RESCUE_TAIL_STRICT)
+                    strict_tail=flags['rescue_tail_strict'], **tail_flags)
             except BaseException:
                 # 非流式在聚合阶段报错（含退化工具调用）也要释放计量锁，
                 # 否则 delta 口径下这个账号会一直显示「有请求在途」。
@@ -1298,9 +1349,10 @@ class TraeAdapter(PlatformAdapter):
                                 realm=realm, error=state.error)
 
         generator = chatmod.translate(chained(), model=wrapper_model, state=state,
-                                      reasoning_as_content=config.TRAE_REASONING_AS_CONTENT,
+                                      reasoning_as_content=flags['reasoning_as_content'],
                                       text_tool_rescue=rescue, tool_names=rescue_tags,
-                                      strict_tail=config.TRAE_RESCUE_TAIL_STRICT)
+                                      strict_tail=flags['rescue_tail_strict'],
+                                      **tail_flags)
 
         if meter is not None:
             inner = generator

@@ -211,13 +211,23 @@ def save_platform_settings(name: str, body: dict = Body(...),
         runtime = runtime_settings.save(name, payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 平台专属的「立即生效」钩子：Qoder 把协议兼容开关（工具残片 / thinking /
+    # 结构化历史 / 图片 / Web 工具）映射成内置网关每次请求现读的环境变量。
+    # 没有这个钩子的适配器直接跳过。
+    apply_runtime = getattr(adapter, 'apply_runtime_settings', None)
+    if callable(apply_runtime):
+        try:
+            apply_runtime(runtime)
+        except Exception as exc:  # noqa: BLE001 —— 下发失败不该让保存报 500
+            logger.warning('平台设置下发失败（%s）: %s', name, exc)
     changes.extend(f'{field}={pace[field]}' for field in (
         'checkin_concurrency', 'checkin_delay_min', 'checkin_delay_max')
         if payload.get(field) is not None)
-    changes.extend(f'{field}={runtime[field]}' for field in (
-        'request_timeout', 'idle_timeout', 'max_accounts_try',
-        'session_affinity', 'session_affinity_ttl', 'desktop_sync')
-        if payload.get(field) is not None)
+    # 运行参数按能力表自动记账：新增字段（缓存 TTL / 冷却 / 协议开关…）不必
+    # 回来补这个元组，审计日志也不会漏记。
+    caps = runtime_settings.capabilities(name)
+    changes.extend(f'{field}={runtime[field]}' for field in payload
+                   if payload.get(field) is not None and caps.get(field))
     security.audit(user, 'update_platform_settings', name, ' '.join(changes))
     return _settings_payload(name)
 

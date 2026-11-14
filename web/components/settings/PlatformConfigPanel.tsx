@@ -9,6 +9,9 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  Timer,
+  Wand2,
+  Zap,
 } from 'lucide-react';
 
 import {LoadError} from '@/components/common/states/LoadError';
@@ -17,12 +20,24 @@ import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 import {Input} from '@/components/ui/input';
 import {Label} from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {Switch} from '@/components/ui/switch';
 import {errText, platformApi} from '@/lib/api';
 import {useAuth} from '@/lib/auth-context';
 import {useI18n} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
-import type {PlatformSettings} from '@/lib/types';
+import type {
+  PlatformEnumField,
+  PlatformNumericField,
+  PlatformSettings,
+  PlatformSwitchField,
+} from '@/lib/types';
 
 /**
  * 「设置 → 上游配置」在非 WorkBuddy 平台下显示的内容。
@@ -36,34 +51,88 @@ import type {PlatformSettings} from '@/lib/types';
  * 接口上），这里提供的是**完整视图**——池级并发、签到节奏、请求预算与平台
  * 专属开关放在一起，并且有明确的保存 / 撤销。两边改的是同一份数据。
  */
-type Draft = {
-  max_in_flight: string;
-  checkin_concurrency: string;
-  checkin_delay_min: string;
-  checkin_delay_max: string;
-  request_timeout: string;
-  idle_timeout: string;
-  max_accounts_try: string;
-  session_affinity_ttl: string;
-  session_affinity: boolean;
-  desktop_sync: boolean;
+/**
+ * 表单里的数值键：平台的数值参数 + 池级并发 / 签到节奏。
+ *
+ * 后四个属于别的模块（`limiter.py` / `checkinpacing.py`），不在
+ * `PlatformNumericField` 里，但它们同一张表单、同一套「字符串 + 校验」流程。
+ */
+type NumericKey =
+  | PlatformNumericField
+  | 'max_in_flight' | 'checkin_concurrency'
+  | 'checkin_delay_min' | 'checkin_delay_max';
+
+/**
+ * 表单草稿：数值统一存字符串（用户可能正停在「1」这种中间态），布尔与枚举
+ * 原样存。用映射类型而不是逐个字段抄一遍，后端加参数时前端只要补类型。
+ */
+type Draft = Record<NumericKey, string>
+  & Record<PlatformSwitchField, boolean>
+  & Record<PlatformEnumField, string>;
+
+/** 枚举设置里「不选任何值」对应空串；Radix 的 SelectItem 不接受空串，用哨兵转发。 */
+const GATEWAY_DEFAULT = '__gateway_default__';
+
+const NUMERIC_KEYS: readonly NumericKey[] = [
+  'max_in_flight', 'checkin_concurrency', 'checkin_delay_min', 'checkin_delay_max',
+  'request_timeout', 'idle_timeout', 'max_accounts_try', 'session_affinity_ttl',
+  'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout',
+  'catalog_backoff_base', 'catalog_backoff_max',
+  'credits_ttl', 'credits_timeout', 'cooldown_429', 'cooldown_5xx',
+  'solo_max_tokens',
+];
+
+const SWITCH_KEYS: readonly PlatformSwitchField[] = [
+  'session_affinity', 'desktop_sync', 'web_tools',
+  'native_tools', 'text_tool_rescue', 'text_tool_tags', 'tool_protocol_hint',
+  'degenerate_call_error', 'rescue_tail_strict',
+  'reasoning_effort', 'reasoning_as_content',
+  'empty_output_error', 'strict_stream_end',
+];
+
+const ENUM_KEYS: readonly PlatformEnumField[] = [
+  'tool_echo_mode', 'anthropic_thinking', 'structured_tool_history',
+  'image_transcode', 'credit_meter',
+];
+
+/** 数值字段的界面名（校验报错要用），值是 i18n key 的后半段。 */
+const NUMERIC_LABEL: Record<PlatformNumericField, string> = {
+  request_timeout: 'configRequestTimeout',
+  idle_timeout: 'configIdleTimeout',
+  max_accounts_try: 'configMaxAccountsTry',
+  session_affinity_ttl: 'configAffinityTtl',
+  catalog_ttl: 'configCatalogTtl',
+  catalog_retry_ttl: 'configCatalogRetryTtl',
+  catalog_timeout: 'configCatalogTimeout',
+  catalog_backoff_base: 'configCatalogBackoffBase',
+  catalog_backoff_max: 'configCatalogBackoffMax',
+  credits_ttl: 'configCreditsTtl',
+  credits_timeout: 'configCreditsTimeout',
+  cooldown_429: 'configCooldown429',
+  cooldown_5xx: 'configCooldown5xx',
+  solo_max_tokens: 'configSoloMaxTokens',
 };
 
-type NumericField = Exclude<keyof Draft, 'session_affinity' | 'desktop_sync'>;
+/** Trae 的协议开关：这些原先只能靠 `TF_TRAE_*` 环境变量改。 */
+const PROTOCOL_SWITCHES: readonly (readonly [PlatformSwitchField, string])[] = [
+  ['native_tools', 'configNativeTools'],
+  ['text_tool_rescue', 'configTextToolRescue'],
+  ['text_tool_tags', 'configTextToolTags'],
+  ['tool_protocol_hint', 'configToolProtocolHint'],
+  ['degenerate_call_error', 'configDegenerateCallError'],
+  ['rescue_tail_strict', 'configRescueTailStrict'],
+  ['reasoning_effort', 'configReasoningEffort'],
+  ['reasoning_as_content', 'configReasoningAsContent'],
+  ['empty_output_error', 'configEmptyOutputError'],
+  ['strict_stream_end', 'configStrictStreamEnd'],
+];
 
 function draftOf(value: PlatformSettings): Draft {
-  return {
-    max_in_flight: String(value.max_in_flight),
-    checkin_concurrency: String(value.checkin_concurrency),
-    checkin_delay_min: String(value.checkin_delay_min),
-    checkin_delay_max: String(value.checkin_delay_max),
-    request_timeout: String(value.request_timeout),
-    idle_timeout: String(value.idle_timeout),
-    max_accounts_try: String(value.max_accounts_try),
-    session_affinity_ttl: String(value.session_affinity_ttl),
-    session_affinity: value.session_affinity,
-    desktop_sync: value.desktop_sync,
-  };
+  const draft = {} as Draft;
+  for (const key of NUMERIC_KEYS) draft[key] = String(value[key]);
+  for (const key of SWITCH_KEYS) draft[key] = !!value[key];
+  for (const key of ENUM_KEYS) draft[key] = value[key] ?? '';
+  return draft;
 }
 
 function asInt(raw: string): number | null {
@@ -163,29 +232,25 @@ export function PlatformConfigPanel({
       }
     }
 
-    const numeric: {key: NumericField; limitKey: keyof PlatformSettings['runtime_limits'];
-      shown: boolean; label: string}[] = [
-      {key: 'request_timeout', limitKey: 'request_timeout',
-       shown: !!caps?.request_timeout, label: t('platforms.configRequestTimeout')},
-      {key: 'idle_timeout', limitKey: 'idle_timeout',
-       shown: !!caps?.idle_timeout, label: t('platforms.configIdleTimeout')},
-      {key: 'max_accounts_try', limitKey: 'max_accounts_try',
-       shown: !!caps?.max_accounts_try, label: t('platforms.configMaxAccountsTry')},
-      {key: 'session_affinity_ttl', limitKey: 'session_affinity_ttl',
-       shown: !!caps?.session_affinity_ttl && draft.session_affinity,
-       label: t('platforms.configAffinityTtl')},
-    ];
-    const values: Partial<Record<NumericField, number>> = {};
-    for (const item of numeric) {
-      if (!item.shown || !limits) continue;
-      const value = asInt(draft[item.key]);
-      const range = limits[item.limitKey];
-      if (value === null || value < range.min || value > range.max) {
-        errors.push(t('platforms.configRange', {
-          label: item.label, min: range.min, max: range.max,
-        }));
-      } else {
-        values[item.key] = value;
+    // 数值字段：只校验本平台支持、且界面上真的会显示的那些。哪些字段进请求体
+    // 也由能力表决定，新增字段（缓存 TTL / 冷却 / SOLO 预算…）不用回来补元组。
+    const values: Partial<Record<PlatformNumericField, number>> = {};
+    if (limits) {
+      for (const key of Object.keys(limits) as PlatformNumericField[]) {
+        if (!caps?.[key]) continue;
+        // 会话亲和关掉时它的 TTL 不显示、也不提交：否则会把用户看不到的值写回库。
+        if (key === 'session_affinity_ttl' && !draft.session_affinity) continue;
+        const value = asInt(draft[key]);
+        const range = limits[key];
+        if (value === null || value < range.min || value > range.max) {
+          errors.push(t('platforms.configRange', {
+            label: t(`platforms.${NUMERIC_LABEL[key]}`),
+            min: range.min,
+            max: range.max,
+          }));
+        } else {
+          values[key] = value;
+        }
       }
     }
 
@@ -203,8 +268,13 @@ export function PlatformConfigPanel({
         checkin_delay_max: delayMax as number,
         ...values,
       };
-      if (caps?.session_affinity) body.session_affinity = draft.session_affinity;
-      if (caps?.desktop_sync) body.desktop_sync = draft.desktop_sync;
+      // 布尔与枚举同理：能力表说支持才提交，避免「保存成功但后端根本没这个字段」。
+      for (const key of SWITCH_KEYS) {
+        if (caps?.[key]) body[key] = draft[key];
+      }
+      for (const key of ENUM_KEYS) {
+        if (caps?.[key]) body[key] = draft[key];
+      }
       const next = await platformApi.saveSettings(platform, body);
       setSettings(next);
       setDraft(draftOf(next));
@@ -232,7 +302,7 @@ export function PlatformConfigPanel({
 
   if (!settings || !draft) return null;
 
-  const input = (key: NumericField, range: {min: number; max: number},
+  const input = (key: NumericKey, range: {min: number; max: number},
                  aria: string, hint?: string) => (
     <div className="rounded-2xl bg-background/60 px-3 py-2">
       <Label className="text-xs">{aria}</Label>
@@ -250,6 +320,62 @@ export function PlatformConfigPanel({
         </span>
       </div>
       {hint && <p className="mt-1 text-[11px] leading-4 text-muted-foreground">{hint}</p>}
+    </div>
+  );
+
+  /** 只画「本平台支持且有范围」的数值字段，缺一个条件就整块不出现。 */
+  const numField = (key: PlatformNumericField, label: string, hint?: string) =>
+    (caps?.[key] && limits ? input(key, limits[key], label, hint) : null);
+
+  const enumSelect = (
+    key: PlatformEnumField,
+    label: string, hint: string,
+    optionLabel: (choice: string) => string = (choice) =>
+      t(`platforms.opt_${choice || 'default'}`),
+  ) => {
+    const choices = settings.enum_choices?.[key] ?? [''];
+    return (
+      <div className="rounded-2xl bg-background/60 px-3 py-2">
+        <Label className="text-xs">{label}</Label>
+        <Select
+          value={draft[key] || GATEWAY_DEFAULT}
+          onValueChange={(value) => set(key, value === GATEWAY_DEFAULT ? '' : value)}
+          disabled={!isAdmin || saving}
+        >
+          <SelectTrigger size="sm" className="mt-1 w-full" aria-label={label}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {choices.map((choice) => (
+              <SelectItem key={choice || GATEWAY_DEFAULT}
+                          value={choice || GATEWAY_DEFAULT}>
+                {optionLabel(choice)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">{hint}</p>
+      </div>
+    );
+  };
+
+  /** 一行开关：左侧标题 + 说明，右侧 Switch。协议开关用它排成两列。 */
+  const switchRow = (key: PlatformSwitchField, label: string, hint?: string) => (
+    <div className="rounded-2xl bg-background/60 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <Label className="text-xs">{label}</Label>
+          {hint && (
+            <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{hint}</p>
+          )}
+        </div>
+        <Switch
+          checked={draft[key]}
+          disabled={!isAdmin || saving}
+          aria-label={label}
+          onCheckedChange={(value) => set(key, value)}
+        />
+      </div>
     </div>
   );
 
@@ -357,6 +483,116 @@ export function PlatformConfigPanel({
         </section>
       )}
 
+      {/* ── Trae：目录 / 积分缓存与限流冷却 ── */}
+      {(caps?.catalog_ttl || caps?.credits_ttl || caps?.cooldown_429) && (
+        <section className="rounded-[20px] bg-muted p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Timer className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-sm font-medium">{t('platforms.configSectionCache')}</span>
+          </div>
+          <p className="mb-2.5 text-[11px] leading-4 text-muted-foreground">
+            {t('platforms.configCacheHint')}
+          </p>
+          <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-3">
+            {numField('catalog_ttl', t('platforms.configCatalogTtl'),
+                      t('platforms.configCatalogTtlHint'))}
+            {numField('catalog_retry_ttl', t('platforms.configCatalogRetryTtl'),
+                      t('platforms.configCatalogRetryTtlHint'))}
+            {numField('catalog_timeout', t('platforms.configCatalogTimeout'),
+                      t('platforms.configCatalogTimeoutHint'))}
+            {numField('catalog_backoff_base', t('platforms.configCatalogBackoffBase'),
+                      t('platforms.configCatalogBackoffBaseHint'))}
+            {numField('catalog_backoff_max', t('platforms.configCatalogBackoffMax'),
+                      t('platforms.configCatalogBackoffMaxHint'))}
+            {numField('credits_ttl', t('platforms.configCreditsTtl'),
+                      t('platforms.configCreditsTtlHint'))}
+            {numField('credits_timeout', t('platforms.configCreditsTimeout'),
+                      t('platforms.configCreditsTimeoutHint'))}
+            {numField('cooldown_429', t('platforms.configCooldown429'),
+                      t('platforms.configCooldown429Hint'))}
+            {numField('cooldown_5xx', t('platforms.configCooldown5xx'),
+                      t('platforms.configCooldown5xxHint'))}
+          </div>
+        </section>
+      )}
+
+      {/* ── Trae：SOLO 输出预算与实扣积分口径 ── */}
+      {(caps?.solo_max_tokens || caps?.credit_meter) && (
+        <section className="rounded-[20px] bg-muted p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Zap className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-sm font-medium">{t('platforms.configSectionMeter')}</span>
+          </div>
+          <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
+            {numField('solo_max_tokens', t('platforms.configSoloMaxTokens'),
+                      t('platforms.configSoloMaxTokensHint'))}
+            {caps?.credit_meter && enumSelect(
+              'credit_meter',
+              t('platforms.configCreditMeter'),
+              t('platforms.configCreditMeterHint'),
+              (choice) => t(`platforms.creditMeter_${choice || 'default'}`))}
+          </div>
+        </section>
+      )}
+
+      {/* ── Qoder 协议兼容：网关侧的兜底开关 ── */}
+      {(caps?.tool_echo_mode || caps?.anthropic_thinking
+        || caps?.structured_tool_history || caps?.image_transcode
+        || caps?.web_tools) && (
+        <section className="rounded-[20px] bg-muted p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Wand2 className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-sm font-medium">
+              {t('platforms.configSectionCompat')}
+            </span>
+          </div>
+          <p className="mb-2.5 text-[11px] leading-4 text-muted-foreground">
+            {t('platforms.configCompatHint')}
+          </p>
+          <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
+            {caps?.tool_echo_mode && enumSelect(
+              'tool_echo_mode',
+              t('platforms.configToolEchoMode'),
+              t('platforms.configToolEchoModeHint'))}
+            {caps?.anthropic_thinking && enumSelect(
+              'anthropic_thinking',
+              t('platforms.configAnthropicThinking'),
+              t('platforms.configAnthropicThinkingHint'))}
+            {caps?.structured_tool_history && enumSelect(
+              'structured_tool_history',
+              t('platforms.configStructuredToolHistory'),
+              t('platforms.configStructuredToolHistoryHint'))}
+            {caps?.image_transcode && enumSelect(
+              'image_transcode',
+              t('platforms.configImageTranscode'),
+              t('platforms.configImageTranscodeHint'))}
+          </div>
+          {caps?.web_tools && (
+            <div className="mt-2.5 rounded-2xl bg-background/60 px-3 py-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <Label className="text-xs">{t('platforms.configWebTools')}</Label>
+                  <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                    {t('platforms.configWebToolsHint')}
+                  </p>
+                </div>
+                <Switch
+                  checked={draft.web_tools}
+                  disabled={!isAdmin || saving}
+                  aria-label={t('platforms.configWebTools')}
+                  onCheckedChange={(value) => set('web_tools', value)}
+                />
+              </div>
+              {draft.web_tools && (
+                <p className="mt-1.5 border-t border-border/50 pt-1.5 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
+                  {t('platforms.configWebToolsWarning')}
+                </p>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
       {/* ── 平台专属：Trae 的会话亲和与桌面端回写 ── */}
       {(caps?.session_affinity || caps?.desktop_sync) && (
         <section className="rounded-[20px] bg-muted p-4">
@@ -390,22 +626,41 @@ export function PlatformConfigPanel({
                 )}
               </div>
             )}
-            {caps?.desktop_sync && (
-              <div className="flex items-center justify-between gap-3 rounded-2xl bg-background/60 px-3 py-2">
-                <div className="min-w-0">
-                  <Label className="text-xs">{t('platforms.configDesktopSync')}</Label>
-                  <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-                    {t('platforms.configDesktopSyncHint')}
-                  </p>
+            {caps?.desktop_sync && switchRow(
+              'desktop_sync',
+              t('platforms.configDesktopSync'),
+              t('platforms.configDesktopSyncHint'))}
+          </div>
+        </section>
+      )}
+
+      {/* ── Trae 协议开关：原先只能用 TF_TRAE_* 环境变量改 ── */}
+      {caps?.native_tools && (
+        <section className="rounded-[20px] bg-muted p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Wand2 className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-sm font-medium">
+              {t('platforms.configSectionProtocol')}
+            </span>
+          </div>
+          <p className="mb-2.5 text-[11px] leading-4 text-muted-foreground">
+            {t('platforms.configProtocolHint')}
+          </p>
+          <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
+            {PROTOCOL_SWITCHES.map(([key, label]) => (
+              caps?.[key] ? (
+                <div key={key}
+                     className="flex items-center justify-between gap-3 rounded-2xl bg-background/60 px-3 py-2">
+                  <Label className="text-xs">{t(`platforms.${label}`)}</Label>
+                  <Switch
+                    checked={draft[key]}
+                    disabled={!isAdmin || saving}
+                    aria-label={t(`platforms.${label}`)}
+                    onCheckedChange={(value) => set(key, value)}
+                  />
                 </div>
-                <Switch
-                  checked={draft.desktop_sync}
-                  disabled={!isAdmin || saving}
-                  aria-label={t('platforms.configDesktopSync')}
-                  onCheckedChange={(value) => set('desktop_sync', value)}
-                />
-              </div>
-            )}
+              ) : null
+            ))}
           </div>
         </section>
       )}

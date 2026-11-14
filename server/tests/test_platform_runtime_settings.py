@@ -3,8 +3,7 @@
 ## 钉住的问题
 
 这些值曾经散落在适配器常量里（`CHAT_READ_TIMEOUT` / `_MAX_ACCOUNTS_TRY` /
-`AFFINITY_TTL`），改一次要重新发布。现在它们按平台存进 `settings` 表，界面上
-「上游配置」跟随顶部平台切换。本文件保证：
+`AFFINITY_TTL`），改一次要重新发布。现在它们按平台存进 `settings` 表，界面上「上游配置」跟随顶部平台切换。本文件保证：
 
   · 默认值仍然是之前那套保守值；
   · 保存只影响提交的字段，改 Trae 不影响 Qoder；
@@ -14,8 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,6 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from server import config, db  # noqa: E402
 from server.platforms import settings as runtime_settings  # noqa: E402
+from server.platforms.base import PlatformError  # noqa: E402
+from server.platforms.qoder import embedded as qoder_embedded  # noqa: E402
+from server.platforms.trae import chat as trae_chat  # noqa: E402
+from server.platforms.trae import client as trae_client  # noqa: E402
 from server.platforms.trae.adapter import TraeAdapter  # noqa: E402
 from server.routers import platforms as platforms_router  # noqa: E402
 
@@ -59,6 +64,30 @@ class DefaultsTest(_DbCase):
         self.assertEqual(values['runtime_limits']['request_timeout'],
                          {'min': 10, 'max': 900})
 
+    def test_trae_cache_and_cooldown_defaults_match_the_old_constants(self) -> None:
+        """缓存 TTL / 退避 / 积分查询的默认值就是原先 adapter.py 的常量。"""
+        values = runtime_settings.load('trae')
+        self.assertEqual(values['catalog_ttl'], 6 * 3600)
+        self.assertEqual(values['catalog_retry_ttl'], 600)
+        self.assertEqual(values['catalog_timeout'], 10)
+        self.assertEqual(values['catalog_backoff_base'], 30)
+        self.assertEqual(values['catalog_backoff_max'], 1800)
+        self.assertEqual(values['credits_ttl'], 60)
+        self.assertEqual(values['credits_timeout'], 20)
+        # 0 = 旧行为：429/5xx 直接上抛，不冻结账号。
+        self.assertEqual(values['cooldown_429'], 0)
+        self.assertEqual(values['cooldown_5xx'], 0)
+
+    def test_env_backed_defaults_follow_config(self) -> None:
+        """未保存过时，面板回显的就是 TF_TRAE_* 的现值（不是抄死的常量）。"""
+        with mock.patch.object(config, 'TRAE_SOLO_MAX_TOKENS', 123456), \
+             mock.patch.object(config, 'TRAE_NATIVE_TOOLS', False), \
+             mock.patch.object(config, 'TRAE_CREDIT_METER', 'detail'):
+            values = runtime_settings.load('trae')
+            self.assertEqual(values['solo_max_tokens'], 123456)
+            self.assertFalse(values['native_tools'])
+            self.assertEqual(values['credit_meter'], 'detail')
+
     def test_capabilities_are_per_platform(self) -> None:
         trae = runtime_settings.capabilities('trae')
         qoder = runtime_settings.capabilities('qoder')
@@ -67,6 +96,14 @@ class DefaultsTest(_DbCase):
         self.assertFalse(qoder['max_accounts_try'])
         self.assertFalse(qoder['session_affinity'])
         self.assertTrue(qoder['request_timeout'])
+        # 协议兼容开关只属于 Qoder：Trae 没有对应的网关开关，不能显示成可改。
+        self.assertTrue(qoder['tool_echo_mode'])
+        self.assertTrue(qoder['anthropic_thinking'])
+        self.assertTrue(qoder['structured_tool_history'])
+        self.assertTrue(qoder['image_transcode'])
+        self.assertTrue(qoder['web_tools'])
+        self.assertFalse(trae['tool_echo_mode'])
+        self.assertFalse(trae['web_tools'])
 
     def test_unknown_platform_gets_the_generic_two(self) -> None:
         caps = runtime_settings.capabilities('fake')
@@ -92,6 +129,63 @@ class SaveTest(_DbCase):
         runtime_settings.save('trae', {'request_timeout': 42})
         self.assertEqual(runtime_settings.load('qoder')['request_timeout'], 300)
         self.assertEqual(runtime_settings.load('trae')['request_timeout'], 42)
+
+    def test_cache_cooldown_and_protocol_fields_round_trip(self) -> None:
+        runtime_settings.save('trae', {
+            'catalog_ttl': 900, 'catalog_retry_ttl': 120,
+            'catalog_timeout': 5, 'catalog_backoff_base': 10,
+            'catalog_backoff_max': 300, 'credits_ttl': 30,
+            'credits_timeout': 8, 'cooldown_429': 120, 'cooldown_5xx': 30,
+            'solo_max_tokens': 4096, 'credit_meter': 'detail',
+            'native_tools': False, 'strict_stream_end': False,
+        })
+        values = runtime_settings.load('trae')
+        for field, expected in (
+            ('catalog_ttl', 900), ('catalog_retry_ttl', 120),
+            ('catalog_timeout', 5), ('catalog_backoff_base', 10),
+            ('catalog_backoff_max', 300), ('credits_ttl', 30),
+            ('credits_timeout', 8), ('cooldown_429', 120),
+            ('cooldown_5xx', 30), ('solo_max_tokens', 4096),
+        ):
+            self.assertEqual(values[field], expected, field)
+        self.assertEqual(values['credit_meter'], 'detail')
+        self.assertFalse(values['native_tools'])
+        self.assertFalse(values['strict_stream_end'])
+        self.assertEqual(runtime_settings.protocol_switches('trae')['native_tools'],
+                         False)
+        self.assertEqual(runtime_settings.credit_meter('trae'), 'detail')
+        self.assertEqual(runtime_settings.cooldown_429('trae'), 120)
+
+    def test_panel_override_wins_over_environment(self) -> None:
+        """显式保存过的值优先；没保存的字段仍跟随 TF_TRAE_*。"""
+        with mock.patch.object(config, 'TRAE_NATIVE_TOOLS', True), \
+             mock.patch.object(config, 'TRAE_TOOL_PROTOCOL_HINT', False):
+            runtime_settings.save('trae', {'native_tools': False})
+            values = runtime_settings.load('trae')
+            self.assertFalse(values['native_tools'])
+            self.assertFalse(values['tool_protocol_hint'])  # 未被覆盖，跟随 config
+
+    def test_new_fields_reject_out_of_range_values(self) -> None:
+        bad_payloads = (
+            {'catalog_ttl': 599},
+            {'catalog_ttl': 86401},
+            {'catalog_timeout': 2},
+            {'credits_ttl': 14},
+            {'cooldown_429': 601},
+            {'solo_max_tokens': 1023},
+            {'credit_meter': 'nope'},
+            {'native_tools': 'yes'},
+        )
+        for payload in bad_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    runtime_settings.save('trae', payload)
+
+    def test_qoder_rejects_trae_only_cache_fields(self) -> None:
+        with self.assertRaises(ValueError):
+            runtime_settings.save('qoder', {'catalog_ttl': 900})
+        with self.assertRaises(ValueError):
+            runtime_settings.save('qoder', {'native_tools': False})
 
     def test_rejects_invalid_values(self) -> None:
         bad_payloads = (
@@ -140,10 +234,14 @@ class RouteTest(_DbCase):
             out = platforms_router.platform_settings('trae', user={'role': 'admin'})
 
         for field in ('request_timeout', 'idle_timeout', 'max_accounts_try',
-                      'session_affinity', 'session_affinity_ttl', 'desktop_sync'):
+                      'session_affinity', 'session_affinity_ttl', 'desktop_sync',
+                      'catalog_ttl', 'credits_ttl', 'cooldown_429',
+                      'solo_max_tokens', 'credit_meter', 'native_tools'):
             self.assertIn(field, out)
         self.assertIn('capabilities', out)
         self.assertIn('checkin_concurrency', out)
+        self.assertEqual(out['enum_choices']['credit_meter'],
+                         ['', 'delta', 'detail'])
 
     def test_runtime_fields_save_without_max_in_flight(self) -> None:
         class _Adapter:
@@ -212,6 +310,320 @@ class TraeWiringTest(_DbCase):
                 asyncio.run(self.adapter._chat_accounts('m', {}))
         # 只尝试了 1 个账号：不会把所有候选都打一遍。
         self.assertEqual(chat_once.call_count, 1)
+
+
+class ProtocolSwitchTest(_DbCase):
+    """Qoder 的协议兼容开关：默认跟随网关、取值受白名单约束、可清回默认。"""
+
+    def test_defaults_follow_the_gateway(self) -> None:
+        values = runtime_settings.load('qoder')
+        for field in ('tool_echo_mode', 'anthropic_thinking',
+                      'structured_tool_history', 'image_transcode'):
+            self.assertEqual(values[field], '')
+        self.assertFalse(values['web_tools'])
+        self.assertEqual(values['enum_choices']['tool_echo_mode'],
+                         ['', 'strict', 'lenient'])
+        # 只下发本平台支持的枚举项：Trae 有「实扣积分模式」，但没有协议开关。
+        self.assertNotIn('tool_echo_mode',
+                         runtime_settings.load('trae')['enum_choices'])
+
+    def test_enum_values_round_trip(self) -> None:
+        runtime_settings.save('qoder', {
+            'tool_echo_mode': 'lenient',
+            'anthropic_thinking': 'empty',
+            'structured_tool_history': 'off',
+            'image_transcode': 'off',
+            'web_tools': True,
+        })
+        values = runtime_settings.load('qoder')
+        self.assertEqual(values['tool_echo_mode'], 'lenient')
+        self.assertEqual(values['anthropic_thinking'], 'empty')
+        self.assertEqual(values['structured_tool_history'], 'off')
+        self.assertEqual(values['image_transcode'], 'off')
+        self.assertTrue(values['web_tools'])
+
+    def test_rejects_values_outside_the_choices(self) -> None:
+        bad_payloads = (
+            {'tool_echo_mode': 'loud'},
+            {'tool_echo_mode': True},
+            {'tool_echo_mode': 1},
+            {'anthropic_thinking': 'on'},
+            {'structured_tool_history': 'strict'},
+            {'image_transcode': 'hard'},
+            {'web_tools': 'yes'},
+        )
+        for payload in bad_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    runtime_settings.save('qoder', payload)
+
+    def test_empty_value_clears_back_to_gateway_default(self) -> None:
+        runtime_settings.save('qoder', {'tool_echo_mode': 'lenient'})
+        runtime_settings.save('qoder', {'tool_echo_mode': ''})
+        self.assertEqual(runtime_settings.load('qoder')['tool_echo_mode'], '')
+        # 坏值（直接改库）也回落到默认，不让界面显示一个网关不认识的模式。
+        db.set_setting('platforms.qoder.image_transcode', 'nope')
+        self.assertEqual(runtime_settings.load('qoder')['image_transcode'], '')
+
+    def test_trae_cannot_use_the_gateway_switches(self) -> None:
+        for payload in ({'tool_echo_mode': 'strict'}, {'web_tools': True}):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    runtime_settings.save('trae', payload)
+
+
+class QoderEnvTest(_DbCase):
+    """保存的值要真的下发到网关读的环境变量（不是只写进库）。"""
+
+    ENV = ('QD_TOOL_ECHO_MODE', 'QD_ANTHROPIC_THINKING',
+           'QD_STRUCTURED_TOOL_HISTORY', 'QD_IMAGE_TRANSCODE', 'QD_WEB_TOOLS')
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._saved = {name: os.environ.get(name) for name in self.ENV}
+        self._orig_env = dict(qoder_embedded._ENV_ORIGINAL)
+        qoder_embedded._ENV_ORIGINAL.clear()
+        for name in self.ENV:
+            os.environ.pop(name, None)
+
+    def tearDown(self) -> None:
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        qoder_embedded._ENV_ORIGINAL.clear()
+        qoder_embedded._ENV_ORIGINAL.update(self._orig_env)
+        super().tearDown()
+
+    def test_settings_map_to_gateway_env(self) -> None:
+        runtime_settings.save('qoder', {
+            'tool_echo_mode': 'lenient',
+            'anthropic_thinking': 'empty',
+            'structured_tool_history': 'off',
+            'image_transcode': 'off',
+            'web_tools': True,
+        })
+        applied = qoder_embedded.apply_runtime_settings()
+        self.assertEqual(os.environ['QD_TOOL_ECHO_MODE'], 'lenient')
+        self.assertEqual(os.environ['QD_ANTHROPIC_THINKING'], 'empty')
+        self.assertEqual(os.environ['QD_STRUCTURED_TOOL_HISTORY'], 'off')
+        self.assertEqual(os.environ['QD_IMAGE_TRANSCODE'], 'off')
+        self.assertEqual(os.environ['QD_WEB_TOOLS'], '1')
+        self.assertEqual(applied['QD_TOOL_ECHO_MODE'], 'lenient')
+
+    def test_saving_default_restores_the_previous_env(self) -> None:
+        # 运维原来设了 lenient：面板保存 strict 后再改回「网关默认」，
+        # 应该回到 lenient，而不是把运维的设置抹成「没设」。
+        os.environ['QD_TOOL_ECHO_MODE'] = 'lenient'
+        runtime_settings.save('qoder', {'tool_echo_mode': 'strict'})
+        qoder_embedded.apply_runtime_settings()
+        self.assertEqual(os.environ['QD_TOOL_ECHO_MODE'], 'strict')
+
+        runtime_settings.save('qoder', {'tool_echo_mode': ''})
+        qoder_embedded.apply_runtime_settings()
+        self.assertEqual(os.environ['QD_TOOL_ECHO_MODE'], 'lenient')
+
+    def test_untouched_switches_keep_the_operator_env(self) -> None:
+        # 面板从没碰过 Web 工具：启动时不能把运维设的 QD_WEB_TOOLS=1 改成 0。
+        os.environ['QD_WEB_TOOLS'] = '1'
+        runtime_settings.save('qoder', {'request_timeout': 120})
+        self.assertEqual(qoder_embedded.apply_runtime_settings(), {})
+        self.assertEqual(os.environ['QD_WEB_TOOLS'], '1')
+
+    def test_explicit_values_only_apply_saved_fields(self) -> None:
+        runtime_settings.save('qoder', {'tool_echo_mode': 'lenient',
+                                        'web_tools': True})
+        applied = qoder_embedded.apply_runtime_settings({
+            'tool_echo_mode': 'strict', 'web_tools': False,
+            'anthropic_thinking': 'empty',
+        })
+        self.assertEqual(applied, {'QD_TOOL_ECHO_MODE': 'strict',
+                                   'QD_WEB_TOOLS': '0'})
+        self.assertNotIn('QD_ANTHROPIC_THINKING', os.environ)
+
+
+class QoderSettingsRouteTest(_DbCase):
+    def test_save_pushes_switches_to_the_gateway(self) -> None:
+        seen: dict = {}
+
+        class _Adapter:
+            name = 'qoder'
+            label = 'Qoder'
+
+            def apply_runtime_settings(self, values=None) -> None:
+                seen.update(values or {})
+
+        fake_security = mock.Mock()
+        with mock.patch.object(platforms_router, '_adapter',
+                               return_value=_Adapter()), \
+             mock.patch.object(platforms_router, 'security', fake_security):
+            out = platforms_router.save_platform_settings(
+                'qoder', {'tool_echo_mode': 'lenient', 'web_tools': True},
+                user={'role': 'admin'})
+
+        self.assertEqual(out['tool_echo_mode'], 'lenient')
+        self.assertTrue(out['web_tools'])
+        self.assertEqual(seen['tool_echo_mode'], 'lenient')
+        self.assertTrue(seen['web_tools'])
+        fake_security.audit.assert_called_once()
+
+
+class TraeCooldownTest(_DbCase):
+    """429/5xx 冷却：默认 0 = 旧行为；打开后冻结账号并换下一个。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.adapter = TraeAdapter()
+        self.accounts = [{'uid': 'u1', 'realm': 'cn'},
+                         {'uid': 'u2', 'realm': 'cn'}]
+
+    def _run(self, exc: Exception):
+        chat_once = mock.AsyncMock(side_effect=[exc, 'ok'])
+        with mock.patch.object(self.adapter, '_candidates',
+                               return_value=self.accounts), \
+             mock.patch.object(self.adapter, '_ensure_token',
+                               mock.AsyncMock(side_effect=lambda a: a)), \
+             mock.patch.object(self.adapter, '_chat_once', chat_once), \
+             mock.patch('server.platforms.trae.adapter.store.set_cooling') as cooling:
+            try:
+                return asyncio.run(self.adapter._chat_accounts('m', {})), cooling
+            except PlatformError as err:
+                return err, cooling
+
+    def test_rate_limit_raises_by_default(self) -> None:
+        err = PlatformError('limited', status=429, code='rate_limited')
+        out, cooling = self._run(err)
+        self.assertIsInstance(out, PlatformError)
+        cooling.assert_not_called()
+
+    def test_rate_limit_cools_down_and_tries_next_account(self) -> None:
+        runtime_settings.save('trae', {'cooldown_429': 90})
+        out, cooling = self._run(
+            PlatformError('limited', status=429, code='rate_limited'))
+        self.assertEqual(out, 'ok')
+        cooling.assert_called_once()
+        uid, until, reason = cooling.call_args.args
+        self.assertEqual(uid, 'u1')
+        self.assertGreater(until, time.time())
+        self.assertIn('429', reason)
+
+    def test_5xx_uses_its_own_seconds(self) -> None:
+        runtime_settings.save('trae', {'cooldown_5xx': 30})
+        out, cooling = self._run(
+            PlatformError('boom', status=503, code='upstream_error'))
+        self.assertEqual(out, 'ok')
+        cooling.assert_called_once()
+        self.assertAlmostEqual(cooling.call_args.args[1] - time.time(), 30,
+                               delta=10)
+
+    def test_model_unknown_does_not_cool_the_account(self) -> None:
+        """4023 是「模型走错通道」，账号本身没问题，冻结它只会白少一个号。"""
+        runtime_settings.save('trae', {'cooldown_5xx': 30, 'max_accounts_try': 1})
+        err = PlatformError('[4023] model is unknown', status=502,
+                            code='upstream_error', payload={'code': 4023})
+        chat_once = mock.AsyncMock(side_effect=[err, err])
+        with mock.patch.object(self.adapter, '_candidates',
+                               return_value=self.accounts), \
+             mock.patch.object(self.adapter, '_ensure_token',
+                               mock.AsyncMock(side_effect=lambda a: a)), \
+             mock.patch.object(self.adapter, '_chat_once', chat_once), \
+             mock.patch('server.platforms.trae.adapter.store.set_cooling') as cooling:
+            with self.assertRaises(PlatformError):
+                asyncio.run(self.adapter._chat_accounts('m', {}))
+        cooling.assert_not_called()
+
+    def test_cool_down_write_failure_keeps_raising(self) -> None:
+        runtime_settings.save('trae', {'cooldown_429': 90})
+        chat_once = mock.AsyncMock(
+            side_effect=[PlatformError('limited', status=429, code='rate_limited'),
+                         'ok'])
+        with mock.patch.object(self.adapter, '_candidates',
+                               return_value=self.accounts), \
+             mock.patch.object(self.adapter, '_ensure_token',
+                               mock.AsyncMock(side_effect=lambda a: a)), \
+             mock.patch.object(self.adapter, '_chat_once', chat_once), \
+             mock.patch('server.platforms.trae.adapter.store.set_cooling',
+                        side_effect=FileNotFoundError('gone')):
+            with self.assertRaises(PlatformError):
+                asyncio.run(self.adapter._chat_accounts('m', {}))
+
+
+class TraeProtocolWiringTest(_DbCase):
+    """面板上的协议开关要真的传到请求体构造函数与收尾翻译器。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.adapter = TraeAdapter()
+
+    @staticmethod
+    def _events():
+        async def gen():
+            yield ('output', {'response': 'hi'})
+            yield ('done', {'finish_reason': 'stop'})
+        return gen()
+
+    def _run_once(self, *, channel: str, body: dict):
+        response = mock.Mock()
+        response.aclose = mock.AsyncMock()
+        opener = 'open_solo_chat' if channel == 'solo' else 'open_chat'
+        iterer = 'iter_solo_events' if channel == 'solo' else 'iter_events'
+        with mock.patch.object(trae_client, f'build_{channel}_body',
+                               return_value={'built': True}) as build, \
+             mock.patch.object(trae_client, opener,
+                               mock.AsyncMock(return_value=response)), \
+             mock.patch.object(trae_client, iterer,
+                               lambda *a, **kw: self._events()):
+            asyncio.run(self.adapter._chat_once(
+                {'uid': 'u1', 'realm': 'cn'}, 'm', body, 'trae/m',
+                channel=channel, request_timeout=30, idle_timeout=30))
+        return build
+
+    def test_native_tools_off_strips_tools_and_passes_hint_switch(self) -> None:
+        runtime_settings.save('trae', {'native_tools': False,
+                                       'tool_protocol_hint': False,
+                                       'reasoning_effort': False})
+        tools = [{'type': 'function', 'function': {'name': 'f'}}]
+        build = self._run_once(channel='chat', body={
+            'messages': [{'role': 'user', 'content': 'x'}],
+            'stream': False, 'tools': tools})
+        passed = build.call_args.args[2]
+        self.assertNotIn('tools', passed)
+        self.assertFalse(build.call_args.kwargs['protocol_hint'])
+        self.assertFalse(build.call_args.kwargs['reasoning_effort'])
+
+    def test_solo_budget_comes_from_the_panel(self) -> None:
+        runtime_settings.save('trae', {'solo_max_tokens': 4096})
+        build = self._run_once(channel='solo', body={
+            'messages': [{'role': 'user', 'content': 'x'}], 'stream': False})
+        self.assertEqual(build.call_args.kwargs['max_tokens'], 4096)
+
+    def test_tail_switches_reach_translate(self) -> None:
+        runtime_settings.save('trae', {'strict_stream_end': False,
+                                       'empty_output_error': False,
+                                       'degenerate_call_error': False,
+                                       'reasoning_as_content': True,
+                                       'rescue_tail_strict': False})
+        body = {'messages': [{'role': 'user', 'content': 'x'}], 'stream': True}
+        response = mock.Mock()
+        response.aclose = mock.AsyncMock()
+        with mock.patch.object(trae_client, 'build_chat_body',
+                               return_value={'built': True}), \
+             mock.patch.object(trae_client, 'open_chat',
+                               mock.AsyncMock(return_value=response)), \
+             mock.patch.object(trae_client, 'iter_events',
+                               lambda *a, **kw: self._events()), \
+             mock.patch.object(trae_chat, 'translate',
+                               return_value=object()) as translate:
+            asyncio.run(self.adapter._chat_once(
+                {'uid': 'u1', 'realm': 'cn'}, 'm', body, 'trae/m',
+                channel='chat', request_timeout=30, idle_timeout=30))
+        kwargs = translate.call_args.kwargs
+        self.assertFalse(kwargs['strict_end'])
+        self.assertFalse(kwargs['empty_output_error'])
+        self.assertFalse(kwargs['degenerate_error'])
+        self.assertTrue(kwargs['reasoning_as_content'])
+        self.assertFalse(kwargs['strict_tail'])
 
 
 if __name__ == '__main__':

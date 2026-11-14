@@ -4,11 +4,22 @@
 
   · `limiter.py`  —— 池级**推理并发**（同时有多少个上游请求在跑）；
   · `checkinpacing.py` —— 批量签到的并发与账号间隔（一次性任务的节奏）；
-  · 本模块 —— 单次请求的**时间预算**与适配器自己的选号 / 兼容开关。
+  · 本模块 —— 单次请求的**时间预算**、缓存节奏、重试冷却与适配器兼容开关。
 
 三者都按平台分开存（`platforms.<name>.<field>`），但口径互不相干。放在同一个
 `/api/platforms/{name}/settings` 里返回，是因为界面把它们放在同一张「平台配置」
 表单上；后端仍各自校验、各自落库，改一个不会把另一个写回默认值。
+
+## 三类默认值
+
+  · **常量默认**（`_INT_FIELDS` / `_BOOL_FIELDS`）：以前就是模块里的硬编码常量，
+    这里只是把它挪到可配置层，默认值与旧行为逐位相同；
+  · **环境变量默认**（`solo_max_tokens` / `credit_meter` / `_PROTOCOL_BOOLS`）：
+    Trae 协议层的 `TF_TRAE_*` / `config.TRAE_*` 先于本模块存在，运维仍在用。
+    默认值**实时**读 `config`，只有用户显式保存过才用库里的值——这样
+    `TF_TRAE_*` 环境变量照常生效，面板改了也能覆盖它；
+  · **关闭即旧行为**（`cooldown_429` / `cooldown_5xx`）：0 表示维持改动前的
+    「429/5xx 直接上抛、不换号也不冻结」，只有大于 0 才启用强制冷却。
 
 ## 为什么不缓存
 
@@ -25,9 +36,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
-from .. import db
+from .. import config, db
 
 logger = logging.getLogger('workbuddy.platforms.settings')
 
@@ -43,8 +54,12 @@ IDLE_TIMEOUT_MIN, IDLE_TIMEOUT_MAX = 10, 600
 MAX_ACCOUNTS_TRY_MIN, MAX_ACCOUNTS_TRY_MAX = 1, 10
 SESSION_AFFINITY_TTL_MIN, SESSION_AFFINITY_TTL_MAX = 60, 12 * 3600
 
-# name -> (默认值, 下限, 上限, 界面文案用的中文名)
-_INT_FIELDS: dict[str, tuple[int, int, int, str]] = {
+# name -> (默认值 / 默认值工厂, 下限, 上限, 界面文案用的中文名)
+# 工厂只用于「默认值来自环境变量」的项（`solo_max_tokens` 的 TF_TRAE_*）：每次
+# 读取实时调用，所以测试里 `mock.patch.object(config, ...)` 与运维改环境变量
+# 都照旧生效，不会被这里抄成一份静态默认值。
+_IntDefault = int | Callable[[], int]
+_INT_FIELDS: dict[str, tuple[_IntDefault, int, int, str]] = {
     'request_timeout': (
         DEFAULT_REQUEST_TIMEOUT, REQUEST_TIMEOUT_MIN, REQUEST_TIMEOUT_MAX, '请求超时'),
     'idle_timeout': (
@@ -54,13 +69,69 @@ _INT_FIELDS: dict[str, tuple[int, int, int, str]] = {
     'session_affinity_ttl': (
         DEFAULT_SESSION_AFFINITY_TTL, SESSION_AFFINITY_TTL_MIN,
         SESSION_AFFINITY_TTL_MAX, '会话亲和时长'),
+    # ── Trae：模型目录缓存与刷新退避 ──
+    # 默认值就是原先 `adapter.py` 里的那几个常量。目录刷新失败时的指数退避
+    # 起点与封顶也一起放出，避免「等半小时才重试」只能改代码。
+    'catalog_ttl': (6 * 3600, 600, 86400, '模型目录缓存'),
+    'catalog_retry_ttl': (600, 60, 21600, '目录失败冷却'),
+    'catalog_timeout': (10, 3, 60, '目录拉取超时'),
+    'catalog_backoff_base': (30, 5, 600, '刷新退避起点'),
+    'catalog_backoff_max': (1800, 60, 7200, '刷新退避封顶'),
+    # ── Trae：积分 / 额度查询 ──
+    # 账号列表一次问全部账号，TTL 太短等于每刷新一次页面就打一轮上游。
+    'credits_ttl': (60, 15, 600, '积分缓存'),
+    'credits_timeout': (20, 5, 60, '积分查询超时'),
+    # ── Trae：限流 / 上游错误冷却（0 = 维持旧行为：直接上抛、不换号不冻结）──
+    'cooldown_429': (0, 0, 600, '限流冷却'),
+    'cooldown_5xx': (0, 0, 300, '上游错误冷却'),
+    # ── Trae：SOLO 通道默认输出预算 ──
+    # 思考 token 与正文共享这个上限；客户端显式传 max_tokens 时仍以客户端为准。
+    'solo_max_tokens': (lambda: config.TRAE_SOLO_MAX_TOKENS, 1024, 2_000_000,
+                        'SOLO 输出上限'),
 }
 
 # name -> (默认值, 中文名)
 _BOOL_FIELDS: dict[str, tuple[bool, str]] = {
     'session_affinity': (DEFAULT_SESSION_AFFINITY, '会话亲和'),
     'desktop_sync': (DEFAULT_DESKTOP_SYNC, '回写桌面端'),
+    'web_tools': (False, '本地 Web 工具'),
 }
+
+# Trae 协议兼容开关：name -> (config 属性, 中文名)。
+# 这批开关原先只能靠 `TF_TRAE_*` 环境变量改，改一次要重启进程；现在面板可覆盖，
+# 默认值仍实时取 config（所以环境变量与测试里的 patch 照旧生效）。
+_PROTOCOL_BOOLS: dict[str, tuple[str, str]] = {
+    'native_tools': ('TRAE_NATIVE_TOOLS', '原生工具透传'),
+    'text_tool_rescue': ('TRAE_TEXT_TOOL_RESCUE', '正文调用还原'),
+    'text_tool_tags': ('TRAE_TEXT_TOOL_TAGS', '标签调用还原'),
+    'tool_protocol_hint': ('TRAE_TOOL_PROTOCOL_HINT', '工具协议提示'),
+    'degenerate_call_error': ('TRAE_DEGENERATE_CALL_ERROR', '退化调用判错'),
+    'rescue_tail_strict': ('TRAE_RESCUE_TAIL_STRICT', '尾部规则'),
+    'reasoning_effort': ('TRAE_REASONING_EFFORT', '思考强度透传'),
+    'reasoning_as_content': ('TRAE_REASONING_AS_CONTENT', '思考内容兜底'),
+    'empty_output_error': ('TRAE_EMPTY_OUTPUT_ERROR', '空产出判错'),
+    'strict_stream_end': ('TRAE_STRICT_STREAM_END', '严格结束判据'),
+}
+_BOOL_NAMES = (*_BOOL_FIELDS, *_PROTOCOL_BOOLS)
+
+# 三态 / 多选开关：可选值里保留空串 =「跟随上游默认」（Qoder 是网关默认，
+# Trae 的 credit_meter 是「不计量」）。这些开关由内置网关 / 适配器**每次请求
+# 现读**，所以保存后立即生效，不需要重启。
+# name -> (默认值, 可选值, 中文名)
+_ENUM_FIELDS: dict[str, tuple[str, tuple[str, ...], str]] = {
+    'tool_echo_mode': ('', ('', 'strict', 'lenient'), '工具残片收尾'),
+    'anthropic_thinking': ('', ('', 'off', 'empty'), 'Anthropic 思考块'),
+    'structured_tool_history': ('', ('', 'auto', 'on', 'off'), '结构化工具历史'),
+    'image_transcode': ('', ('', 'auto', 'off'), '图片预处理'),
+    # 空串 = 不计量（本次改动前的行为）。默认值跟随 TF_TRAE_CREDIT_METER，
+    # 见 `_enum_default`：环境变量设了 detail/delta 时下拉框直接显示对应项，
+    # 只有显式保存空串才会覆盖成「不计量」。
+    'credit_meter': ('', ('', 'delta', 'detail'), '实扣积分模式'),
+}
+
+# 默认值跟随环境变量的枚举项：name -> config 属性。未设置过时用 config 的现值，
+# 用户保存过（包括保存空串「关闭」）之后以库里的值为准。
+_ENUM_CONFIG_DEFAULT: dict[str, str] = {'credit_meter': 'TRAE_CREDIT_METER'}
 
 # 每个平台真正会用到的字段。不在表里的平台（含测试里的假平台）只拿到通用两项：
 # 任何适配器都有「发请求」这一步，超时对它们都有意义；换号 / 亲和 / 回写则依赖
@@ -69,8 +140,20 @@ _GENERIC = frozenset({'request_timeout', 'idle_timeout'})
 _TRAE = frozenset({
     'request_timeout', 'idle_timeout', 'max_accounts_try',
     'session_affinity', 'session_affinity_ttl', 'desktop_sync',
+    'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout',
+    'catalog_backoff_base', 'catalog_backoff_max',
+    'credits_ttl', 'credits_timeout',
+    'cooldown_429', 'cooldown_5xx', 'solo_max_tokens', 'credit_meter',
+    *_PROTOCOL_BOOLS,
 })
-_QODER = frozenset({'request_timeout', 'idle_timeout'})
+# Qoder 的协议兼容开关：网关的对话管线里有一批「模型行为不合预期」时的兜底
+# 策略，上游面板能改，token-farm 之前没有任何入口。它们都是网关**每次请求
+# 现读**的值（见 embedded.apply_runtime_settings），保存即生效。
+_QODER = frozenset({
+    'request_timeout', 'idle_timeout',
+    'tool_echo_mode', 'anthropic_thinking', 'structured_tool_history',
+    'image_transcode', 'web_tools',
+})
 _BY_PLATFORM: dict[str, frozenset[str]] = {
     'trae': _TRAE,
     'qoder': _QODER,
@@ -80,15 +163,29 @@ _BY_PLATFORM: dict[str, frozenset[str]] = {
 def capabilities(platform: str) -> dict[str, bool]:
     """该平台支持哪些字段。前端据此决定显示哪几组，而不是用平台名硬编码。"""
     supported = _BY_PLATFORM.get(platform, _GENERIC)
-    return {name: name in supported for name in (*_INT_FIELDS, *_BOOL_FIELDS)}
+    return {
+        name: name in supported
+        for name in (*_INT_FIELDS, *_BOOL_NAMES, *_ENUM_FIELDS)
+    }
 
 
 def _key(platform: str, field: str) -> str:
     return f'platforms.{platform}.{field}'
 
 
+def _int_default(field: str) -> int:
+    raw = _INT_FIELDS[field][0]
+    if callable(raw):
+        try:
+            return int(raw())
+        except (TypeError, ValueError):  # 环境变量写坏了：退回区间下限，仍可保存
+            return _INT_FIELDS[field][1]
+    return int(raw)
+
+
 def _read_int(platform: str, field: str) -> int:
-    default, low, high, _ = _INT_FIELDS[field]
+    default = _int_default(field)
+    _, low, high, _ = _INT_FIELDS[field]
     raw = db.get_setting(_key(platform, field), default)
     if isinstance(raw, bool):
         return default
@@ -99,10 +196,45 @@ def _read_int(platform: str, field: str) -> int:
     return value if low <= value <= high else default
 
 
+def _bool_default(field: str) -> bool:
+    if field in _BOOL_FIELDS:
+        return _BOOL_FIELDS[field][0]
+    return bool(getattr(config, _PROTOCOL_BOOLS[field][0], False))
+
+
+def _bool_label(field: str) -> str:
+    if field in _BOOL_FIELDS:
+        return _BOOL_FIELDS[field][1]
+    return _PROTOCOL_BOOLS[field][1]
+
+
 def _read_bool(platform: str, field: str) -> bool:
-    default, _ = _BOOL_FIELDS[field]
+    default = _bool_default(field)
     raw = db.get_setting(_key(platform, field), default)
     return raw if isinstance(raw, bool) else default
+
+
+def _enum_default(field: str) -> str:
+    """枚举默认值：优先跟随环境变量（config），读坏了退回表里的静态默认。"""
+    static, choices, _ = _ENUM_FIELDS[field]
+    attr = _ENUM_CONFIG_DEFAULT.get(field)
+    if not attr:
+        return static
+    raw = getattr(config, attr, '')
+    if raw is True:  # 布尔型环境变量（如 TF_TRAE_CREDIT_METER=1）
+        value = 'delta'
+    elif not raw:
+        value = ''
+    else:
+        value = str(raw).strip().lower()
+    return value if value in choices else static
+
+
+def _read_enum(platform: str, field: str) -> str:
+    default = _enum_default(field)
+    _, choices, _ = _ENUM_FIELDS[field]
+    raw = db.get_setting(_key(platform, field), default)
+    return raw if isinstance(raw, str) and raw in choices else default
 
 
 def configured(platform: str, field: str) -> bool:
@@ -120,19 +252,28 @@ def load(platform: str) -> dict[str, Any]:
     values: dict[str, Any] = {
         field: _read_int(platform, field) for field in _INT_FIELDS
     }
-    values.update({field: _read_bool(platform, field) for field in _BOOL_FIELDS})
+    values.update({field: _read_bool(platform, field) for field in _BOOL_NAMES})
+    values.update({field: _read_enum(platform, field) for field in _ENUM_FIELDS})
+    caps = capabilities(platform)
     return {
         **values,
-        'capabilities': capabilities(platform),
+        'capabilities': caps,
         'runtime_limits': {
             field: {'min': low, 'max': high}
             for field, (_, low, high, _) in _INT_FIELDS.items()
+        },
+        # 枚举字段的可选值（含空串 =「跟随网关默认」）。只下发本平台支持的，
+        # 前端据此画下拉框，不用在界面里再抄一份取值表。
+        'enum_choices': {
+            field: list(choices)
+            for field, (_, choices, _) in _ENUM_FIELDS.items()
+            if caps[field]
         },
     }
 
 
 def _coerce_int(field: str, raw: object) -> int:
-    default, low, high, label = _INT_FIELDS[field]
+    _, low, high, label = _INT_FIELDS[field]
     if isinstance(raw, bool):
         raise ValueError(f'{label}必须是整数')
     if isinstance(raw, float) and not raw.is_integer():
@@ -148,8 +289,19 @@ def _coerce_int(field: str, raw: object) -> int:
 
 def _coerce_bool(field: str, raw: object) -> bool:
     if not isinstance(raw, bool):
-        raise ValueError(f'{_BOOL_FIELDS[field][1]}必须是布尔值')
+        raise ValueError(f'{_bool_label(field)}必须是布尔值')
     return raw
+
+
+def _coerce_enum(field: str, raw: object) -> str:
+    _, choices, label = _ENUM_FIELDS[field]
+    if not isinstance(raw, str):
+        raise ValueError(f'{label}必须是字符串')
+    value = raw.strip().lower()
+    if value not in choices:
+        allowed = ' / '.join(choice or '默认' for choice in choices)
+        raise ValueError(f'{label}只能是 {allowed}')
+    return value
 
 
 def save(platform: str, payload: dict) -> dict[str, Any]:
@@ -168,12 +320,18 @@ def save(platform: str, payload: dict) -> dict[str, Any]:
         if not caps[field]:
             raise ValueError(f'{platform} 不支持「{_INT_FIELDS[field][3]}」设置')
         updates[field] = _coerce_int(field, payload[field])
-    for field in _BOOL_FIELDS:
+    for field in _BOOL_NAMES:
         if field not in payload or payload[field] is None:
             continue
         if not caps[field]:
-            raise ValueError(f'{platform} 不支持「{_BOOL_FIELDS[field][1]}」设置')
+            raise ValueError(f'{platform} 不支持「{_bool_label(field)}」设置')
         updates[field] = _coerce_bool(field, payload[field])
+    for field in _ENUM_FIELDS:
+        if field not in payload or payload[field] is None:
+            continue
+        if not caps[field]:
+            raise ValueError(f'{platform} 不支持「{_ENUM_FIELDS[field][2]}」设置')
+        updates[field] = _coerce_enum(field, payload[field])
     for field, value in updates.items():
         db.set_setting(_key(platform, field), value)
     return load(platform)
@@ -204,3 +362,60 @@ def session_affinity_ttl(platform: str) -> int:
 
 def desktop_sync(platform: str) -> bool:
     return _read_bool(platform, 'desktop_sync')
+
+
+# ── Trae：缓存 / 冷却 / 协议开关 ──────────────────────────
+# 这一组只有 Trae 适配器会读（Qoder 的 capabilities 里没有这些字段）。
+def catalog_ttl(platform: str) -> int:
+    return _read_int(platform, 'catalog_ttl')
+
+
+def catalog_retry_ttl(platform: str) -> int:
+    return _read_int(platform, 'catalog_retry_ttl')
+
+
+def catalog_timeout(platform: str) -> int:
+    return _read_int(platform, 'catalog_timeout')
+
+
+def catalog_backoff_base(platform: str) -> int:
+    return _read_int(platform, 'catalog_backoff_base')
+
+
+def catalog_backoff_max(platform: str) -> int:
+    return _read_int(platform, 'catalog_backoff_max')
+
+
+def credits_ttl(platform: str) -> int:
+    return _read_int(platform, 'credits_ttl')
+
+
+def credits_timeout(platform: str) -> int:
+    return _read_int(platform, 'credits_timeout')
+
+
+def cooldown_429(platform: str) -> int:
+    return _read_int(platform, 'cooldown_429')
+
+
+def cooldown_5xx(platform: str) -> int:
+    return _read_int(platform, 'cooldown_5xx')
+
+
+def solo_max_tokens(platform: str) -> int:
+    return _read_int(platform, 'solo_max_tokens')
+
+
+def credit_meter(platform: str) -> str:
+    """实扣积分口径：'' / 'delta' / 'detail'（见 config.TRAE_CREDIT_METER）。"""
+    return _read_enum(platform, 'credit_meter')
+
+
+def protocol_switches(platform: str) -> dict[str, bool]:
+    """Trae 协议兼容开关一次读全。
+
+    协议层一次请求要判断好几个开关（工具透传 / 还原 / 判错 / 断流），逐个
+    调单值函数会让调用点散成一片；这里返回的 dict 就是 `_PROTOCOL_BOOLS`
+    的键，调用方按名字取，拼错会立刻 KeyError 而不是静默拿到 False。
+    """
+    return {field: _read_bool(platform, field) for field in _PROTOCOL_BOOLS}

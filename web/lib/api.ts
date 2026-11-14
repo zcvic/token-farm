@@ -61,6 +61,7 @@ import type {
   PlatformModel,
   PlatformModelCatalog,
   PlatformModelRates,
+  PlatformSettingField,
   PlatformSettings,
   PlatformUsage,
   Combo,
@@ -659,8 +660,11 @@ export const platformApi = {
    */
   catalog: () => get<PlatformCatalog>('/api/platforms/model-catalog'),
   /**
-   * 平台设置：池级推理并发（0 = 不限）+ 批量签到节奏（并发 / 账号间隔）。
-   * 只提交需要改的字段即可，未提交的保持原值。
+   * 平台设置：池级推理并发（0 = 不限）+ 批量签到节奏（并发 / 账号间隔）+
+   * 请求预算与平台专属开关。
+   *
+   * 只提交需要改的字段即可，未提交的保持原值；数值 / 布尔 / 枚举三类字段的
+   * 名字由 `PlatformSettingField` 统一约束，新增字段不必回来改签名。
    */
   settings: (name: string) =>
     get<PlatformSettings>(`${platformPath(name)}/settings`),
@@ -669,13 +673,7 @@ export const platformApi = {
     checkin_concurrency?: number;
     checkin_delay_min?: number;
     checkin_delay_max?: number;
-    request_timeout?: number;
-    idle_timeout?: number;
-    max_accounts_try?: number;
-    session_affinity?: boolean;
-    session_affinity_ttl?: number;
-    desktop_sync?: boolean;
-  }) =>
+  } & Partial<Record<PlatformSettingField, number | boolean | string>>) =>
     put<PlatformSettings>(`${platformPath(name)}/settings`, body),
   /**
    * 账号调度参数：权重（0 = 恢复默认）与临时冻结（`disabled`）。
