@@ -77,7 +77,8 @@ b64773e85c4f9dcb1e73cf6d4f2010fa55ff66a8
 
 # ---- 2026-11 第二批：上游 workbuddy-manager（Go 网关仓）
 #      仓库：https://github.com/ithtelab/workbuddy-manager
-#      范围：80b4b21（v2.11.10）→ 8b5a4df4（v2.11.14），40 个非 merge 提交。
+#      范围：80b4b21（v2.11.10）→ 8b5a4df4（v2.11.14），30 个非 merge 提交
+#      （区间内共 38 个提交，另 8 个是 merge）。
 #      这是另一套运行时（Go），与上面的 misakano 面板仓**不是同一来源**；
 #      只移植对本项目有益的部分，不整段合并。
 #      已取：
@@ -92,7 +93,32 @@ b64773e85c4f9dcb1e73cf6d4f2010fa55ff66a8
 #      未取：
 #        · Trace Tap（调用抓包）整段：新表、所有转发路径的采集点、/traces 页面
 #          与导航、tap 测试与文档；与本地定位不符，收益不足以覆盖维护面。
+#      注：上面「已取」是**批次级**判定。其中 c58f75c1 / 89d0dc82 有若干子项
+#      当时只落地一半（代理探测提示后端有、前端没显示等），已在下方
+#      「第二批补漏」段逐项补齐，以那一段为准。
 8b5a4df412b86d29b92c4740d0c9adc1f6750b99
+
+# ---- 2026-11 第二批补漏：上面那一批里「只差入口/展示」的子项
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      核对方式：把 80b4b21..8b5a4df4 的 30 个非 merge 提交按「新增标识符」
+#      逐个回查本地代码，发现下列子项此前被整批记为已取，实际未落地：
+#        · c58f75c1 的**登录页表单安全**（其余三项 reload 读侧自愈 /
+#          credits 到账时间三元组 / keep_task_scheduler 改 async 本地都已有）：
+#          静态导出页在 JS 就绪前是原生表单，提前点登录会走默认 GET，把
+#          `?username=…&password=…` 拼进地址栏（浏览记录 / 反代日志 / Referer）。
+#          本地补：`login/page.tsx` 加 `method="post"` + 按钮 `!ready` 挂载门，
+#          新增 `server/tests/test_login_form_safety.py` 两个用例。
+#        · 89d0dc82 的四项：代理探测的 `hint` 展示（后端早已返回，前端只读
+#          `error`）、代理「聊天不走这里」作用域警示（`boundTotal` /
+#          `showChatScopeWarn` + 两条 i18n）、登录页 `usernamePlaceholder`
+#          本地化、出站 HTTP/2 的界面入口（Go 侧 config.upstream.http2 →
+#          ConfigureHTTP2 早已齐全，缺的只是 `UPSTREAM_FIELDS` 字段与
+#          `_sanitize_section` 的布尔白名单）。
+#      未取：
+#        · 074f29c0 / 9e85234f 的「表格默认居中 + wb-table-left / wb-first-left」：
+#          纯视觉改动，会改变全站所有表格的观感，需单独评估，暂不跟随。
+c58f75c17d17406d8ce35451f15ac221e0d69a1e
+89d0dc8290cca9841084d352b81cae9dc18bafd2
 
 # ---- 2026-11 成长任务批：附录 A 的 A-1～A-8 + 附录 B 的 B-8/B-9
 #      仓库：https://github.com/misakano7545/workbuddy2api-panel

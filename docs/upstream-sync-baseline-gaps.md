@@ -102,6 +102,28 @@
 
 第二批（改流量分布、需灰度）与「明确不移植」的项见文末「建议实施顺序」。
 
+### 2026-11 第二批补漏（manager 仓子项）
+
+把 `80b4b21..8b5a4df4` 的 30 个非 merge 提交按「新增标识符」逐个回查本地代码，
+发现有几个子项此前被整批记为已取、实际未落地。它们都不是新能力，而是
+「后端/上游已经支持，只差一个入口或一行展示」：
+
+| 编号 | 能力 | 状态 | 来源提交 |
+|---|---|---|---|
+| G-M2-1 | 登录页表单安全（`method="post"` + 按钮 `!ready` 挂载门） | ✅ 已同步（新增 `test_login_form_safety.py`） | `c58f75c1` |
+| G-M2-2 | 代理探测 `hint` 展示（协议/端口/认证/规则归类） | ✅ 已同步（后端早已返回，前端补读） | `89d0dc82` |
+| G-M2-3 | 代理「聊天不走这里」作用域警示 | ✅ 已同步（`boundTotal` + `showChatScopeWarn`） | `89d0dc82` |
+| G-M2-4 | 登录页 `usernamePlaceholder` 本地化 | ✅ 已同步（五份 locale） | `89d0dc82` |
+| G-M2-5 | 出站 HTTP/2 的界面入口 | ✅ 已同步（`UPSTREAM_FIELDS` + `_sanitize_section` 布尔白名单） | `89d0dc82` |
+| G-M2-6 | 表格默认居中 + `wb-table-left` / `wb-first-left` | ⏸ 未取（纯视觉，改全站表格观感，需单独评估） | `074f29c0` / `9e85234f` |
+| G-M2-7 | Windows 启动器「开机自启时同时启动项目」 | ⏸ 未取（下一批；C# 改动本地无法自动化验证） | `76e82c59` |
+
+> G-M2-5 的 Go 侧其实早已齐全：`cmd/server/config.go` 的
+> `upstream.http2` → `main.go` 的 `ConfigureHTTP2(cfg.Upstream.HTTP2)` →
+> `internal/upstream/transport.go`，`config.example.json` 也有该项。
+> 缺的只是面板入口——不登记布尔白名单时，界面上的开关会被
+> `_sanitize_section` 当成未知键静默忽略，保存还显示成功。
+
 **部署注意**（G-P1-16 的镜像写入）：写入发生在**面板容器**里，目标是上游仓库目录
 下的 `config.json`。默认部署把整个上游仓库以读写方式挂进面板
 （`docker-compose.yml` 的 `- ../workbuddy2api:/opt/workbuddy2api`），所以默认
@@ -1468,6 +1490,14 @@ M-P1-15、M-P0-2），明细见文首「同步状态」的对应小节，这里�
 M-P2-14 → M-P2-15 → M-P1-11 → M-P1-6 → M-P1-8 → M-P1-14 → M-P1-12（依赖 M-P1-6
 的 `failKeepBinding`）→ M-P1-15 → M-P0-2。`go build` / `go vet` /
 `go test ./... -count=1` 全过，九项全部落地。
+
+### 2026-11 第二批补漏（已落地，未提交）
+
+七项 G-M2-1～G-M2-7，来源是 manager 仓 `80b4b21..8b5a4df4` 里被整批记为已取、
+实际只落地一半的子项。前五项（登录页表单安全、代理 hint 展示、代理作用域警示、
+登录页 placeholder 本地化、出站 HTTP/2 界面入口）合成一个提交一次回归；后两项
+（表格居中、Windows 启动器自启启动项目）未取，理由见文首表格。明细见文首
+「2026-11 第二批补漏」小节。
 
 ### 第二批（改流量分布，需要灰度）
 

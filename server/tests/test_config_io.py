@@ -443,6 +443,19 @@ class UpstreamConfigRoundTrip(unittest.TestCase):
         with self.assertRaises(ValueError):
             wb2api.save_upstream_config({'upstream': {'gzip_body': 'off'}})
 
+    def test_upstream_http2_bool(self) -> None:
+        """出站 HTTP/2 必须能落盘（Go 侧早已支持，缺的只是面板入口）。
+
+        上游 `config.upstream.http2` → `upstream.ConfigureHTTP2`，默认关闭。
+        不登记这个布尔键的话，界面上的开关会被 `_sanitize_section` 当成未知键
+        静默忽略——用户点开却没有任何效果，而且保存还显示成功。
+        """
+        write_cfg(self.cfg_path, {})
+        wb2api.save_upstream_config({'upstream': {'http2': True}})
+        self.assertIs(read_cfg(self.cfg_path)['upstream']['http2'], True)
+        with self.assertRaises(ValueError):
+            wb2api.save_upstream_config({'upstream': {'http2': 'on'}})
+
     def test_missing_config_refuses_to_write(self) -> None:
         with self.assertRaises(FileNotFoundError):
             wb2api.save_upstream_config({'schedule': {'checkin_hours': [9]}})

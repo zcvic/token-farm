@@ -1980,9 +1980,11 @@ def _sanitize_section(section: str, incoming: dict) -> dict:
             if len(val) > _UPSTREAM_TEXT_MAX:
                 raise ValueError(f'upstream.{key} 过长（上限 {_UPSTREAM_TEXT_MAX} 字符）')
             out[key] = val
-        elif section == 'upstream' and key in ('passthrough_ip', 'gzip_body'):
+        elif section == 'upstream' and key in ('passthrough_ip', 'gzip_body', 'http2'):
             # 布尔开关先登记：未登记的键会被当成「未知键」静默忽略，用户在界面上
             # 关掉 gzip 却没生效（issue #297 的排障路径依赖这个开关）。
+            # `http2` 同理：上游 Go 侧早在 0054 补丁里就支持（config.upstream.http2
+            # → ConfigureHTTP2），缺的只是面板入口——不登记就会「界面能点、文件没写」。
             if not isinstance(raw, bool):
                 raise ValueError(f'upstream.{key} 必须是布尔值')
             out[key] = raw
