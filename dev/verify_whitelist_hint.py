@@ -18,7 +18,8 @@
      更新的旧值，刚输入的那个逃过了校验，要再点一次别处才现身）；
   6. 手输正确的名字 → 不报（别为了修 5 而误报）。
   7. 「从清单选择」弹层：候选齐全、与密钥版本一致的那一组排前面、可搜索、
-     勾选即加入白名单（这几条都是渲染出来的行为，静态断言看不出来）。
+     勾选即加入白名单（这几条都是渲染出来的行为，静态断言看不出来）；平台模型
+     （Trae / Qoder / 组合）单独成组排在后面，取不到时只在该组下面说明。
 
     python dev/verify_whitelist_hint_ui.py
 
@@ -43,6 +44,7 @@ UPSTREAM_PORT = 7911
 MANAGER_PORT = 7912
 ADMIN_PW = 'wl-hint-pass'
 UID = 'aa117777-0000-0000-0000-000000000007'
+UID_GLOBAL = 'aa117777-0000-0000-0000-000000000008'
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -67,13 +69,16 @@ class Upstream(BaseHTTPRequestHandler):
             self._json({
                 'accounts': [{'uid': UID, 'nickname': '演示号', 'credits': 800,
                               'disabled': False, 'cooling': False,
-                              'success_count': 3, 'in_flight': 0}],
-                'total': 1, 'healthy': 1, 'cooling': 0, 'disabled': 0,
+                              'success_count': 3, 'in_flight': 0},
+                             {'uid': UID_GLOBAL, 'nickname': '演示号-国际',
+                              'credits': 200, 'disabled': False, 'cooling': False,
+                              'success_count': 1, 'in_flight': 0}],
+                'total': 2, 'healthy': 2, 'cooling': 0, 'disabled': 0,
                 'in_flight_full': 0, 'redis_mode': 'noop', 'sticky_sessions': 0,
                 'realm_totals': {
                     'cn': {'total': 1, 'healthy': 1, 'cooling': 0,
                            'disabled': 0, 'in_flight_full': 0},
-                    'global': {'total': 0, 'healthy': 0, 'cooling': 0,
+                    'global': {'total': 1, 'healthy': 1, 'cooling': 0,
                                'disabled': 0, 'in_flight_full': 0}},
             })
         elif path == '/v1/models':
@@ -115,6 +120,15 @@ def seed() -> None:
         'auth': {'accessToken': _jwt(UID), 'refreshToken': 'r',
                  'expiresAt': int(time.time()) + 60 * 86400,
                  'domain': 'copilot.tencent.com', 'realm': 'cn'},
+    }, ensure_ascii=False), encoding='utf-8')
+    # 国际版也要有一个账号：选择器会**隐藏没有账号的版本组**（issue #364），
+    # 只播国内版时「国际版」那一组根本不会出现，下面「国际版排在后面」的断言
+    # 就成了在测一个不存在的组。
+    (auths / f'workbuddy-{UID_GLOBAL}.json').write_text(json.dumps({
+        'account': {'uid': UID_GLOBAL, 'enterpriseId': 'e', 'nickname': '演示号-国际'},
+        'auth': {'accessToken': _jwt(UID_GLOBAL), 'refreshToken': 'r',
+                 'expiresAt': int(time.time()) + 60 * 86400,
+                 'domain': 'copilot.tencent.com', 'realm': 'global'},
     }, ensure_ascii=False), encoding='utf-8')
     # 一条别名，用于验证「别名算合法条目」
     db.set_setting('model_map', {'gpt-4o-mini': 'glm-5.2'})
@@ -288,6 +302,16 @@ const BASE = process.env.BASE, OUT = process.env.OUT;
   await p.goto(`${BASE}/keys`,{waitUntil:'load'});
   await p.waitForTimeout(3500);
 
+  // 关掉可能弹出的「更新日志」：全新浏览器配置 + 新版本时它会自动弹一次，
+  // 遮住整页（浮层拦截点击），后面的「新建密钥」点不动。它只在**每个版本
+  // 第一次**出现，所以不是每次跑都会遇到——踩过一次就得记住。
+  for (let i = 0; i < 3; i++) {
+    const full = p.locator('button', {hasText: /查看完整更新日志|Full changelog/}).first();
+    if (!(await full.count())) break;
+    await p.keyboard.press('Escape');
+    await p.waitForTimeout(400);
+  }
+
   const addBtn = p.locator('button', {hasText: /添加|新建|创建/}).first();
   await addBtn.click();
   await p.waitForTimeout(1200);
@@ -408,17 +432,44 @@ const BASE = process.env.BASE, OUT = process.env.OUT;
     return [...root.querySelectorAll('button[role=checkbox]')]
       .map((e) => e.textContent.trim());
   });
+  // 平台分组是**后取的**（打开弹层后逐平台补）：等它们落地再断言，否则拿到的是
+  // 「只有 WorkBuddy 两组」的中间态。等不到也不判失败——那个环境可能压根没接平台，
+  // 下面的断言只针对「WorkBuddy 两组」这部分（与本次改动前一致）。
+  const waitPlatformsSettled = async () => {
+    for (let i = 0; i < 30; i++) {
+      const loading = await p.evaluate(() => {
+        const root = document.querySelector('[data-radix-popper-content-wrapper]');
+        return !!root && /正在读取平台模型/.test(root.textContent || '');
+      });
+      if (!loading) return true;
+      await p.waitForTimeout(300);
+    }
+    return false;
+  };
+  await waitPlatformsSettled();
   const ids = await popoverIds();
-  step(ids.length === 3, '清单列出了全部候选模型', JSON.stringify(ids));
-  step(ids.length > 0 && !ids[0].startsWith('global:'),
-       '与密钥版本一致的那组排前面（国内版密钥 → 国内版清单在前）', JSON.stringify(ids));
-  step(ids.length > 0 && ids[ids.length - 1].startsWith('global:'),
-       '另一版本的清单排在后面', JSON.stringify(ids));
+  // 不再断言「恰好 3 个」：清单里现在还有 Trae / Qoder / 组合的平台模型（条数随
+  // 部署而变）。改为断言 WorkBuddy 那三个候选都在，且顺序仍是「国内版在前」。
+  step(['glm-5.2', 'deepseek-v4.1-flash', 'global:gpt-5.6-sol'].every((x) => ids.includes(x)),
+       '清单列出了 WorkBuddy 两组候选', JSON.stringify(ids.slice(0, 6)));
+  step(ids.indexOf('glm-5.2') >= 0
+       && ids.indexOf('glm-5.2') < ids.indexOf('global:gpt-5.6-sol'),
+       '与密钥版本一致的那组排前面（国内版密钥 → 国内版清单在前）',
+       JSON.stringify(ids.slice(0, 6)));
+  // 平台模型（带 `<平台>cn/` / `<平台>com/` / `combo/` 前缀）：有就应当在清单里，
+  // 且排在 WorkBuddy 两组之后——它们与 `cn:` / `global:` 是两个维度。
+  const platformIds = ids.filter((x) => /^[a-z0-9_-]+(cn|com)?\//i.test(x));
+  const lastWb = Math.max(ids.indexOf('glm-5.2'), ids.indexOf('global:gpt-5.6-sol'));
+  step(platformIds.length === 0
+       || ids.indexOf(platformIds[platformIds.length - 1]) > lastWb,
+       '平台模型分组排在 WorkBuddy 两组之后', JSON.stringify(platformIds.slice(0, 4)));
   const searchBox = p.locator('[data-radix-popper-content-wrapper] input').first();
-  await searchBox.fill('gpt');
+  // 搜一个只属于国际版的串：`gpt` 现在也会命中平台清单里的 `traecn/gpt-5.5` 之类。
+  await searchBox.fill('gpt-5.6');
   await p.waitForTimeout(400);
   const filtered = await popoverIds();
-  step(filtered.length === 1 && filtered[0].startsWith('global:gpt'),
+  step(filtered.length > 0 && filtered.includes('global:gpt-5.6-sol')
+       && filtered.every((x) => x.includes('gpt-5.6')),
        '清单可按关键字搜索', JSON.stringify(filtered));
   await p.locator('[data-radix-popper-content-wrapper] button[role=checkbox]').first().click();
   await p.waitForTimeout(500);

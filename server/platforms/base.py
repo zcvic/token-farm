@@ -259,6 +259,20 @@ class PlatformAdapter(ABC):
         """
         return None
 
+    def cached_model_ids(self) -> set[str] | None:
+        """**已缓存**的可调用模型 ID（`traecn/x`、`qodercom/x` 这种对外名）。
+
+        给密钥白名单的「这些名字存在吗」校验用：它挂在输入框失焦上，**不能联网**
+        （一次上游慢响应就会把交互拖住），所以只读进程内 / 库里的缓存。
+
+        返回 None 表示「这份清单现在拿不到」。调用方必须据此**跳过判定**，而不是
+        判成「找不到」——拿不到清单时一切名字都会被判错，那是假警报，比不提示
+        更糟（用户会去改一个本来正确的名字）。
+
+        基类默认 None：没有目录概念的平台不参与这项校验。
+        """
+        return None
+
     # ── 账号 ────────────────────────────────────────────────
     @abstractmethod
     def list_accounts(self) -> list[dict]:

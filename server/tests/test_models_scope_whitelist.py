@@ -34,7 +34,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from server import db, keysvc  # noqa: E402
+from server import db, keysvc, platforms  # noqa: E402
+from server.platforms.trae import catalog as trae_catalog  # noqa: E402
 from server.routers import gateway as G  # noqa: E402
 from server.routers import keys as keys_router  # noqa: E402
 from server.services import modelcatalog  # noqa: E402
@@ -483,6 +484,173 @@ class WhitelistHintTest(unittest.TestCase):
                                              {'gpt-4o-mini'}), [])
 
 
+class PlatformWhitelistHintTest(unittest.TestCase):
+    """平台模型（`traecn/x`、`qodercom/x`、`combo/fast`）也要能被认出来。
+
+    编辑密钥的白名单里既能写 WorkBuddy 的裸名 / `global:`，也能写平台模型名。
+    后者**不在**腾讯的版本目录里，若只按版本目录判，每一个平台条目都会被报成
+    「找不到」——那正是这条提示最不该做的事（假警报）。
+
+    判据与调用侧同一份：平台 + 裸模型相同，且区域相容（旧式 `trae/x` 不带
+    区域，视为跨区域通配，见 `keysvc._platform_model_allowed`）。
+    """
+
+    def test_known_platform_entries_accepted(self) -> None:
+        known = {'trae': {'traecn/glm-5.2', 'traecom/glm-5.2'},
+                 'qoder': {'qodercn/Qwen3.8-Max'},
+                 'combo': {'combo/fast'}}
+        self.assertEqual(
+            keysvc.unknown_whitelist_entries(
+                ['traecn/glm-5.2', 'traecom/glm-5.2', 'qodercn/Qwen3.8-Max',
+                 'combo/fast'],
+                {'cn': {'glm-5.2'}, 'global': set()}, [], known),
+            [])
+
+    def test_unknown_platform_entry_flagged(self) -> None:
+        known = {'trae': {'traecn/glm-5.2'}, 'combo': {'combo/fast'}}
+        self.assertEqual(
+            keysvc.unknown_whitelist_entries(
+                ['traecn/glm-5.9', 'combo/nope'],
+                {'cn': {'glm-5.2'}, 'global': set()}, [], known),
+            ['traecn/glm-5.9', 'combo/nope'])
+
+    def test_realm_of_platform_entry_must_match(self) -> None:
+        """`traecom/x` 不该拿 `traecn/x` 判成认得（同名不同区是两个入口）。"""
+        known = {'trae': {'traecn/glm-5.2'}}
+        self.assertEqual(
+            keysvc.unknown_whitelist_entries(
+                ['traecom/glm-5.2'], {'cn': {'glm-5.2'}, 'global': set()}, [],
+                known),
+            ['traecom/glm-5.2'])
+
+    def test_legacy_platform_entry_is_cross_realm(self) -> None:
+        """旧式 `trae/x` 不携带区域 → 任意区域的同名模型都算认得。"""
+        known = {'trae': {'traecom/glm-5.2'}}
+        self.assertEqual(
+            keysvc.unknown_whitelist_entries(
+                ['trae/glm-5.2'], {'cn': {'glm-5.2'}, 'global': set()}, [],
+                known),
+            [])
+
+    def test_missing_platform_catalog_skips_its_entries(self) -> None:
+        """平台目录拿不到（None）→ 跳过判定，不能把用户写的名字判成找不到。"""
+        self.assertEqual(
+            keysvc.unknown_whitelist_entries(
+                ['qodercom/whatever'], {'cn': {'glm-5.2'}, 'global': set()}, [],
+                {'qoder': None}),
+            [])
+
+    def test_platform_entry_not_judged_against_realm_catalogs(self) -> None:
+        """平台名不该拿去版本目录里找（那必然找不到 → 假警报）。"""
+        self.assertEqual(
+            keysvc.unknown_whitelist_entries(
+                ['combo/fast'], {'cn': {'glm-5.2'}, 'global': set()}, [],
+                {'combo': {'combo/fast'}}),
+            [])
+
+    def test_route_reports_platform_unknown(self) -> None:
+        """路由层接线：平台缓存可用时，拼错的平台名要被点出来。"""
+        with mock.patch.object(modelcatalog, 'cached_ids',
+                               lambda r: {'glm-5.2'} if r == 'cn' else set()), \
+             mock.patch.object(db, 'get_setting', lambda k, d=None: d), \
+             mock.patch.object(platforms.get('combo'), 'cached_model_ids',
+                               lambda: {'combo/fast'}):
+            out = keys_router.check_models(
+                keys_router.WhitelistCheckIn(
+                    models=['glm-5.2', 'combo/fast', 'combo/nope'], realm=''),
+                user={})
+        self.assertTrue(out['checked'])
+        self.assertEqual(out['unknown'], ['combo/nope'])
+
+    def test_route_skips_platforms_that_raise(self) -> None:
+        """单个平台的缓存读取抛异常 → 该平台跳过判定，其余照常。"""
+        with mock.patch.object(modelcatalog, 'cached_ids',
+                               lambda r: {'glm-5.2'} if r == 'cn' else set()), \
+             mock.patch.object(db, 'get_setting', lambda k, d=None: d), \
+             mock.patch.object(platforms.get('combo'), 'cached_model_ids',
+                               side_effect=RuntimeError('boom')):
+            out = keys_router.check_models(
+                keys_router.WhitelistCheckIn(
+                    models=['glm-5.2', 'combo/nope'], realm=''),
+                user={})
+        self.assertTrue(out['checked'])
+        self.assertEqual(out['unknown'], [], '平台缓存不可用时不该判它的条目')
+
+
+class PlatformCachedModelIdsTest(unittest.TestCase):
+    """适配器只暴露**已缓存**的模型 ID（白名单校验挂在失焦上，不能联网）。"""
+
+    def test_combo_reads_saved_combos(self) -> None:
+        combos = [{'name': 'fast', 'enabled': True,
+                   'members': [{'platform': 'trae', 'model': 'glm-5.2',
+                                'weight': 1, 'enabled': True}]},
+                  {'name': 'off', 'enabled': False,
+                   'members': [{'platform': 'trae', 'model': 'glm-5.2',
+                                'weight': 1, 'enabled': True}]}]
+        with mock.patch.object(db, 'get_setting',
+                               lambda k, d=None: combos if k == 'model_combos' else d):
+            self.assertEqual(platforms.get('combo').cached_model_ids(), {'combo/fast'})
+
+    def test_combo_without_combos_is_empty_not_none(self) -> None:
+        """没有组合时返回空集合：`combo/x` 确实无效，应当被点出来。"""
+        with mock.patch.object(db, 'get_setting', lambda k, d=None: []):
+            self.assertEqual(platforms.get('combo').cached_model_ids(), set())
+
+    def test_qoder_reads_memory_only(self) -> None:
+        adapter = platforms.get('qoder')
+        with mock.patch.object(adapter, '_models', []):
+            self.assertIsNone(adapter.cached_model_ids(), '没缓存过应返回 None（跳过判定）')
+        with mock.patch.object(adapter, '_models',
+                               [{'id': 'qodercn/Qwen3.8-Max'},
+                                {'id': 'qodercom/Qwen3.8-Max'}]):
+            self.assertEqual(adapter.cached_model_ids(),
+                             {'qodercn/Qwen3.8-Max', 'qodercom/Qwen3.8-Max'})
+
+    def test_qoder_does_not_start_gateway(self) -> None:
+        """只读 `_models`：不许为了校验把内置网关拉起来。"""
+        adapter = platforms.get('qoder')
+        with mock.patch.object(adapter, '_models', []), \
+             mock.patch.object(type(adapter.client), 'list_models',
+                               side_effect=AssertionError('不该联网')):
+            self.assertIsNone(adapter.cached_model_ids())
+
+    def test_trae_uses_cached_catalog_with_realm_prefix(self) -> None:
+        adapter = platforms.get('trae')
+        cached = [{'id': 'glm-5.2', 'realm': 'cn'},
+                  {'id': 'gpt-5.5', 'realm': 'intl'}]
+        with mock.patch.object(adapter, '_cached_models', lambda: cached):
+            self.assertEqual(adapter.cached_model_ids(),
+                             {'traecn/glm-5.2', 'traecom/gpt-5.5'})
+
+    def test_trae_falls_back_to_imported_or_bundled(self) -> None:
+        adapter = platforms.get('trae')
+        with mock.patch.object(adapter, '_cached_models', lambda: None), \
+             mock.patch.object(trae_catalog, 'imported',
+                               lambda: [{'id': 'glm-5.3', 'realm': 'cn'}]):
+            self.assertEqual(adapter.cached_model_ids(), {'traecn/glm-5.3'})
+
+    def test_trae_without_any_catalog_is_none(self) -> None:
+        adapter = platforms.get('trae')
+        with mock.patch.object(adapter, '_cached_models', lambda: None), \
+             mock.patch.object(trae_catalog, 'imported', lambda: []), \
+             mock.patch.object(trae_catalog, 'default_models', lambda: []):
+            self.assertIsNone(adapter.cached_model_ids())
+
+    def test_trae_does_not_fetch(self) -> None:
+        """缓存为空时也**不**去拉线上目录（`list_models` 会，这个不该）。"""
+        adapter = platforms.get('trae')
+        with mock.patch.object(adapter, '_cached_models', lambda: None), \
+             mock.patch.object(trae_catalog, 'imported', lambda: []), \
+             mock.patch.object(trae_catalog, 'default_models', lambda: []), \
+             mock.patch.object(type(adapter), '_live_models',
+                               side_effect=AssertionError('不该联网')):
+            self.assertIsNone(adapter.cached_model_ids())
+
+    def test_base_default_is_none(self) -> None:
+        """没有目录概念的平台不参与这项校验。"""
+        self.assertIsNone(platforms.get('workbuddy').cached_model_ids())
+
+
 class CachedIdsTest(unittest.TestCase):
     """`cached_ids` 只读缓存、**不发网络**（保存密钥不该等上游往返）。"""
 
@@ -574,6 +742,52 @@ class HintFrontendWiringTest(unittest.TestCase):
             val = (data.get('keys') or {}).get('modelsUnknown')
             self.assertTrue(val and '{names}' in str(val),
                             f'{f.name} 缺 keys.modelsUnknown 或没带 {{names}} 占位符')
+
+
+class ModelPickerPlatformTest(unittest.TestCase):
+    """选择器要能勾到平台模型（Trae / Qoder / 组合），而不只是 WorkBuddy 两组。
+
+    这几条守的是**接线**：候选清单是从哪几个接口拼出来的、失败时怎么显示。
+    渲染出来的行为由 `dev/verify_whitelist_hint.py` 在真浏览器里验收。
+    """
+
+    def _component(self) -> str:
+        return (Path(__file__).resolve().parents[2]
+                / 'web/components/common/keys/ModelWhitelistInput.tsx'
+                ).read_text(encoding='utf-8')
+
+    def test_fetches_platform_catalog_and_per_platform_models(self) -> None:
+        """聚合目录只给分组标签；模型名要逐个平台取（带区域前缀的对外名）。"""
+        src = self._component()
+        self.assertIn('platformApi.catalog()', src)
+        self.assertIn('platformApi.models(', src,
+                      '没逐个平台取模型 → 双区同名模型会只剩一条（白名单里是两个名字）')
+
+    def test_workbuddy_group_is_not_duplicated(self) -> None:
+        """WorkBuddy 由两个版本组承担，平台分组里要把它排掉。"""
+        src = self._component()
+        self.assertIn("filter((p) => p.name !== 'workbuddy')", src)
+
+    def test_platform_loading_state_is_not_group_null(self) -> None:
+        """逐组补齐时不能靠「分组列表是不是 null」判断还在读。
+
+        第一组回来列表就非 null 了，用 null 判断会让「正在读取平台模型」提前消失，
+        列表还在继续变长——用户以为清单就这么点。
+        """
+        src = self._component()
+        self.assertIn('platformsBusy', src)
+        self.assertIn('setPlatformsBusy(false)', src, '没有收尾 → 提示会一直挂着')
+
+    def test_platform_errors_are_scoped_to_their_group(self) -> None:
+        """某个平台取不到时只在该组下面说明，不挡住手输、不影响其他组。"""
+        src = self._component()
+        self.assertIn("t('keys.modelPickPlatformError')", src)
+        self.assertIn('note: g.error', src)
+
+    def test_pickable_value_is_the_public_model_id(self) -> None:
+        """勾进白名单的必须是接口给的对外名（`qodercn/x`），不能再拼一遍前缀。"""
+        src = self._component()
+        self.assertIn('items: g.models.map((id) => ({value: id}))', src)
 
 
 if __name__ == '__main__':

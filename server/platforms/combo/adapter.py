@@ -128,6 +128,15 @@ class ComboAdapter(PlatformAdapter):
         return [self._public_model(name)
                 for name in combo_svc.names(db.get_setting('model_combos', []))]
 
+    def cached_model_ids(self) -> set[str] | None:
+        """已定义的组合名（`combo/<name>`）；没有组合时返回空集合（= 都不认）。
+
+        组合清单就在库里，读一次很便宜，所以这里**不返回 None**：没有组合时
+        白名单里写 `combo/x` 确实是个无效名字，应当被点出来。
+        """
+        return {f'{self.model_prefix}{name}'
+                for name in combo_svc.names(db.get_setting('model_combos', []))}
+
     def _public_model(self, name: str) -> dict:
         return {
             'id': f'{self.model_prefix}{name}',

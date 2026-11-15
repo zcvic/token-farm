@@ -871,6 +871,23 @@ class TraeAdapter(PlatformAdapter):
         want = self._model_realm(model)
         return _db_realm(want) if want else None
 
+    def cached_model_ids(self) -> set[str] | None:
+        """已缓存的对外模型 id（`traecn/x` / `traecom/x`）。
+
+        来源是「目录缓存 + 面板导入 + 内置兜底」，与 `list_models` 合并时用的
+        那几层同源，但**只读不拉**：白名单校验挂在输入框失焦上，不该为它去问
+        上游（`list_models` 在缓存为空时会尝试一次线上目录）。
+
+        缓存为空且没有导入 / 内置兜底时返回 None —— 调用方据此跳过判定。
+        """
+        models = self._cached_models()
+        if models is None:
+            models = catalog.imported() or catalog.default_models()
+        if not models:
+            return None
+        return {self.public_model_id(str(m.get('id') or ''), _db_realm(m.get('realm')))
+                for m in models if m.get('id')}
+
     def _channel(self, model: str) -> str:
         """这个模型该走哪条通道：`chat`（IDE 数据面）还是 `solo`（Agent）。
 

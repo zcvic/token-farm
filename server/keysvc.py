@@ -105,6 +105,34 @@ def _norm_preferred_account(value: object) -> str:
     return text
 
 
+GROUP_NAME_MAX = 32
+
+
+def _norm_group_name(value: object) -> str:
+    """归一化密钥的自定义分组名；'' = 未分组。
+
+    与 `_norm_preferred_account` 的取舍**相反**：这里非法值抛 ValueError，而不是
+    静默吃掉。分组名是管理员自己起的中文标签，允许中文与空格，但**不能有换行**
+    （它要显示在表格与筛选下拉里，换行会把那一行撑开）。写错了应当当场告诉用户，
+    而不是存成一个看起来正常、实际和输入不一样的字符串。
+
+    空 / 纯空白 = 未分组，这是合法取值（存量密钥全是这个形态，也允许把一把密钥
+    改回未分组）。
+    """
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        raise ValueError('分组名必须是字符串')
+    text = value.strip()
+    if not text:
+        return ''
+    if len(text) > GROUP_NAME_MAX:
+        raise ValueError(f'分组名最长 {GROUP_NAME_MAX} 个字符')
+    if any(ch in text for ch in '\r\n\t'):
+        raise ValueError('分组名不能包含换行或制表符')
+    return text
+
+
 def _norm_credit_quota(value: object) -> float:
     """归一化积分额度。0 = 不限（与 token 额度同口径）。
 
@@ -234,6 +262,10 @@ def _parse(row) -> dict:
         # 优先消耗哪个账号的积分（空 = 不指定，按账号池自动选）。
         # 这一列只影响上游选号，不改变任何「能不能调」的判定。
         'preferred_account': str(_row_get(row, 'preferred_account') or ''),
+        # 自定义分组名（管理员自己起的标签）；'' = 未分组。
+        # 只用于列表筛选与归类，**不参与任何调用判定** —— 与上面的 upstream_id
+        # （账号池分组，决定请求走哪个池）是两个维度。
+        'group_name': str(_row_get(row, 'group_name') or ''),
         'quota': row['quota'],
         'used_tokens': row['used_tokens'],
         'quota_credit': row['quota_credit'],
@@ -279,6 +311,7 @@ def create_key(
     upstream_id: int | None = None,
     daily_quota: int = 0,
     preferred_account: str = '',
+    group_name: str = '',
     *,
     _conn: sqlite3.Connection | None = None,
 ) -> dict:
@@ -299,8 +332,9 @@ def create_key(
     token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     sql = ('INSERT INTO api_keys(name, key_hash, key_plain, prefix, enabled, expires_at, '
            'max_ips, ip_allowlist, models, realm, quota, used_tokens, quota_credit, '
-           'used_credit, created_at, upstream_id, daily_quota, preferred_account) '
-           'VALUES(?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?)')
+           'used_credit, created_at, upstream_id, daily_quota, preferred_account, '
+           'group_name) '
+           'VALUES(?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?)')
     args = (
         name,
         _hash(token),
@@ -317,6 +351,7 @@ def create_key(
         _norm_upstream_id(upstream_id),
         _norm_daily_quota(daily_quota),
         _norm_preferred_account(preferred_account),
+        _norm_group_name(group_name),
     )
     if _conn is not None:
         key_id = int(_conn.execute(sql, args).lastrowid or 0)
@@ -388,6 +423,10 @@ def update_key(key_id: int, patch: dict) -> dict | None:
     if 'preferred_account' in patch:
         # 同上：显式传 null / '' = 清除优先账号，必须允许。
         fields['preferred_account'] = _norm_preferred_account(patch['preferred_account'])
+    if 'group_name' in patch:
+        # 同上：显式传 null / '' = 改回「未分组」，必须允许（不能用真值判断，
+        # 否则把密钥移出分组这件事永远做不成）。
+        fields['group_name'] = _norm_group_name(patch['group_name'])
     if fields:
         assignments = ', '.join(f'{k} = ?' for k in fields)
         db.execute(f'UPDATE api_keys SET {assignments} WHERE id = ?', (*fields.values(), key_id))
@@ -563,7 +602,8 @@ def _strip_realm_prefix(name: str) -> str:
 
 
 def unknown_whitelist_entries(models: list[str], known_by_realm: dict,
-                             aliases: list[str] | set[str] = ()) -> list[str]:
+                             aliases: list[str] | set[str] = (),
+                             known_platform_ids: dict | None = None) -> list[str]:
     """白名单里**匹配不到任何已知模型**的条目（多半是拼错了）。
 
     为什么需要（issue #46 的可选做法 2）：白名单是自由文本框，填错了不会报错，
@@ -590,10 +630,20 @@ def unknown_whitelist_entries(models: list[str], known_by_realm: dict,
 
     别名要算：它本来就是给下游用的合法名字（鉴权判请求名，映射在其后）。
     别名的存在性与模型清单无关，所以无条件认。
+
+    ## 平台模型（`traecn/x`、`qodercom/x`、`combo/fast`）
+
+    `known_platform_ids` 是 `{平台名: {对外模型 id} | None}`，`None` 同样是
+    「这份清单现在拿不到」（平台还没缓存过目录）→ **跳过判定**。
+
+    条目与清单的比对沿用调用侧的口径（`_platform_model_allowed`）：平台名 +
+    裸模型名相同，区域相容（旧式 `trae/x` 不带区域，视为跨区域通配）。这套
+    名字**不参与**版本（`cn:` / `global:`）判定，所以不走上面的 realm 分支。
     """
     if not models:
         return []
     alias_bare = {_strip_realm_prefix(str(x)).strip() for x in aliases}
+    known_platform = known_platform_ids or {}
     out: list[str] = []
     for raw in models:
         entry = str(raw).strip()
@@ -601,6 +651,16 @@ def unknown_whitelist_entries(models: list[str], known_by_realm: dict,
             continue
         # 先按**请求名**判别名：别名匹配发生在鉴权之后，用的是客户端发来的原样名字
         if entry in alias_bare or _strip_realm_prefix(entry) in alias_bare:
+            continue
+        platform_entry = _split_platform_entry(entry)
+        if platform_entry is not None:
+            name, bare, entry_realm = platform_entry
+            known_ids = known_platform.get(name)
+            if known_ids is None:
+                continue        # 该平台目录不可用 → 不判（宁可这次不提示）
+            if _platform_entry_known(known_ids, bare, entry_realm):
+                continue
+            out.append(entry)
             continue
         realm = 'global' if entry.lower().startswith('global:') else 'cn'
         known = known_by_realm.get(realm)
@@ -611,6 +671,20 @@ def unknown_whitelist_entries(models: list[str], known_by_realm: dict,
             continue
         out.append(entry)
     return out
+
+
+def _platform_entry_known(known_ids: set, bare: str, realm: str | None) -> bool:
+    """该平台模型名是否在已知清单里（区域相容规则同 `_platform_model_allowed`）。"""
+    for known in known_ids:
+        parsed = _split_platform_entry(known)
+        if parsed is None:
+            continue
+        _, known_bare, known_realm = parsed
+        if known_bare != bare:
+            continue
+        if realm is None or known_realm is None or realm == known_realm:
+            return True
+    return False
 
 
 def realm_allows(key: dict, model: str | None, *,

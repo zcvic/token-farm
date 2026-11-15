@@ -2,7 +2,7 @@
 
 import {useMemo, useRef, useState} from 'react';
 import {Check, ChevronsUpDown, Search, X} from 'lucide-react';
-import {accountApi, modelApi, upstreamsApi} from '@/lib/api';
+import {accountApi, modelApi, platformApi, upstreamsApi} from '@/lib/api';
 import type {CatalogModel} from '@/lib/types';
 import type {Realm} from '@/lib/realm-context';
 import {useT} from '@/lib/i18n/provider';
@@ -20,8 +20,16 @@ import {cn} from '@/lib/utils';
  * 存储形态没变（仍是逗号/换行分隔的字符串），所以后端与既有密钥数据一行都不用动：
  * 勾选 = 往那个字符串里追加一个名字，取消 = 移除。
  *
- * 清单按**版本分组**展示（国内版 / 国际版）：白名单是在所选版本之内再收窄的，
- * 放在一起看不出哪个名字属于哪一版。
+ * 清单分两层展示：
+ *
+ *   · **WorkBuddy 按版本分组**（国内版 / 国际版）：白名单是在所选版本之内再收窄的，
+ *     放在一起看不出哪个名字属于哪一版；
+ *   · **平台模型按平台分组**（Trae / Qoder / 组合）：它们的名字自带平台前缀
+ *     （`qodercn/Qwen3.8-Max`），与 `cn:` / `global:` 是两个维度，混进版本组里
+ *     只会让人以为「国际版里有 qoder 模型」。
+ *
+ * 平台分组是**后取的**：先出 WorkBuddy 两组，平台目录回来一组补一组，某个平台
+ * 取不到只在它那一组下面说明，不挡住手输、也不影响其他分组。
  *
  * 校验仍由父组件在输入框失焦时触发（与本组件引入前一致）；勾选进来的名字来自清单，
  * 本身不可能写错，因此不必再查一次。
@@ -61,6 +69,10 @@ export function ModelWhitelistInput({
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
   const [query, setQuery] = useState('');
   const [catalog, setCatalog] = useState<{cn: CatalogModel[]; global: CatalogModel[]; realms: Set<Realm> | null} | null>(null);
+  /** 平台模型分组：按平台名逐个补齐（某个平台取不到时带 `error`） */
+  const [platformGroups, setPlatformGroups] = useState<PlatformGroup[] | null>(null);
+  /** 平台清单还在补（逐组回来，不能靠 `platformGroups === null` 判断） */
+  const [platformsBusy, setPlatformsBusy] = useState(false);
   /** 只看上游标注为「限时免费」的模型（issue #208）；tags 缺失时按不在免费目录处理 */
   const [freeOnly, setFreeOnly] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -114,33 +126,110 @@ export function ModelWhitelistInput({
     }
   }
 
+  /**
+   * 平台模型（Trae / Qoder / 组合）：与 WorkBuddy 的版本目录是两套清单。
+   *
+   * 为什么还要逐个平台再取一次 `/models`：跨平台的 `/api/platforms/model-catalog`
+   * 会按**裸模型名**去重（组合只能选裸名），双区同名模型（Qoder）于是只剩一条，
+   * 而白名单要的是**带区域前缀的对外名**（`qodercn/x` 与 `qodercom/x` 是两个
+   * 不同的名字，放行一个不等于放行另一个）。分组标签与错误说明仍用那份聚合清单。
+   *
+   * 失败**不影响** WorkBuddy 两组，也不挡住手输：逐组补齐、逐组说明原因。
+   */
+  async function ensurePlatforms() {
+    if (platformGroups) return;
+    setPlatformsBusy(true);
+    try {
+      const cat = await platformApi.catalog();
+      // WorkBuddy 由上面两个版本组承担（它的模型名就是裸名 / `global:`），
+      // 这里只列真正的平台。
+      const targets = cat.platforms.filter((p) => p.name !== 'workbuddy');
+      setPlatformGroups(targets.map((p) => ({
+        key: p.name, label: p.label || p.name, models: [],
+        error: p.error ? p.error : undefined,
+      })));
+      await Promise.all(targets.map(async (p) => {
+        let models: string[] = [];
+        let error = p.error;
+        if (!error) {
+          try {
+            const r = await platformApi.models(p.name);
+            models = r.models.map((m) => String(m.id || '').trim()).filter(Boolean);
+          } catch {
+            error = t('keys.modelPickPlatformError');
+          }
+        }
+        setPlatformGroups((prev) => (prev || []).map(
+          (g) => (g.key === p.name ? {...g, models, error} : g)));
+      }));
+    } catch {
+      // 平台清单都取不到：只显示 WorkBuddy 两组，不挡住手输
+      setPlatformGroups([]);
+    } finally {
+      // 逐组补齐是「一组回来先显示一组」，所以「还在读」不能看 `platformGroups`
+      // 是不是 null（第一组回来就变成非 null 了，提示会提前消失、列表还在长）。
+      setPlatformsBusy(false);
+    }
+  }
+
   // 与密钥「限定版本」一致的那一组排前面：国内版密钥最可能选的是国内版模型。
   const isFree = (m: CatalogModel) => (m.tags || []).some((tag) => tag.includes('免费'));
-  const groups: {key: Realm; label: string; models: CatalogModel[]}[] = [];
+  const sections: PickSection[] = [];
   if (catalog) {
     const hasAccounts = (r: Realm) => !catalog.realms || catalog.realms.has(r);
-    if (hasAccounts('cn')) groups.push({key: 'cn', label: t('realm.cn'), models: catalog.cn});
+    const wb: PickSection[] = [];
+    if (hasAccounts('cn')) {
+      wb.push({
+        key: 'cn', label: t('realm.cn'),
+        items: catalog.cn.map((m) => ({
+          value: m.id, free: isFree(m), context: m.context_length,
+        })),
+      });
+    }
     if (hasAccounts('global')) {
-      groups.push({key: 'global', label: t('realm.global'), models: catalog.global});
+      wb.push({
+        key: 'global', label: t('realm.global'),
+        // 国际版条目在目录里是裸名（目录按版本取），但调用时必须带 `global:` 前缀
+        // 才能路由到国际版账号池；白名单是按**请求里的实际名字**比对的。存裸名会出现
+        // 「列表里能选、一调用就 400 不在白名单内」（issue #357），所以勾选时存限定名。
+        // 密钥已锁定版本时后端会把两种前缀都归一，带不带前缀都能用。
+        items: catalog.global.map((m) => ({
+          value: qualifyGlobal(m.id), free: isFree(m), context: m.context_length,
+        })),
+      });
     }
     // 排序要就地进行：写成 `[...].sort(...)` 会让 TS 把字面量的 key 推宽成 string，
     // 整个数组就不再是声明的那个类型（tsc 报过）。
-    groups.sort((a, b) => (a.key === realm ? -1 : b.key === realm ? 1 : 0));
+    wb.sort((a, b) => (a.key === realm ? -1 : b.key === realm ? 1 : 0));
+    sections.push(...wb);
   }
-  // 国际版条目在目录里是裸名（目录按版本取），但调用时必须带 `global:` 前缀
-  // 才能路由到国际版账号池；白名单是按**请求里的实际名字**比对的。存裸名会出现
-  // 「列表里能选、一调用就 400 不在白名单内」（issue #357），所以勾选时存限定名。
-  // 密钥已锁定版本时后端会把两种前缀都归一，带不带前缀都能用。
-  const qualified = (realm: Realm, id: string) =>
-    realm === 'global' && !id.toLowerCase().startsWith('global:') ? `global:${id}` : id;
+  for (const g of platformGroups ?? []) {
+    sections.push({
+      key: `platform:${g.key}`,
+      label: g.label,
+      items: g.models.map((id) => ({value: id})),
+      note: g.error,
+    });
+  }
   const needle = query.trim().toLowerCase();
-  const filtered = groups
-    .map((g) => ({
-      ...g,
-      models: g.models.filter((m) =>
-        (!needle || m.id.toLowerCase().includes(needle)) && (!freeOnly || isFree(m))),
+  const filtered = sections
+    .map((s) => ({
+      ...s,
+      items: s.items.filter((it) =>
+        (!needle || it.value.toLowerCase().includes(needle))
+        && (!freeOnly || it.free)),
     }))
-    .filter((g) => g.models.length > 0);
+    .filter((s) => s.items.length > 0 || (s.note && !needle && !freeOnly));
+  const loadingPlatforms = platformsBusy || platformGroups === null;
+  // 三种「列表里什么都没有」的原因分开说，别混成一句：WorkBuddy 目录读失败、
+  // 还在读、读到了但确实没有匹配项。平台分组还在补时也不说「没有匹配」——
+  // 那时列表还会继续变长，说「没有」是错的。
+  const nothingToShow = filtered.length === 0;
+  const showLoading = nothingToShow && !failed && !catalog;
+  // WorkBuddy 目录失败时**始终**说一句：平台分组可能照样有内容，但用户要知道
+  // 那两个版本组为什么是空的。
+  const showUnavailable = failed;
+  const showEmpty = nothingToShow && catalog && !loadingPlatforms;
 
   return (
     <div className="space-y-1.5">
@@ -212,6 +301,7 @@ export function ModelWhitelistInput({
               setPortalContainer(
                 triggerRef.current?.closest('[data-slot="dialog-content"]') as HTMLElement | null);
               void ensureCatalog();
+              void ensurePlatforms();
             }
           }}
         >
@@ -255,7 +345,8 @@ export function ModelWhitelistInput({
               {freeOnly && filtered.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => emit([...names, ...filtered.flatMap((g) => g.models.map((m) => qualified(g.key, m.id)))])}
+                  onClick={() => emit([...names, ...filtered.flatMap(
+                    (g) => g.items.filter((it) => it.free).map((it) => it.value))])}
                   className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
                 >
                   {t('keys.freeSelectAll')}
@@ -263,17 +354,17 @@ export function ModelWhitelistInput({
               )}
             </div>
             <div className="max-h-[260px] overflow-y-auto">
-              {failed && (
+              {showUnavailable && (
                 <p className="px-2 py-6 text-center text-xs text-muted-foreground">
                   {t('keys.modelPickUnavailable')}
                 </p>
               )}
-              {!failed && !catalog && (
+              {showLoading && (
                 <p className="px-2 py-6 text-center text-xs text-muted-foreground">
                   {t('keys.modelPickLoading')}
                 </p>
               )}
-              {!failed && catalog && filtered.length === 0 && (
+              {showEmpty && (
                 <p className="px-2 py-6 text-center text-xs text-muted-foreground">
                   {t('keys.modelPickEmpty')}
                 </p>
@@ -281,16 +372,20 @@ export function ModelWhitelistInput({
               {filtered.map((group) => (
                 <div key={group.key} className="mb-1">
                   <div className="px-2 py-1 text-[11px] text-muted-foreground">{group.label}</div>
-                  {group.models.map((m) => {
-                    const value = qualified(group.key, m.id);
-                    const picked = names.includes(value);
+                  {group.note && (
+                    <p className="px-2 py-1 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
+                      {group.note}
+                    </p>
+                  )}
+                  {group.items.map((item) => {
+                    const picked = names.includes(item.value);
                     return (
                       <button
-                        key={m.id}
+                        key={item.value}
                         type="button"
                         role="checkbox"
                         aria-checked={picked}
-                        onClick={() => (picked ? remove(value) : add(value))}
+                        onClick={() => (picked ? remove(item.value) : add(item.value))}
                         className={cn(
                           'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs',
                           'hover:bg-muted',
@@ -305,15 +400,15 @@ export function ModelWhitelistInput({
                         >
                           {picked && <Check className="h-2.5 w-2.5" />}
                         </span>
-                        <span className="min-w-0 flex-1 truncate font-mono">{m.id}</span>
-                        {isFree(m) && (
+                        <span className="min-w-0 flex-1 truncate font-mono">{item.value}</span>
+                        {item.free && (
                           <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 text-[10px] text-emerald-700 dark:text-emerald-300">
                             {t('keys.freeBadge')}
                           </span>
                         )}
-                        {typeof m.context_length === 'number' && (
+                        {typeof item.context === 'number' && item.context > 0 && (
                           <span className="shrink-0 text-[11px] text-muted-foreground">
-                            {Math.round(m.context_length / 1000)}k
+                            {Math.round(item.context / 1000)}k
                           </span>
                         )}
                       </button>
@@ -321,12 +416,47 @@ export function ModelWhitelistInput({
                   })}
                 </div>
               ))}
+              {loadingPlatforms && (
+                <p className="px-2 py-2 text-center text-[11px] text-muted-foreground">
+                  {t('keys.modelPickPlatformLoading')}
+                </p>
+              )}
             </div>
           </PopoverContent>
         </Popover>
       </div>
     </div>
   );
+}
+
+/** 平台分组：某个平台取不到目录时 `models` 为空、`error` 写明原因。 */
+interface PlatformGroup {
+  key: string;
+  label: string;
+  models: string[];
+  error?: string;
+}
+
+/** 清单里的一行（值就是白名单里要存的字面名）。 */
+interface PickItem {
+  value: string;
+  /** 上游标注「限时免费」；平台模型没有这个标注，按非免费处理 */
+  free?: boolean;
+  /** 上下文窗口（token，0/缺省 = 未知） */
+  context?: number;
+}
+
+interface PickSection {
+  key: string;
+  label: string;
+  items: PickItem[];
+  /** 这一组的说明 / 失败原因（如平台目录取不到） */
+  note?: string;
+}
+
+/** 国际版条目要带 `global:` 前缀（issue #357）；已带前缀的原样返回。 */
+function qualifyGlobal(id: string): string {
+  return id.toLowerCase().startsWith('global:') ? id : `global:${id}`;
 }
 
 function splitNames(value: string): string[] {

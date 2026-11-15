@@ -157,3 +157,5 @@ start-all.cmd
 stop-all.cmd
 dev/.weight-task
 dev/.shots-weight-task
+dev/.key-group
+dev/.shots-kg

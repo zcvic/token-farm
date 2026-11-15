@@ -407,6 +407,17 @@ class QoderAdapter(PlatformAdapter):
             return mapping.db_realm(realms[0])
         return None
 
+    def cached_model_ids(self) -> set[str] | None:
+        """已缓存的对外模型 id（`qodercn/x` / `qodercom/x`）。
+
+        只读 `self._models`（`list_models` 拉过一次就有）；没缓存过返回 None ——
+        白名单校验据此**跳过判定**，而不是把用户写的名字全判成「找不到」。
+        与 `list_models` 的区别是不联网：那个在缓存为空时会去问内置网关。
+        """
+        if not self._models:
+            return None
+        return {str(m.get('id')) for m in self._models if m.get('id')}
+
     def _realm_for(self, model: str, ctx: ChatContext | None) -> tuple[str | None, str]:
         hint, bare = _split_realm_hint(model)
         if hint:

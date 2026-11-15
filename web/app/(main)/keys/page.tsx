@@ -73,6 +73,13 @@ interface FormState {
   upstream_id: number | null;
   /** 优先消耗哪个账号的积分（uid）；'' = 不指定，按账号池自动选 */
   preferredAccount: string;
+  /**
+   * 自定义分组名（自由填写的标签，如「客服组」）；'' = 未分组。
+   *
+   * 与 `upstream_id`（账号池分组）是两个维度：这个只用于列表筛选，
+   * 不影响请求走哪个池。
+   */
+  groupName: string;
 }
 
 const emptyForm: FormState = {
@@ -88,6 +95,7 @@ const emptyForm: FormState = {
   realm: 'cn',
   upstream_id: null,
   preferredAccount: '',
+  groupName: '',
 };
 
 function toLines(v: string): string[] {
@@ -103,6 +111,16 @@ function toLines(v: string): string[] {
  */
 const EMPTY_KEYS: ApiKey[] = [];
 const EMPTY_UPSTREAMS: UpstreamEndpoint[] = [];
+
+/**
+ * 「不按分组筛选」的哨兵值。
+ *
+ * 为什么不用空串：`''` 在这里是**有意义的筛选值**（未分组），拿它表示「全部」
+ * 就没法只看未分组的那批了。Radix 的 SelectItem 也不接受空串作 value。
+ */
+const GROUP_ALL = '__all__';
+/** 「只看未分组」的哨兵值。同上：空串不能当 SelectItem 的 value。 */
+const GROUP_UNGROUPED = '__ungrouped__';
 
 export default function KeysPage() {
   const t = useT();
@@ -146,6 +164,14 @@ export default function KeysPage() {
    * 红包那批是「发完就不太管」的；把它们混在首屏反而把常用的挤下去了。
    */
   const [tab, setTab] = useState<'normal' | 'packet'>('normal');
+  /**
+   * 自定义分组筛选：`__all__` = 不筛选，其余为分组名（`''` 表示「未分组」）。
+   *
+   * 与上面的 `tab` 是**两个维度**且互相叠加：tab 分的是「手工建的 / 红包发的」，
+   * 这个分的是管理员自己贴的标签。红包密钥同样可以贴标签（它也是密钥），
+   * 所以不能把它做成第三个 tab —— 那样两者就互斥了。
+   */
+  const [groupFilter, setGroupFilter] = useState<string>(GROUP_ALL);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ApiKey | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -334,6 +360,7 @@ export default function KeysPage() {
       realm: k.realm || '',
       upstream_id: k.upstream_id ?? null,
       preferredAccount: k.preferred_account || '',
+      groupName: k.group_name || '',
     });
     setUnknownModels(null);
     setFormOpen(true);
@@ -374,6 +401,9 @@ export default function KeysPage() {
         // 优先账号：'' = 不指定（照传，编辑时才能清除已有设置；后端同样按
         // 「字段是否出现」区分清除与未提交）。
         preferred_account: form.preferredAccount.trim(),
+        // 分组名：'' = 未分组，照传——编辑时才能把密钥移出分组
+        // （后端同样按「字段是否出现」区分清除与未提交）。
+        group_name: form.groupName.trim(),
       };
 
       // 新建：填了天数才设过期（0 = 永不过期，不下发 expires_at）
@@ -625,9 +655,37 @@ export default function KeysPage() {
 
   // 分组过滤。keys 的量级是「几十到几百」，一次渲染算两遍不值得上 useMemo
   // （那要多写一层依赖数组，还更容易漏依赖）。
-  const normalKeys = keys.filter((k) => !k.packet_id);
-  const packetKeys = keys.filter((k) => k.packet_id);
+  /**
+   * 已有的自定义分组名（去重、按名称排序），供筛选下拉与编辑框的候选。
+   *
+   * 从**当前这批密钥**推出来，而不是单独存一张表：分组只是标签，没有自己的属性，
+   * 多存一份就要维护改名 / 删除 / 空组等同步问题。
+   */
+  const groupNames = Array.from(
+    new Set(keys.map((k) => (k.group_name || '').trim()).filter(Boolean)),
+  ).sort((a, b) => a.localeCompare(b));
+  const hasUngrouped = keys.some((k) => !(k.group_name || '').trim());
+  /** 先按自定义分组筛，再按 tab 分红包 / 普通 —— 两个维度叠加，互不替代。 */
+  const scopedKeys = groupFilter === GROUP_ALL
+    ? keys
+    : keys.filter((k) =>
+        groupFilter === GROUP_UNGROUPED
+          ? !(k.group_name || '').trim()
+          : (k.group_name || '').trim() === groupFilter);
+  const normalKeys = scopedKeys.filter((k) => !k.packet_id);
+  const packetKeys = scopedKeys.filter((k) => k.packet_id);
   const shownKeys = tab === 'packet' ? packetKeys : normalKeys;
+  /**
+   * 当前筛的分组已经不存在了（最后一把密钥被删 / 被改名）。
+   *
+   * 这时列表会是空的，但「暂无 API 密钥」是**假话**——密钥还在，只是不在这组。
+   * 所以空状态要分开写，并给一个「看全部」的出口。
+   */
+  const groupFilterGone = groupFilter === GROUP_UNGROUPED
+    ? !hasUngrouped
+    : groupFilter !== GROUP_ALL && !groupNames.includes(groupFilter);
+  /** 当前 tab 的名字：空状态里要指出「另一类里可能就有」。 */
+  const tabLabel = tab === 'packet' ? t('keys.tabPacket') : t('keys.tabNormal');
 
   const header = (
     <>
@@ -691,18 +749,52 @@ export default function KeysPage() {
           「普通密钥 · 0」，那是和「暂无 API 密钥」同一句谎话的另一半（任务记录页
           的「共 0 条」是同一处，PR #97 才补上）。判据同样用 `keysFailed`
           ——「这一份失败没」，上游列表挂掉时这两个 0 是如实的。 */}
-      <Tabs value={tab} onValueChange={(v) => setTab(v as 'normal' | 'packet')}>
-        <TabsList className="rounded-full">
-          <TabsTrigger value="normal" className="rounded-full">
-            {t('keys.tabNormal')}
-            {!keysFailed && <> · {normalKeys.length}</>}
-          </TabsTrigger>
-          <TabsTrigger value="packet" className="rounded-full">
-            {t('keys.tabPacket')}
-            {!keysFailed && <> · {packetKeys.length}</>}
-          </TabsTrigger>
-        </TabsList>
-      </Tabs>
+      <div className="flex flex-wrap items-center gap-2">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as 'normal' | 'packet')}>
+          <TabsList className="rounded-full">
+            <TabsTrigger value="normal" className="rounded-full">
+              {t('keys.tabNormal')}
+              {!keysFailed && <> · {normalKeys.length}</>}
+            </TabsTrigger>
+            <TabsTrigger value="packet" className="rounded-full">
+              {t('keys.tabPacket')}
+              {!keysFailed && <> · {packetKeys.length}</>}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+        {/* 自定义分组筛选：与上面的 tab **叠加**（先按分组、再按红包/普通）。
+            没有分组、也没有未分组的密钥时整块不渲染 —— 一个只有「全部分组」的
+            下拉框纯属噪音。 */}
+        {!keysFailed && (groupNames.length > 0 || hasUngrouped
+          || groupFilter !== GROUP_ALL) && (
+          <Select value={groupFilter} onValueChange={setGroupFilter}>
+            <SelectTrigger
+              className="h-8 w-[168px] rounded-full text-xs"
+              aria-label={t('keys.groupFilterLabel')}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={GROUP_ALL}>{t('keys.groupAll')}</SelectItem>
+              {groupNames.map((g) => (
+                <SelectItem key={g} value={g}>{g}</SelectItem>
+              ))}
+              {/* 当前筛的分组已经不存在（密钥被删 / 被改名）时，仍要把它列出来：
+                  否则下拉框会显示成空白，看起来像「筛选坏了」。列表那块会说明它没了。 */}
+              {groupFilter !== GROUP_ALL
+                && groupFilter !== GROUP_UNGROUPED
+                && !groupNames.includes(groupFilter) && (
+                  <SelectItem value={groupFilter}>{groupFilter}</SelectItem>
+                )}
+              {/* 「未分组」只在真有未分组密钥时出现：全是已分组的密钥时它只会
+                  筛出一片空白，看起来像功能坏了。当前正筛着它时例外（同上）。 */}
+              {(hasUngrouped || groupFilter === GROUP_UNGROUPED) && (
+                <SelectItem value={GROUP_UNGROUPED}>{t('keys.groupUngrouped')}</SelectItem>
+              )}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
 
       <section className="overflow-hidden rounded-[20px] bg-muted">
         <Table>
@@ -710,6 +802,9 @@ export default function KeysPage() {
             <TableRow className="border-b border-border/60 hover:bg-transparent">
               <TableHead className="pl-4 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('keys.colPrefix')}</TableHead>
+              {/* 分组列紧跟前缀：它是「这把密钥属于哪一批」的标签，与名字同侧阅读，
+                  不夹在状态 / 版本这些运行属性中间 */}
+              <TableHead className="text-[11px] text-muted-foreground">{t('keys.group')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('accounts.colStatus')}</TableHead>
               {/* 版本列紧跟状态：它和状态一样是「这把密钥的属性」，位置与账号页的列序一致 */}
               <TableHead className="text-[11px] text-muted-foreground">{t('keys.realm')}</TableHead>
@@ -758,6 +853,21 @@ export default function KeysPage() {
                     ) : null}
                   </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">{k.prefix}…</TableCell>
+                  <TableCell className="text-xs">
+                    {(k.group_name || '').trim() ? (
+                      <Badge
+                        variant="secondary"
+                        className="max-w-[140px] rounded-full text-[10px]"
+                        title={k.group_name}
+                      >
+                        <span className="truncate">{k.group_name}</span>
+                      </Badge>
+                    ) : (
+                      // 未分组不显示成空白格：空白看起来像「这一列没做」，
+                      // 而它其实是这一列最常见的一个取值。
+                      <span className="text-muted-foreground/70">{t('keys.groupUngrouped')}</span>
+                    )}
+                  </TableCell>
                   <TableCell>
                     {!k.enabled ? (
                       <Badge variant="secondary" className="rounded-full text-muted-foreground">{t('keys.badgeDisabled')}</Badge>
@@ -936,21 +1046,51 @@ export default function KeysPage() {
 
         {/* 「暂无密钥」是**一条都没有**的断言，取不到时不能说这句（见上面首屏守卫的
             说明）。`keysFailed` 覆盖「另一份取到了、这一份没有」的部分失败：那时首屏
-            守卫不会拦（values 里还有 upstreams），但列表这一块同样不知道有没有。 */}
+            守卫不会拦（values 里还有 upstreams），但列表这一块同样不知道有没有。
+            同样地，**筛着分组时也不能说这句** —— 密钥可能还在，只是不在这组。 */}
         {!shownKeys.length && !keysFailed && (
-          <EmptyState
-            icon={KeyRound}
-            title={t('keys.emptyTitle')}
-            description={t('keys.emptyDesc')}
-            className="flex flex-col items-center justify-center py-16 text-center"
-          >
-            {isAdmin && (
-              <Button className="mt-4 rounded-full" onClick={openCreate}>
-                <Plus />
-                {t('keys.newKey')}
+          groupFilter !== GROUP_ALL ? (
+            <EmptyState
+              icon={KeyRound}
+              title={groupFilter === GROUP_UNGROUPED
+                ? t('keys.groupUngroupedEmptyTitle')
+                : groupFilterGone
+                  ? t('keys.groupGoneTitle', {name: groupFilter})
+                  : t('keys.groupEmptyTitle', {name: groupFilter})}
+              description={groupFilter === GROUP_UNGROUPED
+                ? t('keys.groupUngroupedEmptyDesc', {tab: tabLabel})
+                : groupFilterGone
+                  ? t('keys.groupGoneDesc')
+                  : t('keys.groupEmptyDesc', {
+                      // 说的是**当前这一类**（红包 / 普通）：另一类里可能就有，
+                      // 而这句话正是提醒用户去切一下 tab。
+                      tab: tabLabel,
+                    })}
+              className="flex flex-col items-center justify-center py-16 text-center"
+            >
+              <Button
+                variant="outline"
+                className="mt-4 rounded-full"
+                onClick={() => setGroupFilter(GROUP_ALL)}
+              >
+                {t('keys.groupShowAll')}
               </Button>
-            )}
-          </EmptyState>
+            </EmptyState>
+          ) : (
+            <EmptyState
+              icon={KeyRound}
+              title={t('keys.emptyTitle')}
+              description={t('keys.emptyDesc')}
+              className="flex flex-col items-center justify-center py-16 text-center"
+            >
+              {isAdmin && (
+                <Button className="mt-4 rounded-full" onClick={openCreate}>
+                  <Plus />
+                  {t('keys.newKey')}
+                </Button>
+              )}
+            </EmptyState>
+          )
         )}
       </section>
 
@@ -968,6 +1108,25 @@ export default function KeysPage() {
               <div className="space-y-1.5">
                 <Label className="text-[11px] text-muted-foreground">{t('keys.name')}</Label>
                 <Input value={form.name} onChange={(e) => setForm({...form, name: e.target.value})} placeholder={t('keys.namePlaceholder')} />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">{t('keys.group')}</Label>
+                {/* 自定义分组：自由填写，同时把已有分组名做成候选（datalist）——
+                    复用已有名字比手打更容易保持一致（「客户A」与「客户a」会变成两组）。
+                    留空 = 未分组。它只影响列表筛选，不改变请求走哪个账号池。 */}
+                <Input
+                  list="key-group-names"
+                  value={form.groupName}
+                  maxLength={32}
+                  placeholder={t('keys.groupPlaceholder')}
+                  onChange={(e) => setForm({...form, groupName: e.target.value})}
+                />
+                <datalist id="key-group-names">
+                  {groupNames.map((g) => <option key={g} value={g} />)}
+                </datalist>
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  {t('keys.groupHint')}
+                </p>
               </div>
               {!editing ? (
                 <div className="space-y-1.5">

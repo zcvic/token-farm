@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .. import config, db, keysvc, security, upstreamsvc
+from .. import config, db, keysvc, platforms, security, upstreamsvc
 from ..services import keyexport, keyimport, modelcatalog, modelmap
 from ..iputil import client_ip
 
 router = APIRouter(prefix='/api/keys', tags=['keys'])
+
+logger = logging.getLogger('workbuddy.keys')
 
 # 校验失败时给用户的说明。放在写入**之前**拦，而不是存下去再说 ——
 # 存坏数据的后果是「该密钥永久不可用」：`ip_matches` 对非法 CIDR 一律返回
@@ -73,6 +76,18 @@ def _check_preferred_account(value: object) -> None:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _check_group_name(value: object) -> None:
+    """校验自定义分组名。
+
+    判据放在 keysvc（与写库时的归一化**同一份**实现），这里只把 ValueError 翻成
+    400 —— 与 `_check_preferred_account` 同一条理由：路由再写一遍就是第二份事实来源。
+    """
+    try:
+        keysvc._norm_group_name(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 class KeyIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     # 绑定的上游（多上游 / 分组隔离）：null / 0 / 省略 = 默认上游。
@@ -94,6 +109,9 @@ class KeyIn(BaseModel):
     # 优先消耗哪个账号的积分（账号 uid）。空 = 不指定，按账号池自动选。
     # 只是「优先」：该账号不可用时上游会回落到普通选号，不会让密钥失败。
     preferred_account: str = Field(default='', max_length=128)
+    # 自定义分组名（管理员自己起的标签，如「客服组」）；'' = 未分组。
+    # 与 upstream_id（账号池分组）是两个维度：这个只用于列表筛选，不影响调用。
+    group_name: str = Field(default='', max_length=64)
 
 
 class KeyPatch(BaseModel):
@@ -111,6 +129,8 @@ class KeyPatch(BaseModel):
     realm: str | None = None
     # 显式传 null / '' = 清除优先账号（与 upstream_id / realm 同口径）。
     preferred_account: str | None = Field(default=None, max_length=128)
+    # 显式传 null / '' = 改回「未分组」（与 upstream_id / realm 同口径）。
+    group_name: str | None = Field(default=None, max_length=64)
 
 
 class WhitelistCheckIn(BaseModel):
@@ -145,13 +165,29 @@ def check_models(body: WhitelistCheckIn,
     known_by_realm: dict[str, set[str] | None] = {
         r: modelcatalog.cached_ids(r) for r in ('cn', 'global')
     }
+    # 平台模型（`traecn/x`、`qodercom/x`、`combo/fast`）走另一套判据：它们的名字
+    # 不在腾讯的版本目录里。只问**可路由**的平台，且同样只读缓存。
+    known_platform_ids: dict[str, set[str] | None] = {}
+    for adapter in platforms.all_adapters():
+        if not getattr(adapter, 'routable', True):
+            continue
+        try:
+            known_platform_ids[adapter.name] = adapter.cached_model_ids()
+        except Exception as exc:  # noqa: BLE001 —— 单个平台取不到不该让整次校验失败
+            logger.warning('白名单校验：%s 的模型缓存不可用：%s', adapter.name, exc)
+            known_platform_ids[adapter.name] = None
+
+    # `checked` 仍只看**两个版本的目录**：白名单里绝大多数是 WorkBuddy 模型名，
+    # 版本目录全空时说「已校验」会让界面把「查不了」显示成「都对」。平台目录
+    # 只影响平台条目本身能不能判（见 `unknown_whitelist_entries`）。
     if all(v is None for v in known_by_realm.values()):
         return {'checked': False, 'unknown': [],
                 'reason': '暂时读不到模型清单（去「模型」页刷新一次再回来）'}
 
     # 只认真实别名：兜底那条（`*`）不是模型名，不该被当成"用户写的白名单项是对的"。
     aliases = modelmap.aliases(db.get_setting('model_map', {}) or {})
-    unknown = keysvc.unknown_whitelist_entries(names, known_by_realm, aliases)
+    unknown = keysvc.unknown_whitelist_entries(
+        names, known_by_realm, aliases, known_platform_ids)
     return {'checked': True, 'unknown': unknown}
 
 
@@ -167,6 +203,7 @@ def create_key(body: KeyIn, request: Request,
     _check_ip_allowlist(body.ip_allowlist)
     _check_upstream(body.upstream_id)
     _check_preferred_account(body.preferred_account)
+    _check_group_name(body.group_name)
     created = keysvc.create_key(
         name=body.name,
         expires_at=body.expires_at,
@@ -179,6 +216,7 @@ def create_key(body: KeyIn, request: Request,
         daily_quota=body.daily_quota,
         upstream_id=body.upstream_id,
         preferred_account=body.preferred_account,
+        group_name=body.group_name,
     )
     # 密钥是拿额度用的凭证，发放必须留痕（含来源 IP）
     upstream_name = '默认上游'
@@ -202,6 +240,8 @@ def update_key(key_id: int, body: KeyPatch, user: dict = Depends(security.requir
         _check_upstream(patch['upstream_id'])
     if 'preferred_account' in patch:
         _check_preferred_account(patch['preferred_account'])
+    if 'group_name' in patch:
+        _check_group_name(patch['group_name'])
     updated = keysvc.update_key(key_id, patch)
     if not updated:
         raise HTTPException(status_code=404, detail='密钥不存在')
