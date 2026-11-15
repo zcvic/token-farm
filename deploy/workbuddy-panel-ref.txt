@@ -215,3 +215,49 @@ bb6d581a52ebb499d5bbab71b5669b5c4796ee88
 0e863d8380d837e1568fce6e14dcfbc02382635c
 fa4d62ceb81fc6714224947a2ec8cd781e47e7db
 
+# ---- 2026-11 第四批：v2.11.15（静态压缩 / 每日限额 / 列表排序 / 搜索透传）
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      范围：8b5a4df4（v2.11.14）→ 48ba599b（v2.11.15），18 个非 merge 提交。
+#      已取（按能力重写，不整段 merge）：
+#        · 静态资源 gzip：8ab1f277 的开关 + 234269dc 的「只压静态、不压 API / 流式」。
+#          本地落点 server/main.py 的 StaticGzipMiddleware 与 config 的
+#          WB_GZIP_ENABLED / WB_GZIP_MIN_SIZE。本仓库外层有 @app.middleware('http')
+#          （cache_headers / 限流）会把响应包成流式，全局 GZipMiddleware 的
+#          minimum_size 会失效，所以照 234269dc 只压静态路径；SSE 不在压缩范围内。
+#        · 密钥每日 Token 限额：0e1311d0（db 列 + keysvc 判定 + /v1/usage 透出 +
+#          密钥页字段 + 五语种文案）。口径照抄：按本地日期、跨天读时归零、
+#          与总额度各自独立、任一超限即拒绝。
+#        · 账号列表拖拽排序：f86dc4ea（server/services/accountorder.py、
+#          GET/PUT /api/accounts/order、account-list 的 manual 排序、长按 320ms
+#          交互）。顺序按分组建键、写 settings、读不设管理员门槛，只影响展示。
+#        · 单账号刷新积分 / 到期角标按日合并 / 趋势图积分线：40d95589
+#          （refresh-credits 的 ?file=、CreditCountdown 按日合并、usage-chart 的
+#          credit 序列 + 独立右轴）。
+#        · 弹窗内浮层滚轮：08032232（Popover 的 container 落点 + 源码级守卫测试）。
+#        · Docker data 卷一行切换命名卷：2be01967（compose 的 WB_DATA_VOLUME、
+#          db.py 报错文案、.env.example）。本地卷名 / 服务名适配为
+#          token-farm-data / token-farm；默认仍是 ./data，老部署行为不变。
+#        · /v1/tools/search 透传：dce9acc4（Go 侧 handler + tool_search.go +
+#          agenttool_search.go）与 5e88629f（面板侧按 is_model_list 口径鉴权）。
+#          文档 48ba599b 的落点改为 docs/web-search-passthrough.md + README 的
+#          接口表，因为本仓库没有 dev/upstream-patches 目录，源码直接落在 upstream/。
+#      未取：
+#        · 26410a35 国际版 agenttool base 跟随账号 realm：国际版搜索域没有公开
+#          验证，upstream/ 里的 handler 仍对 global 号直接跳过，不拿生产号试错。
+#        · b51917ff 心跳测试时序、dcb818e6 发版标记：属于上游自己的 CI / 发版，
+#          本地没有对应实现。
+#        · 2a1cd450 / c33e1221 / 4ef69803 的文档截图与 DSH 插件装配说明：截图是
+#          上游面板；插件说明按本仓库文档风格重写在 web-search-passthrough.md。
+#        · c88738bf / 83be527b 的 CHANGELOG 段落：本仓库的更新日志自己写。
+#      本地差异（有意偏离）：
+#        · Python 侧没有 tap 抓包模块，tools/search 的采集点不接（聊天路由同样没有）。
+#        · 五语种文案由本地手工补齐（上游只改中英，或依赖它自己的 locale 生成）。
+8ab1f27706db3935e12bd80cca9909bfd55bf34e
+234269dcca15d197abcd7a953240b3bf1c7d4b0d
+0e1311d01ef65b1edffc73b06a9f00a26208fc8d
+f86dc4eaa2a0867338b58efeba74e72f26f7417d
+40d95589793b095a6ad14d3604314ceb45d28ffb
+08032232d3997bf8ac25c9b406f7563bd77fa4a0
+2be0196736ed3508e11b55e36390b7fac3452bb9
+dce9acc437719c52115efcef8489d545d9ea1d55
+5e88629f559a3e251b2cf5d4f5ada241e646a843

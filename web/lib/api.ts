@@ -265,6 +265,16 @@ export const accountApi = {
   list: (upstreamId?: number | null) =>
     get<AccountsResponse>('/api/accounts',
                           upstreamId == null ? undefined : {upstream_id: upstreamId}),
+  /**
+   * 本分组的自定义顺序（拖拽排序）。
+   *
+   * 顺序存在服务端而不是浏览器里：它是这份部署的**共享视图**，换设备 / 换浏览器
+   * 打开要看到同一份顺序。它只是展示顺序，不影响上游选号或任何一次调用的结果。
+   */
+  order: (upstreamId?: number | null) =>
+    get<{order: string[]}>('/api/accounts/order' + groupQs(upstreamId)),
+  saveOrder: (order: string[], upstreamId?: number | null) =>
+    put<{order: string[]}>('/api/accounts/order' + groupQs(upstreamId), {order}),
   exportZip: async (upstreamId?: number | null) => {
     const response = await http.get<Blob>('/api/accounts/export' + groupQs(upstreamId), {
       responseType: 'blob',
@@ -370,9 +380,9 @@ export const accountApi = {
       expiries?: CreditExpiry[];
     }>(`/api/accounts/${encodeURIComponent(file)}/credits`,
        upstreamId == null ? undefined : {upstream_id: upstreamId}),
-  /** 并发刷新所有账号的实时积分 */
+  /** 并发刷新所有账号的实时积分；传 file 时只刷新该账号（issue #432） */
   /** 查询全部账号积分；force=false 时 60 秒内命中服务端缓存 */
-  refreshCredits: (force = true, upstreamId?: number | null) =>
+  refreshCredits: (force = true, upstreamId?: number | null, file?: string | null) =>
     post<{
       total: number;
       succeeded: number;
@@ -380,7 +390,8 @@ export const accountApi = {
       meta: Record<string, CreditsMeta>;
       failed: string[];
     }>('/api/accounts/refresh-credits?force=' + (force ? 'true' : 'false')
-       + (upstreamId == null ? '' : `&upstream_id=${encodeURIComponent(String(upstreamId))}`)),
+       + (upstreamId == null ? '' : `&upstream_id=${encodeURIComponent(String(upstreamId))}`)
+       + (file ? `&file=${encodeURIComponent(file)}` : '')),
   checkinAll: (upstreamId?: number | null) =>
     post<{
       /**

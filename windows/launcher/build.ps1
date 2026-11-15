@@ -551,8 +551,8 @@ foreach ($name in $winScripts) {
 
 # 用户文档白名单（与 release.yml 的 docs-pack 名单保持一致）
 $docsList = @('usage.md', 'features.md', 'screenshots.md', 'development.md', 'security-notes.md',
-    'api-tokens.md', 'account-proxy-routes.md', 'SECURITY-AUDIT.md', 'release-signing.md',
-    'watchdog.md', 'qq-bot.md', 'metrics.md', 'qoder.md')
+    'api-tokens.md', 'account-proxy-routes.md', 'web-search-passthrough.md', 'SECURITY-AUDIT.md',
+    'release-signing.md', 'watchdog.md', 'qq-bot.md', 'metrics.md', 'qoder.md')
 $stageDocs = Join-Path $stageDir 'docs'
 New-Item -ItemType Directory $stageDocs -Force | Out-Null
 foreach ($name in $docsList) {

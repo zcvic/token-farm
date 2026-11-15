@@ -96,14 +96,46 @@ git commit -m "upstream: 说清这次改了什么"
 > 那份。第一批六项的落地情况与三处有意偏离，见 baseline-gaps 开头的
 > 「同步状态」表。
 
-除 misakano 面板仓外，2026-11 还有第二个参考源：
-[`ithtelab/workbuddy-manager`](https://github.com/ithtelab/workbuddy-manager)
-（Go 网关 + 面板一体，本文简称「上游 manager 仓」）。已核对的范围是
-`80b4b21`（v2.11.10）→ `8b5a4df4`（v2.11.14）。这一批**只取对本项目有益的
-部分**：Go 侧补丁 0051–0056、面板侧余额 / 积分 / 账号 / 统计 / 调度等修复；
-Trace Tap（调用抓包）整段未取。逐项清单与「未取原因」记录在
-`deploy/workbuddy-panel-ref.txt` 的第二批段落里。两个来源的仓库布局与运行时
-都不同，**不要互相 cherry-pick**，按能力在本项目对应文件重写。
+除 misakano 面板仓外，2026-11 还有两个参考源。
+
+**`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
+已核对的范围是 `80b4b21`（v2.11.10）→ `48ba599b`（v2.11.15）：
+
+| 区间 | 取到的能力 |
+|---|---|
+| `80b4b21` → `8b5a4df4`（v2.11.14） | Go 侧补丁 0051–0056、面板侧余额 / 积分 / 账号 / 统计 / 调度等修复 |
+| `8b5a4df4` → `48ba599b`（v2.11.15） | 静态资源 gzip、密钥每日 Token 限额、账号拖拽排序、单账号刷新积分 / 到期角标 / 趋势积分线、弹窗浮层滚轮、Docker data 卷命名卷开关、`/v1/tools/search` 透传 |
+
+这两批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
+国际版 agenttool 搜索、上游自己的 CI / 发版提交同样未取。逐项清单与
+「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批段落里；
+Web 搜索的协议与错误语义单独写在
+[web-search-passthrough.md](web-search-passthrough.md)。
+
+**`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
+历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
+
+```bash
+git remote add qoder-ref https://github.com/shuishuipingan/qoder2api-hub.git
+git fetch qoder-ref --no-tags
+```
+
+已核对到 `d0f4837c`（v1.9.9），基线、取用范围与本地唯一补丁（账号权重）记录在
+`deploy/qoder-ref.txt`。升级方式是重跑
+`python server/platforms/qoder/tools/vendor_qoder.py --source <clone>`，
+`--check` 校验一致性；重新 vendor 后必须重新应用那份补丁
+（`server/tests/test_qoder_vendor.py` 守着）。
+
+三个来源的仓库布局与运行时都不同，**不要互相 cherry-pick**，按能力在本项目
+对应文件重写。
+
+### 待评估：misakano `10d01b48..7dcae8ed`
+
+2026-11 之后参考仓又积累了 40 个非 merge 提交（`10d01b48` → `7dcae8ed`，
+另有 11 个 merge；含连坐暂停阈值、会话粘性键掺入 `user_id`、3D 生成端点、
+记账分段 / 首帧否决、上游劣化滑窗、`/v1/search` 计数修正等）。这批**尚未逐项
+评估**，不要当成已同步；索引与初步判断见
+[upstream-sync-misakano.md](upstream-sync-misakano.md) 的附录 D。
 
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）

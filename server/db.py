@@ -118,6 +118,12 @@ CREATE TABLE IF NOT EXISTS api_keys (
   -- （如 0.05 表示一次调用的倍率扣费）。
   quota_credit  REAL    NOT NULL DEFAULT 0,
   used_credit   REAL    NOT NULL DEFAULT 0,
+  -- 每日 token 限额：0 = 不限。与总额度 quota 各自独立，任一超限即拒绝。
+  -- daily_used_tokens 只记 daily_used_day 那一天（本地日期，与 usage_daily 同口径）；
+  -- 日期一变即视为 0，不需要定时任务去清零。
+  daily_quota       INTEGER NOT NULL DEFAULT 0,
+  daily_used_tokens INTEGER NOT NULL DEFAULT 0,
+  daily_used_day    TEXT    NOT NULL DEFAULT '',
   created_at    INTEGER NOT NULL,
   last_used_at  INTEGER,
   -- 密钥明文（供管理员在密钥页再次查看 / 复制）。
@@ -499,6 +505,10 @@ def _explain_db_open_failure(exc: Exception) -> str:
 
     上游自己的 compose 对 `./data` 写了 chown 提示，我们的漏了 —— 于是同样的坑
     在管理端这边表现为一条 sqlite 报错，用户完全猜不到是权限。
+
+    光给 chown 还不够：NAS / 群晖这类环境的目录属主根本改不了（或没开 SSH），
+    所以说明里同时给出「切到命名卷」这条不需要动宿主权限的路（见 compose 的
+    `WB_DATA_VOLUME` 开关）。
     """
     import os as _os
 
@@ -523,12 +533,18 @@ def _explain_db_open_failure(exc: Exception) -> str:
     lines.append(
         '  最常见的成因是**目录属主不对**：容器以 uid 10001 运行，而 bind mount\n'
         '  （compose 里的 `./data:/app/data`）属主由宿主机决定 —— docker 首次自动\n'
-        '  创建该目录时归 root，容器内的 10001 写不进去。宿主机执行一次即可：\n'
-        '    chown -R 10001:10001 ./data\n'
-        '  （在 docker-compose.yml 所在目录执行；10001 是镜像内 app 用户的 uid）\n'
-        '  若目录是网络文件系统（NFS/SMB）且不支持属主修改，改用命名卷：\n'
-        '    volumes:\n      - wb-manager-data:/app/data\n'
-        '  volumes:\n    wb-manager-data:'
+        '  创建该目录时归 root，容器内的 10001 写不进去。两种修法任选其一：\n'
+        '  ① 能改属主：在 docker-compose.yml 所在目录执行\n'
+        '       sudo chown -R 10001:10001 ./data\n'
+        '       docker restart token-farm\n'
+        '     （10001 是镜像内 app 用户的 uid；只重启、别重建，\n'
+        '       否则面板更新过的代码会退回镜像里的版本）\n'
+        '  ② 改不了属主（NAS 的 SMB/NFS、群晖 Container Manager、没开 SSH）：\n'
+        '     在 compose 同目录的 .env 里加一行\n'
+        '       WB_DATA_VOLUME=token-farm-data\n'
+        '     再执行 docker compose up -d —— 命名卷首次创建会继承镜像内目录的\n'
+        '     属主，不需要 chown。旧版 compose 没有这个变量时，把挂载整行改成\n'
+        '     `- token-farm-data:/app/data`，并在文件末尾加顶层 `volumes:` 声明。'
     )
     return '\n'.join(lines)
 
@@ -711,10 +727,14 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ('request_logs', 'cache_write_tokens', 'INTEGER'),
     ('api_keys', 'quota_credit', 'REAL NOT NULL DEFAULT 0'),
     ('api_keys', 'used_credit', 'REAL NOT NULL DEFAULT 0'),
+    # 每日 token 限额。存量密钥为 0 = **不限**，行为不变。
+    # 已用量按本地日期记在 daily_used_day 名下，跨天自动归零（读时判断，写时重置）。
+    ('api_keys', 'daily_quota', 'INTEGER NOT NULL DEFAULT 0'),
+    ('api_keys', 'daily_used_tokens', 'INTEGER NOT NULL DEFAULT 0'),
+    ('api_keys', 'daily_used_day', "TEXT NOT NULL DEFAULT ''"),
     # 密钥明文（供「密钥页再次查看 / 复制」，见 SCHEMA 里这一列的说明）。
     # 存量密钥为空串 = 取不回明文：那一版只存哈希，界面上要说清「去重建一把」，
     # 而不是显示一个空密钥让人以为复制坏了。
-    ('api_keys', 'key_plain', "TEXT NOT NULL DEFAULT ''"),
     ('api_keys', 'key_plain', "TEXT NOT NULL DEFAULT ''"),
     # 这把密钥**优先消耗**哪个账号的积分（账号 uid）。
     #

@@ -94,6 +94,7 @@ upstream repo is gone, and its source is now maintained here.
 - **Model aliases** — map the names your downstream uses onto the real models
 - **Model centre** — every usable model on one page: context, max output, thinking tiers
 - **Full audit trail** — key, IP, model, status, TTFB, billing and cache hits per call
+- **Web search passthrough** — the same key also calls `POST /v1/tools/search`; search calls go through the same logs and group isolation (see [Web search passthrough](docs/web-search-passthrough.md))
 
 ### Visual settings
 
@@ -181,6 +182,7 @@ in [the usage guide](docs/usage.md).
 | `POST` | `/v1/messages` | gateway key | Anthropic Messages API compatible (Claude Code, etc.) |
 | `POST` | `/v1/messages/count_tokens` | gateway key | Rough input-token estimate (by character count) |
 | `GET` | `/v1/models` | gateway key | Model list |
+| `POST` | `/v1/tools/search` | gateway key | Web search passthrough (same key, see [docs/web-search-passthrough.md](docs/web-search-passthrough.md)) |
 | `GET` | `/v1/usage` | gateway key | Self-check for one key: used / remaining quota, expiry, model scope (reads panel records; makes no call) |
 | `GET` | `/healthz` | none | Liveness probe (includes upstream connectivity) |
 | `GET` | `/api/me` | session | Current user |
@@ -235,6 +237,7 @@ Threat model and hardening notes: [security notes](docs/security-notes.md) and t
 - [Security notes](docs/security-notes.md) — threat model and hardening
 - [Deployment guide](deploy/README.md) — reverse proxy, HTTPS, Windows, updates
 - [Account proxy routes](docs/account-proxy-routes.md) — per-account egress
+- [Web search passthrough](docs/web-search-passthrough.md) — `POST /v1/tools/search` on the same key
 - [API tokens](docs/api-tokens.md) — read-only tokens and scopes
 - [Page watchdog](docs/watchdog.md) — upstream page change detection, LLM triage, email / QQ / webhook alerts
 - [Prometheus metrics](docs/metrics.md) — scrape config, metric semantics and auth

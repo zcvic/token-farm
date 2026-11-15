@@ -86,6 +86,7 @@
 - **模型别名映射** —— 把下游在用的名字映到实际模型，迁移无感
 - **模型中心** —— 账号可用模型单列一页：上下文、最大输出、思考档位
 - **全量审计** —— 每次调用记密钥、IP、模型、状态码、首字延迟、扣费与缓存命中
+- **Web 搜索透传** —— 同一把密钥也能调 `POST /v1/tools/search`，搜索调用同样进日志与分组隔离（见 [Web 搜索透传](docs/web-search-passthrough.md)）
 
 ### 可视化设置
 
@@ -194,6 +195,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zcvic/token-farm/main/deploy
 | `POST` | `/v1/messages` | 网关密钥 | Anthropic Messages API 兼容（Claude Code 等） |
 | `POST` | `/v1/messages/count_tokens` | 网关密钥 | 按字符数粗估输入 token |
 | `GET` | `/v1/models` | 网关密钥 | 模型列表 |
+| `POST` | `/v1/tools/search` | 网关密钥 | Web 搜索透传（同一把密钥，见 [docs/web-search-passthrough.md](docs/web-search-passthrough.md)） |
 | `GET` | `/v1/usage` | 网关密钥 | 密钥自查：已用 / 剩余额度、有效期与模型范围（只读面板记录，不产生调用） |
 | `GET` | `/healthz` | 无 | 存活探测（含上游连通性） |
 | `GET` | `/api/me` | 会话 | 当前登录用户 |
@@ -244,6 +246,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zcvic/token-farm/main/deploy
 - [安全说明](docs/security-notes.md) —— 威胁模型与加固
 - [部署指南](deploy/README.md) —— 反向代理、HTTPS、Windows 原生、一键更新
 - [账号出口线路](docs/account-proxy-routes.md) —— 每个账号走不同代理出口
+- [Web 搜索透传](docs/web-search-passthrough.md) —— 同一把密钥调 `/v1/tools/search`
 - [API 令牌](docs/api-tokens.md) —— 只读令牌与作用域
 - [页面监控](docs/watchdog.md) —— 上游网页改版检测、LLM 判读与邮件 / QQ / Webhook 通知
 - [Prometheus 指标](docs/metrics.md) —— 抓取配置、指标口径与鉴权
