@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,6 +47,14 @@ func setLateRetryDelays(t *testing.T, ds ...time.Duration) {
 	old := checkinLateRetryDelays
 	checkinLateRetryDelays = ds
 	t.Cleanup(func() { checkinLateRetryDelays = old })
+}
+
+// setLateRetryGap 覆盖补签时账号之间的最小间隔（默认 2s，测试里要压小）。
+func setLateRetryGap(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := checkinRetryMinGap
+	checkinRetryMinGap = d
+	t.Cleanup(func() { checkinRetryMinGap = old })
 }
 
 // waitFor 轮询等待条件成立（补签在后台 goroutine 里跑，没有同步点）。
@@ -90,13 +99,14 @@ func TestCheckinLateRetrySucceedsAfterTransient(t *testing.T) {
 // 第二轮只再等 40m-10m=30m，不是再等 40m（否则第二次补签被推到 50 分钟后）。
 func TestLateRetryWaitIsAbsoluteOffset(t *testing.T) {
 	old := checkinLateRetryDelays
-	checkinLateRetryDelays = []time.Duration{10 * time.Minute, 40 * time.Minute}
+	delays := []time.Duration{10 * time.Minute, 40 * time.Minute}
+	checkinLateRetryDelays = delays
 	t.Cleanup(func() { checkinLateRetryDelays = old })
 
-	if got := lateRetryWait(0, 0); got != 10*time.Minute {
+	if got := lateRetryWait(0, 0, delays); got != 10*time.Minute {
 		t.Errorf("第一轮 wait=%v want 10m", got)
 	}
-	if got := lateRetryWait(1, 10*time.Minute); got != 30*time.Minute {
+	if got := lateRetryWait(1, 10*time.Minute, delays); got != 30*time.Minute {
 		t.Errorf("第二轮 wait=%v want 30m（40m 绝对偏移 − 已等 10m）", got)
 	}
 }
@@ -253,5 +263,61 @@ func TestCheckinOneAlreadyIsIdempotent(t *testing.T) {
 	}
 	if !p.CheckinDoneToday("u1") {
 		t.Error("幂等拒绝也要落记账（否则补签会反复重打）")
+	}
+}
+
+// TestCheckinLateRetryDedupesQueuedUIDs 手动签到与排程签到各自失败时会各排一次补签：
+// 入口必须去重，同一个号不能被两条队列在同一轮里重复打（每次都是真实写调用）。
+func TestCheckinLateRetryDedupesQueuedUIDs(t *testing.T) {
+	var calls atomic.Int32
+	s, _ := newLateRetryS(t, 1000, &calls) // 永远失败，确保两轮都会被尝试
+	setLateRetryDelays(t, 5*time.Millisecond)
+	setLateRetryGap(t, 0)
+
+	s.startCheckinLateRetry(context.Background(), []string{"u1"})
+	s.startCheckinLateRetry(context.Background(), []string{"u1"}) // 第二条队列应被去重
+
+	time.Sleep(80 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("daily-checkin calls=%d want 1（同一 uid 只该被一条队列打到）", got)
+	}
+}
+
+// TestCheckinLateRetrySpacesAccounts 补签的账号之间要有间隔，且间隔不是等距：
+// 一批号在同一秒打上游是可识别的节拍特征。
+func TestCheckinLateRetrySpacesAccounts(t *testing.T) {
+	var mu sync.Mutex
+	var at []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/daily-checkin") {
+			mu.Lock()
+			at = append(at, time.Now())
+			mu.Unlock()
+			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
+			return
+		}
+		w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[]}}}}`))
+	}))
+	defer srv.Close()
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "a1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	p.Add(&auth.Auth{UID: "b1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	setLateRetryDelays(t, 2*time.Millisecond)
+	setLateRetryGap(t, 40*time.Millisecond)
+
+	s.startCheckinLateRetry(context.Background(), []string{"a1", "b1"})
+	if !waitFor(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(at) >= 2
+	}) {
+		t.Fatal("两个账号的补签未在时限内跑完")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := at[1].Sub(at[0]); got < 40*time.Millisecond {
+		t.Errorf("账号间隔=%v want >=40ms（补签也要按号错开）", got)
 	}
 }

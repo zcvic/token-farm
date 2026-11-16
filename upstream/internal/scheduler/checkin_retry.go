@@ -16,6 +16,7 @@ package scheduler
 import (
 	"context"
 	"log"
+	"math/rand"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -25,14 +26,19 @@ import (
 
 var checkinLateRetryDelays = []time.Duration{10 * time.Minute, 40 * time.Minute}
 
+// checkinRetryMinGap 补签时账号之间的最小间隔。主批已有 checkinAccountDelay，
+// 补签循环此前没有——一批号在同一秒打上游，正是「等距节拍」这种可识别特征。
+// 实际间隔取 [gap, 2×gap) 里的随机值；变量：测试压到零。
+var checkinRetryMinGap = 2 * time.Second
+
 // lateRetryWait 返回第 round 轮补签相对上一轮实际要睡的时长。
 //
-// checkinLateRetryDelays 是**从本批结束起算的绝对偏移**（10m、40m），所以每轮要睡
-// 的是与上一轮的差值。写成函数是为了能被单测钉住：直接内联 `[round]-prev` 时，
-// 漏掉 `-prev` 只是「第二轮从第一轮结束时起算」，行为差异藏在分钟级时间里，
-// 功能测试看不出来（实际变成 10m 后 40m 再补，等于 50m 才补第二次）。
-func lateRetryWait(round int, prev time.Duration) time.Duration {
-	return checkinLateRetryDelays[round] - prev
+// delays 是**从本批结束起算的绝对偏移**（10m、40m），所以每轮要睡的是与上一轮的
+// 差值。写成函数是为了能被单测钉住：直接内联 `[round]-prev` 时，漏掉 `-prev` 只是
+// 「第二轮从第一轮结束时起算」，行为差异藏在分钟级时间里，功能测试看不出来（实际
+// 变成 10m 后 40m 再补，等于 50m 才补第二次）。
+func lateRetryWait(round int, prev time.Duration, delays []time.Duration) time.Duration {
+	return delays[round] - prev
 }
 
 // checkinOne 对单个 CN 账号执行一次签到（不含余额查询、不含 token 预刷新）。
@@ -85,26 +91,54 @@ func (s *Scheduler) checkinWithRetry(ctx context.Context, a *auth.Auth, uid stri
 //
 // 不阻塞调用方：runBatch 要等各任务返回才继续下一批，阻塞会让下一个整点的整批
 // 任务被跳过。ctx 取消即退，不拖住优雅停机。
+//
+// 入口去重：手动签到与排程签到各自失败时会各排一次补签，同一个号不能被两条补签
+// 队列重复打。队列退出后整批出队（见 checkinLateRetryLoop 的 defer）。
 func (s *Scheduler) startCheckinLateRetry(ctx context.Context, uids []string) {
-	if len(uids) == 0 || len(checkinLateRetryDelays) == 0 {
+	delays := append([]time.Duration(nil), checkinLateRetryDelays...)
+	if len(uids) == 0 || len(delays) == 0 {
 		return
 	}
-	pending := append([]string(nil), uids...)
+	s.retryMu.Lock()
+	if s.retryPending == nil {
+		s.retryPending = map[string]bool{}
+	}
+	var pending []string
+	for _, uid := range uids {
+		if !s.retryPending[uid] {
+			s.retryPending[uid] = true
+			pending = append(pending, uid)
+		}
+	}
+	s.retryMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
 	log.Printf("[checkin] %d 个账号本轮瞬时失败，将在 %s、%s 后各补签一次（期间整点排程照常）",
-		len(pending), checkinLateRetryDelays[0], checkinLateRetryDelays[len(checkinLateRetryDelays)-1])
-	go s.checkinLateRetryLoop(ctx, pending)
+		len(pending), delays[0], delays[len(delays)-1])
+	// 节奏快照后作参数传进 goroutine：不在后台循环里读包级变量。
+	go s.checkinLateRetryLoop(ctx, pending, delays, checkinRetryMinGap)
 }
 
-func (s *Scheduler) checkinLateRetryLoop(ctx context.Context, pending []string) {
+func (s *Scheduler) checkinLateRetryLoop(ctx context.Context, pending []string, delays []time.Duration, minGap time.Duration) {
+	all := append([]string(nil), pending...) // 退出时整批出队（pending 会逐轮缩短）
+	defer func() {
+		s.retryMu.Lock()
+		for _, uid := range all {
+			delete(s.retryPending, uid)
+		}
+		s.retryMu.Unlock()
+	}()
 	prev := time.Duration(0)
-	for round := 0; round < len(checkinLateRetryDelays); round++ {
+	for round := 0; round < len(delays); round++ {
 		// 延迟是**绝对偏移**（10m、40m），所以这里睡的是与上一轮的差值。
-		if !sleepCtx(ctx, lateRetryWait(round, prev)) {
+		if !sleepCtx(ctx, lateRetryWait(round, prev, delays)) {
 			return // ctx 取消：停机，不补
 		}
-		prev = checkinLateRetryDelays[round]
+		prev = delays[round]
 
 		var still []string
+		called := false
 		for _, uid := range pending {
 			if ctx.Err() != nil {
 				return
@@ -121,11 +155,17 @@ func (s *Scheduler) checkinLateRetryLoop(ctx context.Context, pending []string) 
 			if st, ok := s.cfg.Pool.Status(uid); ok && (st.Disabled || s.cfg.Pool.RiskPaused(uid)) {
 				continue
 			}
+			if called && minGap > 0 {
+				if !sleepCtx(ctx, minGap+time.Duration(rand.Int63n(int64(minGap)))) {
+					return
+				}
+			}
+			called = true
 			st, err := s.checkinOne(a, uid)
 			switch {
 			case st != CheckinFail:
 				log.Printf("[checkin] 补签成功 %s（第 %d 轮 / 共 %d 轮）",
-					logfmt.Label(uid, a.Nickname), round+1, len(checkinLateRetryDelays))
+					logfmt.Label(uid, a.Nickname), round+1, len(delays))
 			case checkinRetryable(err):
 				still = append(still, uid)
 			default:
@@ -141,7 +181,7 @@ func (s *Scheduler) checkinLateRetryLoop(ctx context.Context, pending []string) 
 		}
 	}
 	log.Printf("WARN: [checkin] 补签 %d 轮后仍有 %d 个账号失败（等下一个签到整点再试）：%s",
-		len(checkinLateRetryDelays), len(pending), joinUIDs(pending))
+		len(delays), len(pending), joinUIDs(pending))
 }
 
 // joinUIDs 只打 uid 前 8 位：日志里出现完整 uuid 没有额外信息，短前缀与面板一致。

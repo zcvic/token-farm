@@ -88,6 +88,11 @@ type Scheduler struct {
 	// checkinMu 串行化签到：定时入口与手动触发互斥，避免同一时刻重复打上游签到接口。
 	checkinMu sync.Mutex
 
+	// retryMu/retryPending 补签队列去重：手动与排程签到各自失败时会各排一次补签，
+	// 同一个 uid 不能被两条队列重复打。只在进程内，队列退出即出队。
+	retryMu      sync.Mutex
+	retryPending map[string]bool
+
 	// makeupPerRound 每轮连登管家最多用几张补签卡（0 = 不限，补到卡用光）。
 	// atomic 读写，面板保存配置后可热改（schedule.makeup_cards_per_round）。
 	//
