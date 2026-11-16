@@ -2370,64 +2370,340 @@ B-1～B-24 同样是按旧基线整理的。`7a48d72e` 之后又筛出 18 项协
   但**要注意**：本批给 CN 链接补了 `loginSessionId`，链接同样变长——已验证
   `qrcode.react` 会按内容自动选版本，不需要额外处理。
 
-## 附录 D：`10d01b48` 之后的提交（2026-11-15 扫，**未同步**）
+## 附录 D：`10d01b48` 之后的提交（2026-11-16 扫，已逐项评估）
 
 ### D.1 范围与口径
 
-参考仓 `10d01b48` → `7dcae8ed`（2026-11-14，`misakano/main` HEAD）共 **51 个提交**，
-其中 40 个非 merge、11 个 merge（内容已被非 merge 覆盖，不单列）。这一批**只做了
-初筛，没有逐项移植**——下面列出的能力都还是「待评估」，不要当成已同步；真正落地
-时按本文一贯口径补写 A/B/C 式的逐项判定，并在 `deploy/workbuddy-panel-ref.txt`
-追加锚点。
+参考仓范围 `10d01b48..c4b53cd`（2026-11-13 → 2026-11-16，`misakano/main` 当前 HEAD
+是 `c4b53cd`），共 **69 个提交 = 54 个非 merge + 15 个 merge**（merge 的内容已被
+非 merge 覆盖，不单列）。
 
-本地与参考仓的运行时差异仍然成立：参考仓是 Go 网关 + 内嵌面板，本地是 Python 面板 +
-随仓库维护的 `upstream/`（Go 网关）。所以下面按「本地有没有落点」分三档：
-**可能值得做**（本地有对应概念、且是稳定性问题）、**需要先确认**（语义可能重合或
-本地实现不同）、**大概率不适用**（纯 Go 运行时细节 / 内嵌面板 / 新平台端点）。
+2026-11-15 首次扫到 `7dcae8ed` 时（40 个非 merge）只做了初筛；本轮把范围补到当前
+HEAD，并对着本地代码**逐项**判过一遍——下面 54 行每一行都是独立判定，不是「待评估
+清单」。**判定只回答「本地缺不缺」**，不看提交早晚。
 
-### D.2 可能值得做（建议下一轮优先评估）
+判定用六档：
 
-| 主题 | 提交 | 本地现状 | 初判 |
+| 判定 | 含义 | 位置 |
+|---|---|---|
+| **值得** | 本地有真实缺口、改动小、风险低，本轮可做 | D.3 |
+| **值得·排期** | 是新功能（要动面板 / 数据模型 / 任务链），不塞进小修批次 | D.4 |
+| **需确认** | 与本地既有口径冲突，或依赖尚未移植的层，要先定取舍 | D.5 |
+| **随项** | 是某个**尚未移植**的 M-P* 项的一部分，实现那项时一并采纳 | D.6 |
+| **已覆盖** | 本地已有等价能力或更严判据，不需要动作 | D.7 |
+| **不适用** | 参考仓独有运行时（内嵌面板 / continue / toolonly / headkeepalive /
+  3D / videos / narration / proxypool / windowprobe / upstreamhealth 等） | D.8 |
+
+判「不适用」的本地事实前提（2026-11-16 核对，`upstream/internal/` 下确实没有）：
+`server/restrict.go`、`server/continue.go`、`server/toolonly.go`、
+`server/headkeepalive.go`、`server/upstreamhealth.go`、`upstream/output_budget.go`、
+`upstream/webagent.go`、`upstream/billing_summary.go`、`upstream/campaign.go`、
+`upstream/responses.go`、`upstream/desktop.go`、`upstream/checkin_receipt.go`、
+`pool/strategy.go`、`proxypool/`、`auth/wbencrypted.go`、`scheduler/windowprobe.go`；
+本地面板是 Next.js + Python，参考仓的 `internal/panel/` 没有对应文件。
+
+### D.2 逐项判定（54 个非 merge）
+
+| 提交 | 标题（简） | 判定 | 本地落点 / 理由 |
 |---|---|---|---|
-| 11140 风控连坐判据收紧、首帧同样停手、连坐按域 | `d3edea90` | M-P0-1 一直未做；本地冷却是按错误文本 / 粗略分类 | 本地最容易误伤整池的地方，优先看 |
-| 连坐暂停阈值随池子规模缩放、暂停时长指数退避、平静期后 streak 清零 | `de24d38f`、`7dcae8ed` | `server/services/cooling.py` 有失败阈值与冷却，但没有按池子规模缩放 | 与现有冷却策略同源，改动面中等 |
-| 派生粘性键掺入调用方 `user_id` | `d700ec56` | 本地密钥体系让多个下游用户共用同一账号池；Go 侧粘性键是否跨用户撞号需要核对 | 只换派生输入，风险低 |
-| 账号目录热重载不再清空整池、不覆盖刚刷新的令牌 | `47cc7e22` | 本地重载上游 / 账号文件后会整池刷新；与「刚刷新的令牌被旧文件盖回去」是否同构需核对 | 稳定性问题，值得对照 |
-| 签到 `code=0` 的失败回执不再判成已签到 | `03a50ce0` | 本地签到链已把「今日已签到」当幂等成功，但失败回执的判据可能仍偏宽 | 只影响记账与提示，风险低 |
-| 模型可用性按事件所属域匹配裸名 | `e4f7edae` | 本地模型级限流按模型名标记，可能有同名跨域误标 | 需先复现 |
-| 上游劣化滑窗改固定桶计数 | `2d03e4bd` | `upstream/internal/server/degrade.go` 已有滑窗，但每次 record 的开销未测 | 纯性能，收益取决于流量 |
-| 窗口探针对齐选号闸门、补签按账号错开 | `3bab4f8c`、`8a39572f` | 本地刚做过补签窗口收窄（A.1.2），但「手动 + 排程重复补签」的去重未做 | 与 A-2 同一条链，顺路 |
-| 代理出口画像经该代理查询 + `features.proxy_exit_lookup` 开关 | `2603cbff` | 本地账号代理只有绑定与探测，没有「经代理查出口 IP」 | 需要先用真实代理验证 |
-| 输出预算下限按目录 `maxOutputTokens` 封顶 | `b60f1c0b` | 本地网关有输出预算调整，目录外模型不抬这一条未核 | 只影响参数构造 |
+| `1414e9f7` | LoadDir 只给同 uid 胜出的文件回填 realm | **值得** | `auth.LoadDir` 仍对落败文件 `SaveAtomic`，刷新 mtime 后胜负来回翻（D-3） |
+| `3bab4f8c` | 窗口探针对齐选号闸门 | 不适用 | 本地无 `windowprobe` / 选号窗口探针 |
+| `8622073e` | 加密 auth 回写保持加密 | 随项 | M-P0-4 未移植（无 `wbencrypted.go`） |
+| `6a3a58c0` | `IsPaidUser` 缺失不等于免费号 | 不适用 | 无 `billing_summary.go`；M-P2-10 一并 |
+| `6be18704` | 导入覆盖前求证：有界并发 + 总时限 | 随项 | M-P1-1 未移植；本地 `upload_accounts` 覆盖前不验活 |
+| `5d04ad21` | Clash 订阅导入 tls / 嵌套 / 注释 | 不适用 | 本地无 Clash 导入入口 |
+| `1f67b377` | toolonly 续写裁决前不漏字节 | 不适用 | 无 toolonly / continue |
+| `69b3a1e9` | 登录后「是否新号」在入池前判断 | 不适用 | 本地后台任务是全局排程（`taskrun._claim_loop` 跑 ALL），不按号启动 |
+| `8a39572f` | 补签按账号错开 + 手动/排程去重 | **值得** | `scheduler/checkin_retry.go` 无 `retryMu` 去重、无按号间隔（D-2） |
+| `a7983640` | 空 text 段逐字节补位 | **值得** | `empty_text_part.go` 仍是嗅探 + 整段 `json.Marshal` 重写（D-5） |
+| `084176e4` | 截断终态不补在 error 帧 / `[DONE]` 之后 | **值得** | `sse.go` 无 `errorSent`，error 帧计入 `validFrames`（D-7） |
+| `e4f7edae` | 模型可用性按事件所属域匹配裸名 | 已覆盖 | `request_logs.realm` 已有，gateway `_record` 落 `used_realm`（D.7） |
+| `1e1ee4db` | 活跃会话上限按业务码 10105 判 | 不适用 | 无 webagent |
+| `47cc7e22` | 热重载不清空整池、不覆盖刚刷新的令牌 | **值得** | `pool.watch` 空目录会 `SyncToDir` 删整池；`upsertLocked` 换指针（D-4） |
+| `798458f8` | 已交付出图的回合不算「只有思考」 | 不适用 | 无 Go `responses.go`；Python `responses.py` 无该判据 |
+| `a98ab36c` | 缓冲读空判据跳过帧分隔空行 | 不适用 | 本地逐帧 flush，没有「缓冲读空才 flush」这套优化 |
+| `767056cc` | 身份指令改写作用域 / 带点身份名 | **值得** | `sanitize.go` 把身份词挂进通用特征门控，句尾断在第一个点（D-6） |
+| `03a50ce0` | `code=0` 的失败回执不再判成已签到 | **值得** | Go `alreadyCheckinRule` 与 Python `is_already_checkin_message` 同一误判（D-1） |
+| `2603cbff` | 出口画像经该代理查询 | 已覆盖 | `server/routers/proxies.py` 已有「经线路探测出口 IP」 |
+| `56f76319` | 已领取的任务不再算「已达标待领」 | 已覆盖 | `task_runner.process_task` 先按 `accept_status=claimed` 跳过 |
+| `93bbef3d` | 活动领奖护栏（账号/互斥/限速/断开即停） | 不适用 | 本地无 Go campaign 页；可借的护栏思路记在 D.8 |
+| `9ba108fb` | 首帧心跳改为上游回 200 之后 | 不适用 | 无 headkeepalive |
+| `0befb2b0` | 粘帧 error 触发首帧否决 + 聚合同样拆帧 | 已覆盖 | `Aggregate` 已按 `splitConcatenatedJSON` 拆帧；首帧否决本地没有 |
+| `67386ae5` | 到期日推算标记不丢、告警按号限频 | 不适用 | 无 `billing_summary.go` |
+| `bc8e1417` | `request_archive_max_mb<=0` 的回落 | 不适用 | 本地无该配置项 |
+| `ee74f54c` | 运行日志落盘移出 log 输出路径 | 不适用 | 参考仓内嵌面板的日志方案 |
+| `3fd3680a` | `/v1/search` 丢弃条目只扣丢弃数 | 不适用 | 本地 `/v1/tools/search` 纯透传，不丢条目 |
+| `afda7e9c` | 选号策略不再每次把池置脏 | 不适用 | 本地无 `scheduling` 游标 |
+| `b4012ceb` | 续写闸门按限额区分 | 不适用 | 无 continue |
+| `b60f1c0b` | 输出预算下限按目录 `maxOutputTokens` 封顶 | 随项 | M-P1-10 未移植 |
+| `2d03e4bd` | 上游劣化滑窗改固定桶计数 | 不适用 | 无 `upstreamhealth`；`degrade.go` 是降级状态机，不是滑窗 |
+| `def074c5` | 续写 / 救援每段都记账 | 不适用 | 无 continue |
+| `d3edea90` | 11140 判据收紧、首帧同样停手、按域 | 随项 | M-P0-1 未移植 |
+| `ab679742` | 记账合计按段合并 | 不适用 | 无分段续写 |
+| `629390de` | 6020 排队等待不提前写注释帧 | 不适用 | 本地 6020 直接 429 + `Retry-After` 透出，无 headkeepalive |
+| `557b3d55` | 混元 3D 端点 + MCP 工具 | 不适用 | 本地无 videos / 3D |
+| `d700ec56` | 派生粘性键掺入调用方 `user_id` | 随项 | M-P1-5；本地 `StickyFallbackKey` 对带 `user_id` 的 body 直接返回空串 |
+| `de24d38f` | 连坐阈值随池缩放、暂停指数退避 | 随项 | M-P0-1 |
+| `d2628962` | 领奖后回读 `claimed_at` 才算入账 | 已覆盖 | `task_runner._claim_parse` 回执缺奖励字段时回读确认，读不到不计入账 |
+| `7dcae8ed` | 平静期后连坐 streak 真的清零 | 随项 | M-P0-1 |
+| `8519ea26` | 模型规则（按号批量 deny / allow） | **值得·排期** | 与 `modelpolicy.py` 的全局隐藏不重合；是独立新功能（D-8） |
+| `89cdfe71` | 句号收尾的「我继续」不算最终答复 | 不适用 | 无 narration |
+| `0a2a55fb` | 合并默认 + mp 任务列表 | **值得·排期** | 本地 `Library_read` 只在默认列表找，miss 即判「任务不存在」（D-9） |
+| `1166967d` | 回填用例改用相对日期 | 不适用 | 参考仓 Go 测试 |
+| `74456c87` | 模型规则 review 补充（读锁/README/400） | **值得·排期** | 随 `8519ea26`（D-8） |
+| `d2708ca6` | `/v1/search` 多卡片占位链接互不相同 | 不适用 | 本地纯透传 |
+| `2fa6876e` | 指纹版本跟 5.11.3 分发包 | **需确认** | 本地单版本默认 `5.5.4` / `2.137.1`，无 `desktop.go`、无按 realm 拆分（D-10） |
+| `e069e65c` | 官方头对拍门禁按形态比版本号 | 不适用 | 参考仓 CI |
+| `eca5f30b` | 积分语义分离：`credits` 可用 / `credits_raw` 快照 | **需确认** | 本地 `balance_realm` 明确「全池相加、不分停用」（D-11） |
+| `452643bb` | logstore 用例改相对日期 | 不适用 | 参考仓 Go 测试 |
+| `bd595648` | narration 长度闸门只拦标点型悬停 | 不适用 | 无 narration |
+| `f5d08c04` | 禁用号冻结积分快照放进额度 tooltip | **需确认** | 随 D-11（语义依赖 `credits_raw`）；本地无该 tooltip |
+| `09189a53` | narration 按末句判「等用户回话」 | 不适用 | 无 narration |
+| `c4b53cd8` | `/v1/videos` 也进请求台账 | 不适用 | 无 videos |
 
-### D.3 需要先确认（语义可能重合或本地实现不同）
+按判定汇总：**值得 7**（`03a50ce0`、`8a39572f`、`1414e9f7`、`767056cc`、`a7983640`、
+`47cc7e22`、`084176e4`）、**值得·排期 3**、**需确认 3**、**随项 7**、**已覆盖 5**、
+**不适用 29**。
 
-- **领奖后回读 `claimed_at` / 活动领奖护栏**（`d2628962`、`93bbef3d`）：本地刚在
-  A.1.2 给 Python 任务链补了「claim 回读 + `already_accepted`」，Go 侧活动领奖
-  是否也有同样的静默丢弃，需要对照后再决定是不是两套都要。
-- **续写 / 首帧 / 截断终态一族**（`def074c5`、`ab679742`、`9ba108fb`、`1f67b377`、
-  `084176e4`、`0befb2b0`、`b4012ceb`）：这些改的是 Go 侧 SSE 状态机（首帧心跳、
-  续写闸门、粘帧 error、截断终态顺序）。本地转发链在 Python，只有语义层可能对应；
-  逐条核对成本高，先看是否出现同类线上问题再动。
-- **记账分段合并 / 段内多帧 usage 不重复计 prompt**（`ab679742`、`def074c5`）：
-  本地 `usage_daily` 与请求日志是 Python 记账，口径可能已经不同；先复盘一次多段
-  续写的实际账目再判断。
-- **`/v1/search` 丢弃条目时 `total_results` 只扣丢弃数**（`3fd3680a`）：本地
-  `/v1/tools/search` 是**透传不丢条目**，暂时没有这个计数问题。
-- **加密 auth 文件回写仍加密、保留桌面端字段**（`8622073e`、`1414e9f7`）：本地
-  账号文件是明文 JSON 且由面板自己写；如果将来接加密文件再评估。
-- **登录后「是否新号」在入池前判断**（`69b3a1e9`）：本地加号流程是扫码后写文件 +
-  重载，是否新号由面板判断；需确认新号后台任务（签到 / 旅行）是否会被漏启动。
+### D.3 值得做（7 项，已落地）
 
-### D.4 大概率不适用
+2026-11-16 已按下面的顺序全部落地：每项一个本地提交，来源提交号追加进
+`deploy/workbuddy-panel-ref.txt` 第六批。
 
-- **混元 3D 生成端点 + MCP 工具 + 临时云凭证自动签发**（`557b3d55`）：本地没有 3D
-  能力视图，也没有对应客户端；不引入。
-- **内嵌面板 / 日志落盘 / 配置回落**（`ee74f54c`、`bc8e1417`）：改的是参考仓内嵌
-  面板的日志与管理页，本地是 Next.js + Python 自己的日志方案。
-- **Clash 订阅导入的 tls / 嵌套列表 / 行尾注释**（`5d04ad21`）：本地没有 Clash
-  订阅导入入口，只有按账号绑定代理。
-- **缓冲读空判据跳过帧分隔空行**（`a98ab36c`）：Go SSE 读循环的性能细节，本地没有
-  对应的逐帧读实现。
-- **选号策略不每次置脏**（`afda7e9c`）、**导入覆盖前有界并发求证**（`6be18704`）：
-  属于参考仓池实现内部优化，本地池语义不同，收益不明；除非出现同款问题，否则不跟。
+| 顺序 | 来源 | 本地提交 | 落点 |
+|---|---|---|---|
+| 1 | `03a50ce0` | `69406ee0` | `client.go` 的 `isAlreadyCheckinMsg`；`tencent.py` 的失败硬词与 `code=0` 分支 |
+| 2 | `8a39572f` | `c4c44610` | `checkin_retry.go` 的 `retryMu/retryPending` 去重 + 按号间隔 |
+| 3 | `1414e9f7` | `1e2acfe2` | `auth.LoadDir` 只给 winner 回填 realm |
+| 4 | `767056cc` | `f7bf2f9e` | `sanitize.go` 的 `scrubInjectedIdentity` + 句尾正则 |
+| 5 | `a7983640` | `527f9910` | `empty_text_part.go` 的 `fillSniffedEmptyText` 逐字节补位 |
+| 6 | `47cc7e22` | `d771990c` | `auth.AdoptNewer` + `upsertLocked` 原地更新 + 空目录不清池 |
+| 7 | `084176e4` | `6031f1c8` | `sse.go` 的 `errorSent` |
+
+下面保留判定时的缺口描述，作为改动依据（不再表示「待做」）。
+
+**D-1　签到回执误判（`03a50ce0`）：Go + Python 两处都要改**
+
+两处都只判「含『已签到』就算幂等成功」，于是 `签到失败，已签到天数不足 7 天`
+（同时含「失败」与「已签到」）被判成「今天已经签过了」——调度器/CLI 当成功跳过，
+当天实际没签。
+
+- Go（`upstream/internal/upstream/client.go`）：`alreadyCheckinRule` 只有
+  `{"已签到", "already"}`。加一组失败硬词（`失败` / `fail` / `not started` /
+  `未开始` / `不支持`），**失败词压过 already**；`IsAlreadyCheckin` 与将来的回执
+  分类共用同一判据，别在两个出口各写一份。
+- Python（`server/services/tencent.py`）：`is_already_checkin_message` 同病，加同一
+  组失败硬词。另外 `checkin()` 对 `code == 0` 无条件返回「签到成功」——上游实测有
+  HTTP 200 + `code=0` + 失败文案的形态，也要先看失败硬词，命中则返回 `-3`（可重试）
+  而不是 `0`。
+- 风险：低（只收窄「成功」的判定，不改请求）。测试：Python 加 10001 + 失败文案、
+  code=0 + 失败文案两例；Go 加 `IsAlreadyCheckin` 的失败词用例。
+
+**D-2　补签去重 + 按账号错开（`8a39572f`）**
+
+`upstream/internal/scheduler/checkin_retry.go` 目前直接起 goroutine 遍历 uid，有两个
+缺口：
+
+- 手动签到与排程签到各自失败时会各排一次补签，同一个号被两条队列重复打；
+- 补签循环没有按号间隔（主批有 `s.accountGap`），一批号在同一秒打上游，正是
+  「等距节拍」这种可识别特征。
+
+做法：加 `retryMu` + `retryPending map[string]bool`，`startCheckinLateRetry` 入口过滤
+已在队列的 uid（结束后再清）；每号间隔取 `[gap, 2×gap)` 的随机值，`gap` 默认 2s，
+变量化供测试压到 0。与 `checkinLateRetryDelays` 的「绝对偏移 + 差值」实现并存即可。
+
+**D-3　realm 回填只给胜出文件（`1414e9f7`）**
+
+`upstream/internal/auth/auth.go:LoadDir` 对**每个**缺 realm 的文件都做
+`BackfillRealm + SaveAtomic`。同一 uid 出现在两个文件时（双 realm 同名 uid），落败的
+旧文件被写盘后 mtime 变新，下次启动它就成「后载入者胜出」——胜负来回翻，realm 跟着
+来回翻，表现为账号在两个域之间跳。
+
+做法：先收齐 `out`，再按 uid 取「最后一个（mtime 最新）为 winner」，只给 winner 补写
+realm。落败文件保持原样，胜负稳定。
+
+**D-4　热重载不清空整池、不覆盖刚刷新的令牌（`47cc7e22`）**
+
+参考仓那份提交有四块，本地只缺前两块（后两块依赖它的 parked 机制）：
+
+1. **不覆盖新令牌**（必须做）：`pool.upsertLocked` 现在 `e.a = a` 换指针。池里的
+   `*Auth` 被在途请求与 token 刷新共享，刷新在 `a.mu` 内原地写；换成一个从文件读出的
+   新对象有两种坏结果——扫描早于刷新写回时带的是已作废的旧 token，刷新还在旧对象上
+   进行时结果写进没人用的对象。做法：加 `auth.AdoptNewer(src) bool`，锁内比较
+   `ExpiresAt`（两侧都为 0 的静态 API Key 以 token 不同为准），只拷更新的一份字段；
+   `upsertLocked` 改成「存在则 AdoptNewer，不存在则插入」。
+2. **空目录不删整池**（必须做）：`watch.reloadAuthDir` 拿到 `auths` 就 `SyncToDir`，
+   而 `SyncToDir` 会把不在名单里的 uid 全删（并落盘）。auth 目录是 bind mount /
+   volume 时，挂载掉一次就是整池清空 + 状态写死。做法：`LoadDirReport` 的
+   `Files == 0 && 池非空` → 本轮什么都不动；解析失败 → 只增不删。
+3. **单轮删除上限 / 暂存**（可选）：一轮要删超过 `max(2, 池/5)` 的号时放弃本轮，等
+   手动 `force`；被移出的号状态暂存（`parked`），文件回来时禁用/暂停/分组复活。
+   本地没有 confirm 轮次机制，先做第 1、2 条就能挡住最坏情形；第 3 条要不要做，取决
+   于是否接受「临时移出的号在 state.json 里丢掉状态」。
+
+**D-5　空 text 段逐字节补位（`a7983640`）**
+
+`upstream/internal/upstream/empty_text_part.go` 现在是「`sniffParts` 解析 → 全段
+`json.Marshal` 写回」。这会副带三件事：键序被重排、数字格式被规范化（`1e3` →
+`1000`）、`\uXXXX` 转义变字面量——工具结果里的原始数据被无声改写，而这段内容本来
+只是「数据」，不该由网关解释。
+
+做法：在**原始字符串**里定位每个空 `text` 段的 value 字节区间（扫描时跟踪字符串与
+转义，与 `splitConcatenatedJSON` 同一套状态机），只把那一段替换成 `" "`，其余字节
+原样保留；解析失败/形状不认识就整段不动。净化顺序本地已经正确（`payload.go` 在
+`sanitizeMessages` 之后调 `guardEmptyTextParts`），无需再挪。
+
+**D-6　身份指令改写收窄（`767056cc`）**
+
+`upstream/internal/upstream/sanitize.go` 有两处过宽：
+
+- `sanitizeFeatures` 里挂了 `identify yourself as` / `model_identity`。这两个词只
+  该在 **assistant 回流载体**上匹配（模型复述注入原文），挂在通用特征门控上意味着
+  正常请求也进净化路径，且规则实际作用在所有角色上。
+- 句尾正则 `[^.\n]{1,80}\.` 断在**第一个点**，身份名带点时（`GPT-4.1`、
+  `Claude 3.5`）会留下 `1 by OpenAI.` 半句。
+
+做法：特征门控只留真正需要预检的键（`x-anthropic-billing-hdr` 等），身份规则改为
+「只在 assistant / 回流载体上执行」；句尾改成「点后不接字母数字」并保留点后那个字符
+（RE2 不支持零宽断言，用捕获组接回），复述形态里的引号/换行不能被吞。大小写按实际
+语料定，别为了覆盖而全量 `(?i)`。
+
+**D-7　截断终态不盖掉 error（`084176e4`）**
+
+`upstream/internal/upstream/sse.go` 的 error 透传分支返回 `1`（计入 `validFrames`），
+但末尾 `truncated := validFrames > 0 && !sawDone && !sawFinish` 不知道「已经发过
+error」。上游先发 error 帧再断流时，本地会在 error 之后再补 `finish_reason=length`
+和 `upstream_truncated` —— 客户端按**最后一个**终态判结果，把「失败」洗成「截断」，
+还会触发续写/重试语义。
+
+做法：加 `errorSent`，error 透传帧（以及将来的流内失败帧）置位；`truncated` 判据加
+`&& !errorSent`。测试：`error 帧 + 直接 EOF` 的流，断言 error 之后没有
+`finish_reason`、且只有一个 `[DONE]`。
+
+### D.4 值得做但要排期（3 项）
+
+**D-8　模型规则：按号批量 deny / allow（`8519ea26` + `74456c87`）**
+
+语义与本地已有的两层都不同：
+
+- `server/services/modelpolicy.py` 是**全局隐藏**（列表不返回 + 点名 404）；
+- 参考仓的 `model_toggle` 是「单个账号 × 单个模型」的点对点开关；
+- 模型规则是**一条命名规则 = 一组模型 + deny/allow**，挂到多个账号上，改规则内容
+  所有挂它的账号一起变。多条规则时 deny 并集、allow 并集、**deny 优先**；模型名可带
+  `cn:` / `global:` 前缀，匹配时按账号 realm 过滤后取裸名。
+
+落地成本：规则表 + 「账号 → 规则 id」持久化、选号闸门 `healthyForModel` 叠加判定、
+`/status` 透出、`model_not_allowed`（400，不再落 `no_healthy_account` 让客户端反复
+重试）、Next.js 的规则页与账号挂载 UI。**建议与 M-P2-10（模型目录 / 付费号）一起
+做**，避免选号层改两遍。
+
+**D-9　默认 + mp 任务列表合并（`0a2a55fb`）**
+
+本地 `upstream/scripts/task_runner.py` 的常规任务只从 `tc.list_tasks` 建 `by_code`；
+miss 就直接打「任务不存在」。`Library_read` 的 MAPPING kind 是 `library`，不在 mp
+专段（`minichat` / `miniexpert` / …）里——上游改版后它只在 `X-Client-Platform:
+miniprogram` 口径下发，于是本地把它判成「该账号没有此任务」并计 skip（参考仓 #243
+同款）。
+
+做法：默认列表 miss 时再按 mp 口径查一次（`_mp_task_status`），命中就走普通
+`process_task`；同一提交还登记了 `wb_wechat_oa_subscribe_task`（关注公众号 24h，
+进度由服务端计时发放、没有客户端动作），本地要加成一个 claim-only 的 mp kind
+（跳过「点亮」直接等 `completed` 再领），否则它会被当成「无可用对象 id」而反复 pending。
+
+**D-10　模型规则 review 补充**（`74456c87`）随 D-8，不单列。
+
+### D.5 需确认（2 个主题，3 个提交）
+
+**D-11　积分语义：可用量 vs 冻结快照（`eca5f30b` + `f5d08c04`）**
+
+上游把 `/status.accounts[].credits` 改成**当前可用量**（禁用号一律报 0），另加
+`credits_raw` 保留「禁用前最后一次成功刷新」的冻结快照，并在 `/status` 根部加
+`credits{available, snapshot, quota, by_realm}`。理由是实测有账号封禁三周仍报 4,552
+（其中 2,700 的积分包已过期）——死钱被算成可用额度，总额、积分保底、路由排序全建在
+假数据上。暂停号不受影响（仍在保号、余额仍会刷新）。
+
+本地 `server/services/balance_realm.py:realm_credits` 的注释与实现都是**全池相加、
+不区分停用**，理由是「否则客户端数字与首页对不上」。两条口径互斥，必须选一条：
+
+- **采用上游口径**：客户端看到的可用额度变准，但要**三处一起改**——`realm_credits`
+  的注释与实现（禁用号按可用 0 计）、`_snapshot_total` 回退（上游报 0 时不要把死钱
+  从本地快照加回来）、首页总额与积分保底排序。`f5d08c04` 的 tooltip 是同一语义的
+  前端表达，随本项。
+- **维持现状**：数字一致，但「可用额度」偏乐观，且封禁号会一直占着积分排序。
+
+建议采用，但作为独立批次做（会改变用户可见数字，必须带迁移说明），不要混进小修。
+
+**D-12　指纹版本（`2fa6876e`）**
+
+参考仓把 CN 三元组抬到 5.11.3（`ideVersion 5.11.3` / 新 commit / 新 releaseDate）、
+CLI 抬到 2.176.0，GL 仍是 5.9.4 / 2.165.0。本地 `upstream/internal/upstream/headers.go`
+只有**单一**默认 `5.5.4` / `2.137.1`，没有 `desktop.go` 的 `/v2/report` 三元组，也没有
+按 realm 拆版本的能力。
+
+只把数字改成 5.11.3 会得到「CN 的头 + 旧的 report 三元组」这种混合指纹，比不改更
+可疑。归 **M-P2-7（指纹层整体按 realm 拆分）** 做：先补 desktop 三元组，再按 realm
+分别取客户端版本 / CLI 版本 / UA 品牌段，最后才谈数字。本批不动。
+
+### D.6 随既有 M-P* 项一并采纳（7 项）
+
+这些提交本身不是「独立新能力」，而是尚未移植的 M-P* 项在参考仓里的**后续修正**。
+实现那一项时如果不带上这些修正，等于移植一个已知有 bug 的版本。
+
+| 目标项 | 提交 | 一并采纳的内容 |
+|---|---|---|
+| **M-P0-1**（11140 连坐保护） | `d3edea90`、`de24d38f`、`7dcae8ed` | 判据按 `code==11140`（不看文案）、命中即停手（**首帧同样否决**）、按 realm 分别统计；阈值随池子规模缩放；暂停时长指数退避；平静期后 streak 真的清零 |
+| **M-P0-4**（`$wbEncrypted` auth） | `8622073e` | 回写保持加密、保留桌面端字段与 JSON 类型（数字不要变字符串） |
+| **M-P1-1**（覆盖前先验活） | `6be18704` | 验活改有界并发 + 总时限；轮换后落盘失败不能丢刚拿到的新凭据。本地 `upload_accounts` 目前直接覆盖、不验活 |
+| **M-P1-5**（派生粘性键） | `d700ec56` | 把 caller id（`metadata.user_id` 优先，其次顶层 `user_id`）**掺进**派生哈希，而不是拿它当键：不同下游用户不再撞同一账号，同一用户同一段对话仍稳定。本地 `StickyFallbackKey` 今天对带 `user_id` 的 body 直接返回空串，移植时按「盐」改并重写那段 anti-monopoly 契约注释 |
+| **M-P1-10**（输出预算下限） | `b60f1c0b` | 下限按目录 `maxOutputTokens` 封顶，目录外模型不抬 |
+
+另外两条**不属于**上表、但同源：`d3edea90` 里「11134 文案不再说队列满」只改文案，
+可随 M-P0-1 顺手；`de24d38f` 的指数退避要配 `7dcae8ed` 的清零，否则退避永远涨。
+
+### D.7 已覆盖（5 项，本地无需动作）
+
+- `e4f7edae`（模型可用性按域匹配裸名）：本地 `request_logs.realm` 已存在
+  （`server/db.py`），`gateway._record` 按实际发往上游的模型名/适配器给出的
+  `PlatformChat.realm` 落 `used_realm`；模型可用性侧也有 `_model_realm_of` 先按版本
+  过滤。不需要再补 `ModelEff` 之外的新字段。
+- `2603cbff`（出口画像经该代理查询）：本地 `server/routers/proxies.py` 已有「经该
+  线路探测出口 IP」，不依赖 `proxypool` 那套开关。
+- `56f76319`（已领任务不算待领）：`task_runner.process_task` 先看
+  `accept_status == "claimed"` 直接跳过。
+- `d2628962`（回读 `claimed_at` 才算入账）：`task_runner._claim_parse` 在回执没给
+  奖励字段时会回读任务列表，读不到「已领」就记失败、不计入账（上游存在 200 + code=0
+  但静默丢弃的形态）。
+- `0befb2b0`（粘帧 error 触发首帧否决 + 聚合拆帧）：拆帧部分本地 `Aggregate` 已有
+  （`splitConcatenatedJSON`）；首帧否决那一层本地 Go 没有，不需要对齐。
+
+### D.8 不适用（29 项，按原因分组）
+
+**参考仓 SSE / 续写 / 心跳状态机（本地没有这些模块，能力也未移植）**：
+`1f67b377`（toolonly 不漏字节）、`b4012ceb`（续写闸门）、`def074c5`（续写分段记账）、
+`ab679742`（记账按段合并）、`9ba108fb`（首帧心跳）、`629390de`（6020 等待不写注释帧）、
+`a98ab36c`（缓冲读空跳过帧分隔空行）、`084176e4` 的 `continue.go` 部分、
+`0befb2b0` 的首帧否决部分。
+其中 `084176e4` 的 `sse.go` 部分**已按 D-7 收录**，不要因为这一行把它整条划掉。
+
+**参考仓独有的上游客户端 / 端点（本地没有对应能力）**：`1e1ee4db`（webagent 会话
+上限）、`798458f8`（responses 托管出图）、`6a3a58c0` 与 `67386ae5`（
+`billing_summary` 的付费号 / 到期推算）、`557b3d55` 与 `c4b53cd8`（3D / videos）、
+`89cdfe71`、`bd595648`、`09189a53`（narration）。
+
+**内嵌面板 / 代理池 / 调度器实现细节**：`ee74f54c`（日志落盘）、`bc8e1417`（配置
+回落）、`afda7e9c`（选号游标置脏）、`3bab4f8c`（窗口探针）、`2d03e4bd`
+（`upstreamhealth` 滑窗——注意本地的 `degrade.go` 是「内容拦截降级状态机」，不是
+同一个东西，旧版附录把它认错了）、`5d04ad21`（Clash 导入）、`93bbef3d`（campaign
+领奖页）。
+
+**本地已换实现，没有落点**：`69b3a1e9`（登录新号判断——本地后台任务是全局排程，
+不按号启动）、`3fd3680a` 与 `d2708ca6`（`/v1/search` 计数与占位链接——本地
+`/v1/tools/search` 纯透传，不做卡片改写）。
+
+**测试 / CI 用例维护**：`1166967d`、`452643bb`、`e069e65c`。
+
+`93bbef3d` 虽然整条不适用，但它的护栏值得记下来：如果本地将来出现「用户可传
+`module` / `code` 拼进上游 URL」的端点，必须做同款四件事——标识只允许
+`[A-Za-z0-9_-]{0,64}`（否则 `../` 能带着账号 Bearer 打到同主机别的接口）、同一时刻
+只跑一轮（`TryLock`）、按号随机间隔、客户端断开即停；真写操作还必须显式列出账号，
+「空 = 全部」只给 dry-run。
