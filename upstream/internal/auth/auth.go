@@ -404,6 +404,60 @@ func (a *Auth) SaveAtomic() error {
 	return safefile.WriteKeep(a.FilePath, raw, 0o600)
 }
 
+// AdoptNewer 用 src（同一账号从磁盘新读出的凭证）原地更新 a，返回是否有改动。
+//
+// 为什么原地改而不是换指针：池里的 *Auth 被在途请求与令牌刷新共享，刷新在 a.mu 内
+// 原地写新令牌。热重载若把条目换成从文件读出的新对象，有两种坏结果：扫描早于刷新
+// 写回时，新对象带的是已被轮换作废的 refresh token；刷新还在旧对象上进行时，结果
+// 写进了没人再用的对象。
+//
+// 分工：非令牌字段（昵称 / 企业号 / 出口线路 / 权重）以内盘为准、随时跟上——面板改
+// 这些正是靠写文件 + 热重载生效；令牌字段只在磁盘上的**确实更新**时覆盖（过期时刻
+// 更晚，典型为外部重新登录），过期时刻都为 0 的静态 API Key 以令牌不同为准。
+func (a *Auth) AdoptNewer(src *Auth) bool {
+	if a == src {
+		return false
+	}
+	src.mu.Lock()
+	in := Auth{
+		AccessToken: src.AccessToken, RefreshToken: src.RefreshToken, ExpiresAt: src.ExpiresAt,
+		Domain: src.Domain, realm: src.realm, EnterpriseID: src.EnterpriseID,
+		Nickname: src.Nickname, ProxyName: src.ProxyName, DeviceToken: src.DeviceToken,
+		Weight: src.Weight,
+	}
+	src.mu.Unlock()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	changed := false
+	if a.EnterpriseID != in.EnterpriseID {
+		a.EnterpriseID = in.EnterpriseID
+		changed = true
+	}
+	if a.Nickname != in.Nickname {
+		a.Nickname = in.Nickname
+		changed = true
+	}
+	if a.ProxyName != in.ProxyName {
+		a.ProxyName = in.ProxyName
+		changed = true
+	}
+	if a.Weight != in.Weight {
+		a.Weight = in.Weight
+		changed = true
+	}
+	if in.AccessToken == "" || in.AccessToken == a.AccessToken {
+		return changed
+	}
+	// 过期时刻必须严格更晚才采纳；都为 0（静态 API Key）时以令牌不同为准。
+	if in.ExpiresAt <= a.ExpiresAt && !(in.ExpiresAt == 0 && a.ExpiresAt == 0) {
+		return changed
+	}
+	a.AccessToken, a.RefreshToken, a.ExpiresAt = in.AccessToken, in.RefreshToken, in.ExpiresAt
+	a.Domain, a.realm, a.DeviceToken = in.Domain, in.realm, in.DeviceToken
+	return true
+}
+
 // AuthFileGlob auth 文件的统一 glob 模式（宽侧：workbuddy*.json）。
 // 网关 LoadDir 与 cmd 运维工具（signin/credit/trial）共用此单一来源——
 // 此前 cmd 侧私用 workbuddy-*.json 窄模式，不带连字符的文件（如
@@ -423,9 +477,24 @@ const AuthFileGlob = "workbuddy*.json"
 // 表现为那个账号突然「凭证失效」。按 mtime 升序载入保证最新凭证最后进池。
 // mtime 相同时退回字典序做 tie-break，保证结果稳定可测。
 func LoadAuthFiles(dir string) ([]string, error) {
-	files, err := filepath.Glob(filepath.Join(dir, AuthFileGlob))
+	entries, err := os.ReadDir(dir)
 	if err != nil {
+		// 目录不存在视为空目录（首次启动 / 还没建 auths）；其余错误（挂载掉了、
+		// 权限丢了）必须原样返回。filepath.Glob 会把这类 I/O 错误吞成「0 个文件」，
+		// 热重载据此同步就会把整个池删光并落盘。
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, err
+	}
+	files := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if ok, _ := filepath.Match(AuthFileGlob, e.Name()); ok {
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
 	}
 	sortAuthFilesByModTime(files)
 	return files, nil

@@ -333,11 +333,15 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	}
 }
 
-// upsertLocked 更新或插入单个账号；已存在则只换凭证、保留 credits/cooling 状态。
+// upsertLocked 更新或插入单个账号；已存在则原地采纳更新的凭证字段
+// （auth.AdoptNewer，令牌只向「更新」方向走），保留 credits/cooling 等运行状态。
 // 调用方必须已持有 p.mu；Add 与 SyncToDir 共用此 upsert 逻辑。
 func (p *Pool) upsertLocked(a *auth.Auth) {
 	if e, ok := p.byUID[a.UID]; ok {
-		e.a = a // 保留 credits/cooling 状态
+		// 已在池：原地采纳磁盘上更新的字段，**不换 *Auth 指针**——在途请求与令牌刷新
+		// 共享这个对象，换指针会把刚刷新的令牌盖回文件里的旧值（热重载每 5s 一轮，
+		// 撞上刷新窗口的机会不小）。credits/cooling 等运行状态本就挂在 entry 上。
+		e.a.AdoptNewer(a)
 		return
 	}
 	p.byUID[a.UID] = &entry{a: a}

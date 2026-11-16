@@ -183,6 +183,68 @@ func TestReloadAuthDirRemovesDeleted(t *testing.T) {
 	}
 }
 
+// TestReloadAuthDirKeepsRefreshedToken 热重载不能把在途刷新刚写回的新令牌盖回文件里的
+// 旧值：upsertLocked 以前换 *Auth 指针，刷新结果随之丢进没人用的对象，下一个请求拿
+// 旧令牌打上游，401 后再刷新一次。
+func TestReloadAuthDirKeepsRefreshedToken(t *testing.T) {
+	dir := t.TempDir()
+	writeAuthFile(t, dir, "u1", "一号")
+	auths, err := auth.LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(filepath.Join(t.TempDir(), "state.json"))
+	defer p.Close()
+	p.SyncToDir(auths)
+
+	a := p.AuthByUID("u1")
+	if a == nil {
+		t.Fatal("u1 不在池中")
+	}
+	// 模拟 RefreshToken 原地写回：令牌更新、过期时刻更晚。
+	a.Lock()
+	a.AccessToken = "fresh-token"
+	a.ExpiresAt += 3600
+	a.Unlock()
+
+	p.reloadAuthDir(dir) // 文件里仍是旧令牌
+
+	got := p.AuthByUID("u1")
+	if got != a {
+		t.Fatal("*Auth 指针被换掉了：在途刷新的结果会写进没人再用的对象")
+	}
+	if tok := got.AccessTokenValue(); tok != "fresh-token" {
+		t.Errorf("token=%q want fresh-token（热重载把刚刷新的令牌盖回了旧值）", tok)
+	}
+}
+
+// TestReloadAuthDirEmptyDirKeepsPool 目录被清空 / 没挂上时不能删整池：SyncToDir 会把
+// 账号删光并落盘，重启也回不来，而这类形态几乎总是挂载问题。
+func TestReloadAuthDirEmptyDirKeepsPool(t *testing.T) {
+	dir := t.TempDir()
+	f1 := writeAuthFile(t, dir, "u1", "一号")
+	f2 := writeAuthFile(t, dir, "u2", "二号")
+	auths, err := auth.LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(filepath.Join(t.TempDir(), "state.json"))
+	defer p.Close()
+	p.SyncToDir(auths)
+
+	if err := os.Remove(f1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f2); err != nil {
+		t.Fatal(err)
+	}
+	p.reloadAuthDir(dir)
+
+	if n := len(p.AvailableUIDs()); n != 2 {
+		t.Errorf("空目录不该清空整池，账号数=%d want 2", n)
+	}
+}
+
 // statusByUID 从 List() 取指定账号状态（同包测试辅助）。
 func statusByUID(t *testing.T, p *Pool, uid string) Status {
 	t.Helper()

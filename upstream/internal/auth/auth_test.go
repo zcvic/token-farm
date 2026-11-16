@@ -417,3 +417,65 @@ func TestLoadDirLoadsNonHyphenFile(t *testing.T) {
 		t.Fatalf("list=%+v want 1 account (uid=u1)", list)
 	}
 }
+
+// TestAdoptNewer 账号目录热重载的原地更新：令牌只向「更新」方向走（在途刷新写回的
+// 新令牌不能被文件里的旧值盖回），非令牌字段（昵称 / 线路 / 权重）随时跟上磁盘。
+func TestAdoptNewer(t *testing.T) {
+	base := func() *Auth {
+		return &Auth{UID: "u1", AccessToken: "old", RefreshToken: "old-r", ExpiresAt: 1000,
+			Domain: "www.codebuddy.cn", realm: "cn"}
+	}
+
+	t.Run("磁盘令牌更新时采纳", func(t *testing.T) {
+		a := base()
+		src := &Auth{UID: "u1", AccessToken: "new", RefreshToken: "new-r", ExpiresAt: 2000,
+			Domain: "www.workbuddy.ai", realm: "global", Nickname: "n2"}
+		if !a.AdoptNewer(src) {
+			t.Fatal("应报告有改动")
+		}
+		if a.AccessToken != "new" || a.RefreshToken != "new-r" || a.ExpiresAt != 2000 {
+			t.Errorf("令牌未被采纳: %+v", a)
+		}
+		if a.Realm() != "global" {
+			t.Errorf("realm=%q want global", a.Realm())
+		}
+		if a.Nickname != "n2" {
+			t.Errorf("nickname=%q want n2", a.Nickname)
+		}
+	})
+
+	t.Run("磁盘令牌更旧时保留内存里的新令牌", func(t *testing.T) {
+		a := base()
+		a.AccessToken, a.ExpiresAt = "fresh", 3000 // 模拟在途刷新刚写回
+		src := &Auth{UID: "u1", AccessToken: "old", RefreshToken: "old-r", ExpiresAt: 1000, realm: "cn"}
+		if a.AdoptNewer(src) {
+			t.Error("旧令牌不该被采纳")
+		}
+		if a.AccessToken != "fresh" {
+			t.Errorf("token=%q want fresh（刚刷新的令牌被文件旧值盖回）", a.AccessToken)
+		}
+	})
+
+	t.Run("令牌相同也采纳非令牌字段", func(t *testing.T) {
+		a := base()
+		src := &Auth{UID: "u1", AccessToken: "old", RefreshToken: "old-r", ExpiresAt: 1000,
+			realm: "cn", ProxyName: "line-2", Weight: 3, Nickname: "改名"}
+		if !a.AdoptNewer(src) {
+			t.Error("非令牌字段变了应报告改动")
+		}
+		if a.ProxyName != "line-2" || a.Weight != 3 || a.Nickname != "改名" {
+			t.Errorf("非令牌字段未跟上: %+v", a)
+		}
+	})
+
+	t.Run("静态 Key 以令牌不同为准", func(t *testing.T) {
+		a := &Auth{UID: "u1", AccessToken: "k1"} // 过期时刻都为 0
+		src := &Auth{UID: "u1", AccessToken: "k2"}
+		if !a.AdoptNewer(src) {
+			t.Error("静态 Key 换新应采纳")
+		}
+		if a.AccessToken != "k2" {
+			t.Errorf("token=%q want k2", a.AccessToken)
+		}
+	})
+}

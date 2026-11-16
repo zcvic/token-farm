@@ -89,6 +89,13 @@ func (p *Pool) reloadAuthDir(dir string) {
 		log.Printf("WARN: [watch] 重新加载 %s 失败: %v（保持现有池状态）", dir, err)
 		return
 	}
+	// 目录里一个账号都没扫到而池不空：几乎总是挂载掉了 / 目录被临时清空，而不是运维
+	// 真要把整池删掉（面板逐个删号走的是另一条路径）。此时 SyncToDir 会把整池删光并
+	// 落盘，重启也回不来，所以本轮什么都不动。
+	if n := len(p.AvailableUIDs()); len(auths) == 0 && n > 0 {
+		log.Printf("WARN: [watch] %s 本轮扫到 0 个账号文件而池里还有 %d 个，疑似目录未挂载，保持现有池状态", dir, n)
+		return
+	}
 	before := len(p.AvailableUIDs())
 	p.SyncToDir(auths)
 	after := len(p.AvailableUIDs())
