@@ -463,6 +463,10 @@ func sortAuthFilesByModTime(files []string) {
 // 顺带做 realm 标识存量迁移：对空 realm 的 auth 自动 backfill（原始 domain 推断）并 SaveAtomic
 // 落盘，一次性把旧文件补上 realm 键。单个文件写失败不阻断启动（log WARN 继续），
 // 避免历史 auth 目录个别文件不可写时整个服务起不来。
+//
+// 只给每个 uid **胜出**的那份做迁移落盘（mtime 最新、最后载入者胜出）：给落败的旧
+// 文件写盘会刷新它的 mtime，下次启动它就成了「最新」——同 uid 双 realm 文件的胜负
+// 来回翻，账号在两个域之间跳。
 func LoadDir(dir string) ([]*Auth, error) {
 	files, err := LoadAuthFiles(dir)
 	if err != nil {
@@ -493,16 +497,23 @@ func LoadDir(dir string) ([]*Auth, error) {
 				logfmt.Label(a.UID, a.Nickname), prev, f)
 		}
 		seenUID[a.UID] = f
-		if a.RealmStored() == "" {
-			if changed, r := a.BackfillRealm(); changed {
-				if err := a.SaveAtomic(); err != nil {
-					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.Nickname), err)
-				} else if r == "global" {
-					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.Nickname), a.Domain)
-				}
+		out = append(out, a)
+	}
+	winner := make(map[string]*Auth, len(out))
+	for _, a := range out {
+		winner[a.UID] = a
+	}
+	for _, a := range out {
+		if winner[a.UID] != a || a.RealmStored() != "" {
+			continue
+		}
+		if changed, r := a.BackfillRealm(); changed {
+			if err := a.SaveAtomic(); err != nil {
+				log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.Nickname), err)
+			} else if r == "global" {
+				log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.Nickname), a.Domain)
 			}
 		}
-		out = append(out, a)
 	}
 	return out, nil
 }

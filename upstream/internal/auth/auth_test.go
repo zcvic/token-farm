@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -263,6 +264,37 @@ func TestLoadDirDuplicateUIDWarning(t *testing.T) {
 		!strings.Contains(string(raw), "workbuddy-a-cn.json") ||
 		!strings.Contains(string(raw), "workbuddy-z-global.json") {
 		t.Errorf("expected WARN with both paths, got output: %s", string(raw))
+	}
+}
+
+// TestLoadDirOnlyBackfillsWinnerRealm 同 uid 多文件时只给胜出者做 realm 迁移落盘：
+// 给落败的旧文件写盘会刷新它的 mtime，下次启动它就成了「最新」，胜负来回翻。
+func TestLoadDirOnlyBackfillsWinnerRealm(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, at, realm string, mt time.Time) {
+		body := fmt.Sprintf(`{"auth":{"accessToken":%q,"refreshToken":"r","expiresAt":1800000000,"domain":"www.codebuddy.cn","realm":%q},"account":{"uid":"u7"}}`, at, realm)
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 字典序在后、但内容陈旧的那份故意命名 workbuddy-z-，mtime 设为 2020；
+	// 它缺 realm，正是「载入时补写会刷新 mtime」的那一份。
+	write("workbuddy-z-stale.json", "at-stale", "", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	write("workbuddy-a-fresh.json", "at-fresh", "cn", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	// 连续三次启动胜者不变：只给胜者做迁移落盘，落败的旧文件 mtime 不被刷新。
+	for run := 1; run <= 3; run++ {
+		list, err := LoadDir(dir)
+		if err != nil || len(list) != 2 {
+			t.Fatalf("第 %d 次 load err=%v n=%d", run, err, len(list))
+		}
+		if got := list[len(list)-1].AccessToken; got != "at-fresh" {
+			t.Fatalf("第 %d 次：最后一项应是 mtime 最新的凭证（pool 按后载入者胜出），实际 %q", run, got)
+		}
 	}
 }
 
