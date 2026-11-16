@@ -15,14 +15,9 @@ import (
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
 	"x-anthropic-billing-header", // header 键值段键名
-	// 上游服务端注入的身份指令（issue #187）。必须挂在**通用**门控上：泄漏出现在
-	// assistant 消息（模型复述注入原文），而 identity 门控只对 system/developer 生效，
-	// 挂错门控等于规则永远不执行。
-	"identify yourself as",
-	"model_identity",
-	"cc_entrypoint=",      // 尾随裸键值（截断前缀即可命中）
-	"You are Claude Code", // 身份句（截断前缀即可命中）
-	"Main branch (",       // 注入指令句（截断前缀即可命中）
+	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
+	"You are Claude Code",        // 身份句（截断前缀即可命中）
+	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
@@ -181,12 +176,26 @@ const sanitizeDshGuiRepl = "DeepSeek-Harness Web GUI"
 // 匹配刻意收紧到「when asked about your … identity, identify yourself as …」整句：
 // 单独匹配 identify yourself as 会误伤正常指令（"Do not identify yourself as an AI."
 // 是合法要求），而整句前缀在真实语料里几乎不可能自然出现。
+// 句尾是「后面不接字母数字的句号」：身份名本身可以带点（GPT-4.1、Claude 3.5），
+// 遇到第一个点就收尾会留下 "1 by OpenAI." 半句。句号后那个字符用捕获组原样接回
+// （RE2 不支持零宽断言），复述形态里常见的引号、换行都不能被吞掉。
 var sanitizeInjectedIdentityRe = regexp.MustCompile(
-	`(?i)when asked about your[^.\n]{0,60}?identity[^.\n]{0,60}?,\s*identify yourself as\s+[^.\n]{1,80}\.`)
+	`(?i)when asked about your[^.\n]{0,60}?identity[^.\n]{0,60}?,\s*identify yourself as\s+[^\n]{1,80}?\.(\W|$)`)
 
 // sanitizeInjectedIdentityRepl 替换成中性表述：不声明任何身份，也不改变上下文里
 // 真实可用的信息。
-const sanitizeInjectedIdentityRepl = "When asked about your capabilities, answer using only the information available in this conversation."
+const sanitizeInjectedIdentityRepl = "When asked about your capabilities, answer using only the information available in this conversation.${1}"
+
+// 注入身份指令的两个探针（小写）。门控与正则都按 ASCII 忽略大小写：正则自带 (?i)，
+// 门控若按原文大小写比对，"Identify yourself as" 这类复述就会在门口被放过。
+//
+// 作用域只有滚雪球的载体：assistant 的正文与任意消息的 reasoning_content
+// （见 scrubInjectedIdentity 的调用处）。system / user 里的同形句是用户自己写的人设，
+// 改写它等于篡改用户的提示词。
+const (
+	injectedIdentityProbe = "identify yourself as"
+	modelIdentityTagProbe = "model_identity"
+)
 
 // sanitizeModelIdentityTagRe 去掉 <model_identity> 包裹本身（保留内部文本）。
 //
@@ -217,14 +226,6 @@ func sanitizeText(text string) string {
 	text = sanitizeDshRe.ReplaceAllString(text, sanitizeDshRepl)
 	// DSH Web GUI 段落：上游按「跨两句的连续文本」拦截，必须动品牌短语才拆得开。
 	text = sanitizeDshGuiRe.ReplaceAllString(text, sanitizeDshGuiRepl)
-	// 上游服务端注入的身份指令（issue #187）：不限角色，assistant 复述同样要洗——
-	// 那段复述正是历史回流的载体。
-	if strings.Contains(strings.ToLower(text), "identify yourself as") {
-		text = sanitizeInjectedIdentityRe.ReplaceAllString(text, sanitizeInjectedIdentityRepl)
-	}
-	if strings.Contains(strings.ToLower(text), "model_identity") {
-		text = sanitizeModelIdentityTagRe.ReplaceAllString(text, "")
-	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -238,6 +239,19 @@ func sanitizeText(text string) string {
 	// 兜底：键值形态已在上面整段删除，这里只剩裸键名（引用/示例文本形态）。
 	text = sanitizeBareHdrRe.ReplaceAllString(text, "x-anthropic-billing-hdr")
 	return strings.TrimSpace(text)
+}
+
+// scrubInjectedIdentity 改掉上游服务端注入、又被模型复述回历史的身份指令（issue #187），
+// 并去掉 model_identity 标签本身。只对滚雪球的载体调用（见 sanitizeMessages），
+// 不做 TrimSpace，不命中时原样返回。
+func scrubInjectedIdentity(text string) string {
+	if strings.Contains(strings.ToLower(text), injectedIdentityProbe) {
+		text = sanitizeInjectedIdentityRe.ReplaceAllString(text, sanitizeInjectedIdentityRepl)
+	}
+	if strings.Contains(strings.ToLower(text), modelIdentityTagProbe) {
+		text = sanitizeModelIdentityTagRe.ReplaceAllString(text, "")
+	}
+	return text
 }
 
 // hasFingerprint 特征预检：先走 strings.Contains 快速路径（零分配）；
@@ -287,9 +301,14 @@ func hasFingerprint(text string) bool {
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
 // 返回净化后的值及是否发生变化。
 func sanitizeContent(v any) (any, bool) {
+	return sanitizeContentWith(v, sanitizeText)
+}
+
+// sanitizeContentWith 对字符串 content 或多模态数组里每个 text part 应用 f。
+func sanitizeContentWith(v any, f func(string) string) (any, bool) {
 	switch c := v.(type) {
 	case string:
-		s := sanitizeText(c)
+		s := f(c)
 		return s, s != c
 	case []any:
 		changed := false
@@ -302,7 +321,7 @@ func sanitizeContent(v any) (any, bool) {
 			if !ok {
 				continue
 			}
-			if s := sanitizeText(text); s != text {
+			if s := f(text); s != text {
 				m["text"] = s
 				changed = true
 			}
@@ -389,10 +408,19 @@ func sanitizeMessages(messages []any) bool {
 		if !ok {
 			continue
 		}
+		// 注入身份指令的回流载体：assistant 正文与任意消息的 reasoning_content。
+		// system / user 里的同形句是用户自己写的人设，改写它等于篡改提示词。
+		role, _ := m["role"].(string)
+		assistant := strings.EqualFold(strings.TrimSpace(role), "assistant")
+		contentClean := sanitizeText
+		if assistant {
+			contentClean = func(s string) string { return scrubInjectedIdentity(sanitizeText(s)) }
+		}
+		carrier := func(s string) string { return scrubInjectedIdentity(sanitizeText(s)) }
 		// content 与 tool_calls 各自独立判断：content 可以为 null（工具调用轮），
 		// 早期版本在此 continue，导致这类消息的 tool_calls 完全不被净化。
 		if c, ok := m["content"]; ok {
-			if nc, ch := sanitizeContent(c); ch {
+			if nc, ch := sanitizeContentWith(c, contentClean); ch {
 				m["content"] = nc
 				changed = true
 			}
@@ -400,7 +428,7 @@ func sanitizeMessages(messages []any) bool {
 		// reasoning_content（思维链回填字段，见 thinking.go/sse.go）实测同样
 		// 携带指纹，与 content 同等净化。string 形态直接走 sanitizeText。
 		if rc, ok := m["reasoning_content"].(string); ok {
-			if s := sanitizeText(rc); s != rc {
+			if s := carrier(rc); s != rc {
 				m["reasoning_content"] = s
 				changed = true
 			}

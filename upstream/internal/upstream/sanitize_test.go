@@ -417,7 +417,7 @@ func TestReasoningContentSanitized(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 11 项 +
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 9 项 +
 // sanitizeRewrites 7 对 + 6 个正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
@@ -427,13 +427,9 @@ func TestReasoningContentSanitized(t *testing.T) {
 func TestSanitizeLiteralByteExact(t *testing.T) {
 	features := []string{
 		"x-anthropic-billing-header", // header 键值段键名
-		// 上游服务端注入的身份指令（issue #187）：泄漏出现在 assistant 消息里，
-		// 所以挂在**通用**门控上（identity 门控只对 system/developer 生效）。
-		"identify yourself as",
-		"model_identity",
-		"cc_entrypoint=",      // 尾随裸键值（截断前缀即可命中）
-		"You are Claude Code", // 身份句（截断前缀即可命中）
-		"Main branch (",       // 注入指令句（截断前缀即可命中）
+		"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
+		"You are Claude Code",        // 身份句（截断前缀即可命中）
+		"Main branch (",              // 注入指令句（截断前缀即可命中）
 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		"11128",                                           // 上游反探测：裸数字错误码
@@ -493,7 +489,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"sanitizeHdrRe":              `(?i)x-anthropic-billing-header:[^;\n]*;?\s*`,
 		"sanitizeBareHdrRe":          `(?i)x-anthropic-billing-header`,
 		"sanitizeKvRe":               `(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`,
-		"sanitizeInjectedIdentityRe": `(?i)when asked about your[^.\n]{0,60}?identity[^.\n]{0,60}?,\s*identify yourself as\s+[^.\n]{1,80}\.`,
+		"sanitizeInjectedIdentityRe": `(?i)when asked about your[^.\n]{0,60}?identity[^.\n]{0,60}?,\s*identify yourself as\s+[^\n]{1,80}?\.(\W|$)`,
 		"sanitizeModelIdentityTagRe": `(?i)</?model_identity\s*/?>`,
 	}
 	for name, want := range regexes {
