@@ -84,7 +84,7 @@ func TestGuardEmptyTextParts(t *testing.T) {
 
 // TestGuardEmptyTextPartsStringSniff 字符串 content 去前导空白后以 `[` 开头时，
 // 上游会把它当 parts 数组解析——工具结果里抓到的表单/按钮数组正是这个形状，于是
-// 一段「数据」被嗅探成空文本段。这里按同口径嗅探并补位后重新序列化。
+// 一段「数据」被嗅探成空文本段。这里按同口径嗅探并补位（只改空段本身，其余字节不动）。
 func TestGuardEmptyTextPartsStringSniff(t *testing.T) {
 	raw := `  [{"type":"text","text":""},{"type":"text","text":"ok"}]`
 	obj := decodeMessages(t, `{"messages":[{"role":"tool","content":`+jsonString(raw)+`}]}`)
@@ -104,6 +104,68 @@ func TestGuardEmptyTextPartsStringSniff(t *testing.T) {
 	}
 	if got := parts[1].(map[string]any)["text"]; got != "ok" {
 		t.Errorf("非空段不该动，got %v", got)
+	}
+}
+
+// TestGuardEmptyTextPartsStringSniffPreservesBytes 嗅探补位只改空段本身：工具输出里的
+// 大整数、HTML 字符、键序、空白必须逐字节保留——整体 Unmarshal+Marshal 会把 2^64 级
+// 整数变成浮点、把 < 转义成 \u003c、把键按字母序重排，模型看到的就不再是客户端发来的
+// 那份工具结果。
+func TestGuardEmptyTextPartsStringSniffPreservesBytes(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{
+			name: "大整数与 HTML 逐字节保留",
+			in:   ` [{"type":"text", "text":""}, {"z":1,"id":12345678901234567890,"html":"<b>a&b</b>","a":2}]`,
+			want: ` [{"type":"text", "text":" "}, {"z":1,"id":12345678901234567890,"html":"<b>a&b</b>","a":2}]`,
+		},
+		{
+			name: "null 与键序颠倒",
+			in:   `[{"text":null,"type":"text","n":1.50}]`,
+			want: `[{"text":" ","type":"text","n":1.50}]`,
+		},
+		{
+			name: "缺失 text 键时插入",
+			in:   `[{"type":"text","n":1e400}]`,
+			want: `[{"text":" ","type":"text","n":1e400}]`,
+		},
+		{
+			name: "text 排在 type 之前",
+			in:   `[{"text":"","type":"text"}]`,
+			want: `[{"text":" ","type":"text"}]`,
+		},
+		{
+			name: "重复键按最后一次为准（末次非空则不补）",
+			in:   `[{"type":"text","text":"","text":"x"}]`,
+			want: `[{"type":"text","text":"","text":"x"}]`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj := decodeMessages(t, `{"messages":[{"role":"tool","content":`+jsonString(c.in)+`}]}`)
+			msgs := obj["messages"].([]any)
+			guardEmptyTextParts(msgs)
+			if got := msgs[0].(map[string]any)["content"]; got != c.want {
+				t.Errorf("补位结果\n got %s\nwant %s", got, c.want)
+			}
+		})
+	}
+}
+
+// TestGuardEmptyTextPartsAfterSanitize 净化会把只含指纹的 text 段洗成空串；补位必须在
+// 净化之后，否则出站仍带 ""，照样 11151。
+func TestGuardEmptyTextPartsAfterSanitize(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":""},{"type":"text","text":"hi"}]}]}`
+	out := PrepareBodyOpt([]byte(body), true)
+	var obj struct {
+		Messages []struct {
+			Content []map[string]any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("输出不是合法 JSON: %v (%s)", err, out)
+	}
+	if got := obj.Messages[0].Content[0]["text"]; got != " " {
+		t.Fatalf("净化后的空段应被补位，实际 %q（%s）", got, out)
 	}
 }
 
