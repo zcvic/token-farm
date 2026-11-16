@@ -293,3 +293,50 @@ dce9acc437719c52115efcef8489d545d9ea1d55
 5d01b5983b5c80313c75fa59fadb6a7096bfc929
 176e4964036e15ca6972cbda5339fac479e6b112
 7a747c1527650b8aab616bd7b2a1b4724dd02225
+
+# ---- 2026-11 第六批：misakano c4b53cd 逐项评估后的 7 项小修
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      范围：10d01b48 → c4b53cd（69 提交 = 54 非 merge + 15 merge），54 行逐项
+#            判定见 docs/upstream-sync-misakano.md 附录 D；本轮只取「值得」7 项，
+#            排期 / 需确认 / 随 M-P* 项不在本批。
+#      已取（按能力重写，不整段 merge）：
+#        · 签到回执失败词压过「已签到」03a50ce0：上游 HTTP 200 + code=0 也可能带
+#          失败文案（「签到失败，已签到天数不足 7 天」）。Go 侧
+#          upstream/internal/upstream/client.go 抽出 isAlreadyCheckinMsg，让
+#          IsAlreadyCheckin 共用同一判据；Python 侧 server/services/tencent.py 的
+#          is_already_checkin_message 加失败硬词，checkin() 的 code=0 分支先看
+#          文案，命中返回 -3（可重试）而不是 0。
+#        · 补签按账号错开 + 去重 8a39572f：upstream/internal/scheduler/
+#          checkin_retry.go 增加 retryMu/retryPending 入口去重（手动与排程各自
+#          失败不再重复打同一个号），补签循环按 [gap, 2×gap) 随机间隔、
+#          默认 2s；节奏在入口快照后作参数传入 goroutine。
+#        · LoadDir 只给胜出文件回填 realm 1414e9f7：upstream/internal/auth/auth.go
+#          先收齐全部文件再按 uid 取最后载入者为 winner，只给 winner 做
+#          BackfillRealm + SaveAtomic，落败文件保持原样（避免 mtime 变新导致
+#          双 realm 同 uid 的胜负来回翻）。
+#        · 身份指令改写收窄 767056cc：upstream/internal/upstream/sanitize.go
+#          身份词只作用于 assistant / 回流载体，不再挂进通用特征门控；句尾正则
+#          改成「点后不接字母数字」并保留点后字符，带点身份名（GPT-4.1）不再留
+#          半句。
+#        · 空 text 段逐字节补位 a7983640：upstream/internal/upstream/
+#          empty_text_part.go 改为在原始字符串里定位空 text 段的 value 区间，
+#          只替换那一段，不再整段 json.Marshal（键序 / 数字格式 / 转义不再被
+#          无声改写）。
+#        · 热重载不清空整池 47cc7e22：upstream/internal/pool/watch.go 在目录读
+#          不动或文件数为 0 且池非空时本轮不动；upstream/internal/auth 新增
+#          AdoptNewer，pool.upsertLocked 对已存在账号只采纳更新的令牌字段，
+#          不再换 *Auth 指针覆盖在途刷新。
+#        · 截断终态不盖掉 error 084176e4：upstream/internal/upstream/sse.go 增加
+#          errorSent，error 透传帧后不再补 finish_reason=length / upstream_truncated。
+#      未取：
+#        · 8519ea26 / 74456c87 模型规则、0a2a55fb 默认 + mp 任务列表合并：新功能，
+#          归入排期项（附录 D.4）。
+#        · eca5f30b / f5d08c04 积分语义、2fa6876e 指纹版本：与本地口径冲突或依赖
+#          未移植的指纹层，归入需确认项（附录 D.5）。
+#        · d3edea90 / de24d38f / 7dcae8ed / d700ec56 / 8622073e / 6be18704 /
+#          b60f1c0b：尚未移植的 M-P0-1 / M-P0-4 / M-P1-1 / M-P1-5 / M-P1-10 的
+#          后续修正，实现那几项时一并带上（附录 D.6）。
+#        · 其余为参考仓独有运行时（continue / toolonly / headkeepalive /
+#          responses / videos / narration / proxypool / windowprobe 等）或已覆盖，
+#          逐条见附录 D.7 / D.8。
+03a50ce00c82d089f9da3c3fdddf5a3fb9a5f8bd

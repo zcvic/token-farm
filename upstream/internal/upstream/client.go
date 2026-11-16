@@ -261,6 +261,27 @@ var invalidImageRule = errorRule{kind: ErrImageInvalid, mode: matchFold, pattern
 // 网络层/解析层错误不在此识别（见 IsAlreadyCheckin）。
 var alreadyCheckinRule = errorRule{mode: matchFold, patterns: []string{"已签到", "already"}}
 
+// checkinFailureMarkers 签到失败硬词（按小写比较）：命中时**压过** already 判定。
+//
+// 上游存在 HTTP 200 + code=0（或 10001）却带失败文案的形态，例如
+// 「签到失败，已签到天数不足 7 天」——同一句里既有「失败」又有「已签到」。只按
+// already 判会把当天实际未签到的账号记成幂等成功，积分静默丢失。
+var checkinFailureMarkers = []string{"失败", "fail", "not started", "未开始", "不支持"}
+
+// isAlreadyCheckinMsg 文案是否表示「今天已签到」：命中 already 且不含失败硬词。
+//
+// IsAlreadyCheckin 与（将来的）回执分类共用这一处判据：只在某一个出口排除失败词的话，
+// 另一个出口仍会把「签到失败，已签到天数不足」当成成功。
+func isAlreadyCheckinMsg(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, m := range checkinFailureMarkers {
+		if strings.Contains(lower, m) {
+			return false
+		}
+	}
+	return alreadyCheckinRule.hit(msg, lower)
+}
+
 // accountFaultRule 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
 //
 // 定位：这类错误是**账号本身状态**决定的本机故障，不是请求格式、不是临时限流、
@@ -2254,12 +2275,14 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 // IsAlreadyCheckin 报告 err 是否表示"今天已签到"（上游幂等拒绝重复签到）。
 // 只认带分类的 *Error（业务 code 或 HTTP 错误）：网络层/解析层错误不得当作幂等成功，
 // 否则停机补签遇到抖动会误记为 already，账号当天实际未签到却被判定正常。
+// 文案里同时出现失败硬词时（如「签到失败，已签到天数不足」）不算 already，见
+// isAlreadyCheckinMsg。
 func IsAlreadyCheckin(err error) bool {
 	var ue *Error
 	if !errors.As(err, &ue) {
 		return false
 	}
-	return alreadyCheckinRule.hit(ue.Msg, strings.ToLower(ue.Msg))
+	return isAlreadyCheckinMsg(ue.Msg)
 }
 
 func truncate(s string, n int) string {

@@ -798,6 +798,18 @@ func TestIsAlreadyCheckinRejectsNonUpstream(t *testing.T) {
 	}
 }
 
+// TestIsAlreadyCheckinRejectsFailureText 「失败」硬词压过「已签到」：上游用过
+// `签到失败，已签到天数不足 7 天` 这类同时含正反词的文案，判成幂等成功会让当天
+// 实际未签到的账号被记成正常。
+func TestIsAlreadyCheckinRejectsFailureText(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":10001,"msg":"签到失败，已签到天数不足 7 天"}`), nil
+	})
+	if IsAlreadyCheckin(c.DailyCheckin(&auth.Auth{AccessToken: "at"})) {
+		t.Error("含「失败」硬词的文案不得判为 already")
+	}
+}
+
 func TestBasesAlwaysCN(t *testing.T) {
 	c := testClient(nil)
 	cn := &auth.Auth{Domain: ""}

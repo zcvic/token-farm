@@ -87,6 +87,14 @@ class CheckinCode10001Test(unittest.TestCase):
         self.assertEqual(code, 10001)
         self.assertIn('已签到', message)
 
+    def test_code_zero_with_failure_text_is_not_success(self) -> None:
+        """HTTP 200 + code=0 也可能带失败文案：不能记成签到成功。"""
+        code, message, _ = _checkin(
+            {'code': 0, 'msg': '签到失败，已签到天数不足 7 天'}
+        )
+        self.assertEqual(code, -3, 'code=0 但文案是失败，不能记成功')
+        self.assertEqual(message, '签到失败，已签到天数不足 7 天')
+
     def test_other_business_code_unchanged(self) -> None:
         code, message, _ = _checkin({'code': 10000, 'msg': '参数错误'})
         self.assertEqual(code, 10000)
@@ -106,6 +114,11 @@ class AlreadyCheckinClassifierTest(unittest.TestCase):
         self.assertTrue(tencent.is_already_checkin_message(10001, ''))
         self.assertFalse(tencent.is_already_checkin_message(
             10001, '签到失败，请稍后重试'))
+        # 同一句里既有「失败」又有「已签到」：失败优先。
+        self.assertFalse(tencent.is_already_checkin_message(
+            10001, '签到失败，已签到天数不足 7 天'))
+        self.assertFalse(tencent.is_already_checkin_message(
+            10001, 'Checkin failed, already checked in 2 days'))
         self.assertFalse(tencent.is_already_checkin_message(0, '签到成功'))
         self.assertFalse(tencent.is_already_checkin_message(10000, '今天已签到'))
 

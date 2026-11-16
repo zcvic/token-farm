@@ -705,17 +705,25 @@ async def refresh_token(auth: dict) -> tuple[bool, str, dict]:
 _ALREADY_CHECKIN_MARKERS = ('已签到', '已经签到', 'already checked in',
                             'already signed in', 'already checkin')
 
+# 签到失败硬词（小写比较）：命中时**压过**上面的 already 判定。上游用过
+# 「签到失败，已签到天数不足 7 天」这类同一句里既有「失败」又有「已签到」的文案，
+# 只按 already 判会把当天实际未签到的账号记成幂等成功。
+_CHECKIN_FAILURE_MARKERS = ('失败', 'fail', 'not started', '未开始', '不支持')
+
 
 def is_already_checkin_message(code: int, message: str = '') -> bool:
     """报告 (code, message) 是否表示「今天已签到」。
 
     空消息保持旧行为（按已签到处理）：上游省略 msg 时不能把幂等成功误记成失败。
+    文案同时含失败硬词时不算已签到（失败优先于 already）。
     """
     if code != 10001:
         return False
     msg = (message or '').strip().lower()
     if not msg:
         return True
+    if any(m in msg for m in _CHECKIN_FAILURE_MARKERS):
+        return False
     return any(m in msg for m in _ALREADY_CHECKIN_MARKERS)
 
 
@@ -730,7 +738,8 @@ async def checkin(access_token: str | dict, realm: Realm = CN) -> tuple[int, str
     （额外带上 X-User-Id 等身份头——上游 billing 域一直这么做，见 BillingHeaders）。
 
     返回码：0 成功 / 10001 今日已签到 / -2 国际版跳过 / -3 上游瞬时拒绝
-    （10001「签到失败，请稍后重试」，可退避重试）/ -1 网络或解析异常。
+    （10001「签到失败，请稍后重试」或 code=0 却带失败文案，均可退避重试）/
+    -1 网络或解析异常。
     """
     if not supports_checkin(realm):
         return -2, '国际版无签到体系，已跳过'
@@ -742,16 +751,20 @@ async def checkin(access_token: str | dict, realm: Realm = CN) -> tuple[int, str
                 headers=_billing_hdr(realm, access_token),
             )
         code, _ = _envelope(resp)
+        msg = ''
+        try:
+            env = resp.json()
+            if isinstance(env, dict):
+                msg = str(env.get('msg') or '')
+        except Exception:  # noqa: BLE001
+            msg = ''
         if code == 0:
+            # HTTP 200 + code=0 也可能带失败文案（上游实测有这种形态）。
+            # 命中失败硬词时按「上游瞬时拒绝」返回 -3，否则会记成签到成功。
+            if any(m in msg.strip().lower() for m in _CHECKIN_FAILURE_MARKERS):
+                return -3, msg or '签到失败，请稍后重试'
             return 0, '签到成功'
         if code == 10001:
-            msg = ''
-            try:
-                env = resp.json()
-                if isinstance(env, dict):
-                    msg = str(env.get('msg') or '')
-            except Exception:  # noqa: BLE001
-                msg = ''
             if is_already_checkin_message(code, msg):
                 return 10001, '今日已签到'
             # 同一个 10001 的瞬时拒绝语义（issue #256 实测批量签到偶发）：
