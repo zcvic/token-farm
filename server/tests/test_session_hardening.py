@@ -158,7 +158,7 @@ class SessionDaysClampTest(unittest.TestCase):
         import subprocess
         env = dict(os.environ, PYTHONPATH=str(self.ROOT), **env_extra)
         out = subprocess.run([sys.executable, '-c', textwrap.dedent(code)],
-                             capture_output=True, text=True, env=env, cwd=str(self.ROOT))
+                             capture_output=True, text=True, encoding='utf-8', errors='replace', env=env, cwd=str(self.ROOT))
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout.strip()
 

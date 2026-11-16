@@ -41,6 +41,7 @@ Content-Type: application/json
 ```json
 {
   "query": "搜索词（必填）",
+  "type": "text2text",
   "max_results": 5,
   "allowed_domains": ["go.dev"],
   "blocked_domains": ["reddit.com"],
@@ -50,11 +51,22 @@ Content-Type: application/json
 
 | 字段 | 说明 |
 |---|---|
-| `query` | 必填；去掉首尾空白后为空 → 400 |
-| `max_results` | 可选，默认 5；超过 20 按 20 处理，`<= 0` 按 5 处理 |
-| `allowed_domains` | 可选，原样转给上游 |
-| `blocked_domains` | 可选；网关层拼成 `" -site:x"` 追加到 `query` 文本（官方 CLI 的语义），调用方不用自己拼 |
-| `freshness` | 可选：`d1`（一天）/ `m1`（一月）/ `y1`（一年）；别的值 → 400 |
+| `query` | 必填；必须是字符串，去掉首尾空白后为空 → 400 |
+| `type` | 可选，固定值 `text2text`；别的值 → 400 |
+| `max_results` | 可选，整数 1..20；越界或非整数（含 `true`）→ 400 |
+| `allowed_domains` | 可选，字符串数组，原样转给上游 |
+| `blocked_domains` | 可选，字符串数组；网关层拼成 `" -site:x"` 追加到 `query` 文本（官方 CLI 的语义），调用方不用自己拼 |
+| `freshness` | 可选：`d1`（一天）/ `m1`（一月）/ `y1`（一年）；空串等同不传，别的值 → 400 |
+
+> 面板对请求体的处理是**校验 + 原样转发**：非法参数在面板返回
+> `400 invalid_search_params`，不消耗账号池搜索配额；合法 body 逐字段原样
+> 转发（不重命名、不删字段），未知字段也放行以兼容后续 agenttool 扩展。
+> `max_results` 的默认/兜底与 `blocked_domains` 的 `-site:` 拼接都在上游
+> 网关完成，面板不改写 body。
+>
+> 这层入站校验是**可选的纵深护栏**：配套插件 `dsh-web-search-workbuddy`
+> 已在客户端侧完成参数构造与主校验；面板侧校验主要面向绕过插件直连本端点
+> 的调用方。
 
 ### 响应（上游信封原样透传）
 
@@ -78,6 +90,7 @@ Content-Type: application/json
 |---|---|
 | 密钥缺失、无效、IP 受限、超频 | 与 chat 同一套 401 / 403 / 429，不进上游 |
 | `query` 为空或请求体不是 JSON | 400（`invalid_body` / `empty_query`） |
+| `query` 非字符串，或任一可选参数非法（`type` / `max_results` / `allowed_domains` / `blocked_domains` / `freshness`） | 400 `invalid_search_params`（面板层早失败，不进上游） |
 | 上游判定请求本身有问题（参数错等） | 400，带上游 `code` 与 `msg`，**不罚号、不轮转** |
 | 单个账号 `15001`（web search 日配额） | 该号**软冷却 10 分钟**后换号重试 |
 | 所有可用账号都 15001 | 429，`{"error": "...", "code": "quota_web_search", "tried": N, "detail": "..."}` |
@@ -118,7 +131,8 @@ python -m unittest server.tests.test_gateway_tools_search -v
 Go 侧覆盖：鉴权、空 query、非法 freshness、blocked 域拼接、15001 换号、
 全池 15001 → 429、软冷却落点、国际号跳过、无可用账号 → 503。
 面板侧覆盖：缺密钥不触上游、空 query / 坏 JSON → 400、成功信封透传、
-429 透传、业务码透传、上游不可达 → 502、密钥没绑到可用上游 → 503、每次调用记一条日志。
+429 透传、业务码透传、上游不可达 → 502、密钥没绑到可用上游 → 503、每次调用记一条日志、
+agenttool 全参数原样转发、非法可选参数早失败、`freshness` 空串、未知字段放行。
 
 ## 已知边界
 

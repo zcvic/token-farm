@@ -13,11 +13,19 @@ const inter = Inter({
   display: 'swap',
 });
 
+// Noto Sans SC 是**可变字体**：不写 `weight` 时 Next 只声明一条
+// `font-weight: 100 900`，浏览器按需插值出 300/400/500/600/700 全部字重。
+//
+// 之前写了 `weight: ['300','400','500','600','700']`，Next 会为**每个字重**
+// 各生成 101 条 @font-face —— 共 506 条，而其中 5 个字重引用的是**同一批
+// woff2 文件**（实测：101 段 unicode-range 全部「5 个字重 → 同一个文件」，
+// 0 段指向不同文件）。所以那 4 份重复声明既不增加可用的字形，也不减少下载量，
+// 只是把 CSS 从约 93KB 撑到 464KB（gzip 31KB → 158KB），首屏白白多传 127KB。
+// 去掉之后字体渲染结果不变（同一份字体文件、同样的 unicode-range 切片）。
 const notoSansSC = Noto_Sans_SC({
   variable: '--font-noto-sans-sc',
   subsets: ['latin'],
   display: 'swap',
-  weight: ['300', '400', '500', '600', '700'],
 });
 
 export const metadata: Metadata = {

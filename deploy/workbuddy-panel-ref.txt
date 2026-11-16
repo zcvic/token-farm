@@ -261,3 +261,35 @@ f86dc4eaa2a0867338b58efeba74e72f26f7417d
 2be0196736ed3508e11b55e36390b7fac3452bb9
 dce9acc437719c52115efcef8489d545d9ea1d55
 5e88629f559a3e251b2cf5d4f5ada241e646a843
+
+# ---- 2026-11 第五批：v2.11.16 / v2.11.17（网关 CORS + 搜索参数校验）
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      范围：48ba599b（v2.11.15）→ f32521fd（v2.11.17），8 个非 merge 提交。
+#      已取（按能力重写，不整段 merge）：
+#        · /v1/tools/search 全参数入站校验：158b7313。query 必须是非空字符串，
+#          type 固定 text2text，max_results 为 1..20 整数（排除 bool），
+#          allowed_domains / blocked_domains 为字符串数组，freshness 属
+#          d1|m1|y1（空串等同不传）；非法值 400 invalid_search_params，且不
+#          消耗账号池搜索配额。落点 server/routers/gateway.py 的
+#          _validate_search_params；合法 body 仍逐字段原样转发、未知字段放行。
+#          文档落点 docs/web-search-passthrough.md。
+#        · /v1、/v2 数据面 CORS 面板可配：5d01b598 + 176e4964 + 7a747c15。
+#          新增 server/services/gatewaycors.py（来源归一化 / 严格布尔 / 条数与
+#          长度上限 / 按路径段匹配）、main.py 的 GatewayCorsMiddleware（预检
+#          直接 204、未放行 403、白名单请求头回显、Vary: Origin 合并、与全局
+#          CORSMiddleware 共存时去重 allow-origin / 丢弃 allow-credentials）、
+#          GET/PUT /api/settings/gateway-cors，以及设置 → 系统 → 网关跨域面板 +
+#          五语种文案。管理面 WB_CORS_ORIGINS 的边界不变（仍禁止 *）。
+#      未取：
+#        · 25d1b904 / f32521fd 发版提交与 bb8238ff 的 CHANGELOG 段落：本仓库
+#          的发版与更新日志自己维护。
+#        · d01c534b 的 DSH 全参数实测截图：与上面 2a1cd450 同因（上游面板
+#          截图，本地文档按自己的风格描述协议与验证方式）。
+#      本地差异（有意偏离）：
+#        · 中间件挂在本仓库已有的 cache_headers / ApiBodyLimit / StripBasePath
+#          之内层，保证子路径部署（WB_BASE_PATH）先剥前缀、再按 /v1、/v2 的
+#          路径段匹配；上游没有子路径中间件，不需要这一层顺序。
+158b7313a618dd30d1a01523ad03905c07afe24b
+5d01b5983b5c80313c75fa59fadb6a7096bfc929
+176e4964036e15ca6972cbda5339fac479e6b112
+7a747c1527650b8aab616bd7b2a1b4724dd02225

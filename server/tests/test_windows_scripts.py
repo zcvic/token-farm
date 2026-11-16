@@ -156,7 +156,7 @@ class GitAttributesTest(unittest.TestCase):
 
         r = subprocess.run(
             ['git', 'check-attr', 'eol', '--', 'deploy/windows-native/start-workbuddy2api.cmd'],
-            cwd=str(_ROOT), capture_output=True, text=True, timeout=60,
+            cwd=str(_ROOT), capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60,
         )
         if r.returncode != 0:
             self.skipTest('本环境没有 git，跳过（CI 上会跑）')

@@ -99,16 +99,17 @@ git commit -m "upstream: 说清这次改了什么"
 除 misakano 面板仓外，2026-11 还有两个参考源。
 
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
-已核对的范围是 `80b4b21`（v2.11.10）→ `48ba599b`（v2.11.15）：
+已核对的范围是 `80b4b21`（v2.11.10）→ `f32521fd`（v2.11.17）：
 
 | 区间 | 取到的能力 |
 |---|---|
 | `80b4b21` → `8b5a4df4`（v2.11.14） | Go 侧补丁 0051–0056、面板侧余额 / 积分 / 账号 / 统计 / 调度等修复 |
 | `8b5a4df4` → `48ba599b`（v2.11.15） | 静态资源 gzip、密钥每日 Token 限额、账号拖拽排序、单账号刷新积分 / 到期角标 / 趋势积分线、弹窗浮层滚轮、Docker data 卷命名卷开关、`/v1/tools/search` 透传 |
+| `48ba599b` → `f32521fd`（v2.11.17） | `/v1/tools/search` 全参数入站校验；`/v1`、`/v2` 数据面 CORS 面板可配（含与 `WB_CORS_ORIGINS` 共存去重、发版前审计的 8 处修正） |
 
-这两批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
+这三批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
 国际版 agenttool 搜索、上游自己的 CI / 发版提交同样未取。逐项清单与
-「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批段落里；
+「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批、第五批段落里；
 Web 搜索的协议与错误语义单独写在
 [web-search-passthrough.md](web-search-passthrough.md)。
 

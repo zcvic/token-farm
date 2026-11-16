@@ -254,3 +254,131 @@ class UsageHealthUpperBoundTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StatsCoveringIndexTest(unittest.TestCase):
+    """统计页的几条热查询必须**走覆盖索引**，否则会静默退化回秒级。
+
+    为什么这条值得单独钉住：`idx_logs_ts` 只能把范围定位到区间，之后每一行
+    都要回表取 status / token / 耗时。20 万行实测单条查询 1 秒级，加上
+    `idx_logs_cover` 后降到十几到两百毫秒（失败计数 966→17ms，按天成功数
+    1199→194ms，吞吐量 1064→113ms）。而**退化是完全静默的**：数字照旧正确，
+    只是总览页每 30 秒的轮询开始卡。没有这条断言，任何一次「顺手改改 SQL」
+    （比如把条件写成函数包住 ts、或往 SELECT 里加一个不在索引里的列）都会
+    让性能悄悄回到原点，且不会有任何测试变红。
+
+    断言方式是**捕获实现真正执行的 SQL** 再 `EXPLAIN`，不是抄一份 SQL 写死
+    在测试里 —— 抄写的那份会随实现漂移，最后测的是一段没人跑的语句。
+    """
+
+    # 这些函数都在总览 / 统计页的热路径上（30 秒轮询或切页即触发）
+    HOT = ('summary', '_failures', '_daily_failures', '_daily_success',
+           '_hourly_failures', '_hourly_success', '_throughput_by_model')
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = config.DB_PATH
+        config.DB_PATH = Path(self._tmp.name) / 'cover.db'
+        db._conn = None
+        db.connect()
+        db.execute("INSERT INTO api_keys(name,key_hash,prefix,enabled,created_at,"
+                   "quota,used_tokens) VALUES('k','h','wbk_u',1,?,0,0)",
+                   (int(time.time()),))
+        self.kid = db.query_one('SELECT id FROM api_keys LIMIT 1')['id']
+        self.today = db.day_of()
+        self.t0 = db.day_start_ts(self.today)
+        for i in range(20):
+            db.add_request_log(ts=self.t0 + i * 60, key_id=self.kid, ip='1.1.1.1',
+                               model='m', mapped_model='m',
+                               status=200 if i % 5 else 503,
+                               prompt_tokens=5, completion_tokens=5, latency_ms=100,
+                               first_token_ms=10, ua='UA', error=None, stream=1,
+                               credit=None, realm='cn')
+
+    def tearDown(self) -> None:
+        try:
+            if db._conn is not None:
+                db._conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        db._conn = None
+        config.DB_PATH = self._orig
+        self._tmp.cleanup()
+
+    def _captured_log_sql(self) -> list[tuple[str, tuple]]:
+        """跑一遍热路径函数，收集它们对 `request_logs` 真正发出的 SQL。"""
+        seen: list[tuple[str, tuple]] = []
+        orig_query, orig_one = db.query, db.query_one
+
+        def rec_query(sql, args=()):  # noqa: ANN001
+            seen.append((sql, tuple(args)))
+            return orig_query(sql, args)
+
+        def rec_one(sql, args=()):  # noqa: ANN001
+            seen.append((sql, tuple(args)))
+            return orig_one(sql, args)
+
+        db.query, db.query_one = rec_query, rec_one
+        try:
+            for name in self.HOT:
+                fn = getattr(stats, name)
+                if name == 'summary':
+                    fn()
+                elif name == '_throughput_by_model':
+                    # 签名是 (days, realm, ...)：realm 没有默认值
+                    fn(7, None)
+                elif name in ('_daily_failures', '_daily_success'):
+                    fn(7)
+                elif name in ('_hourly_failures', '_hourly_success'):
+                    fn(self.today)
+                else:
+                    fn()
+        finally:
+            db.query, db.query_one = orig_query, orig_one
+        return [(sql, args) for sql, args in seen if 'request_logs' in sql]
+
+    def _plans(self) -> dict[str, str]:
+        """对捕获到的每条 SQL 取「强制走本索引」时的查询计划。
+
+        为什么要 `INDEXED BY` 而不是让优化器自己选：小表上（测试库里只有几十
+        行）优化器会挑更窄的 `idx_logs_ts` —— 两者都是零点几毫秒，选谁都不算
+        错。可那样断言就变成「表够大时才通过」，在 CI 上会随机假红。
+
+        `INDEXED BY` 把「这条查询需要的列是否全在索引里」单独问出来，与表大小、
+        代价估算完全无关：计划里是 `USING COVERING INDEX` 就代表不用回表。
+        """
+        out = {}
+        for sql, args in self._captured_log_sql():
+            forced = sql.replace('FROM request_logs',
+                                 'FROM request_logs INDEXED BY idx_logs_cover', 1)
+            detail = ' | '.join(str(r['detail']) for r in
+                                 db.query('EXPLAIN QUERY PLAN ' + forced, args))
+            out[' '.join(sql.split())[:80]] = detail
+        return out
+
+    def test_hot_queries_are_covered_by_the_index(self) -> None:
+        plans = self._plans()
+        self.assertTrue(plans, '没捕获到任何 request_logs 查询，断言前提不成立')
+        bad = {k: v for k, v in plans.items()
+               if 'COVERING INDEX' not in v.upper() or 'SCAN' in v.upper()}
+        self.assertFalse(
+            bad,
+            '这些热查询没被索引完整覆盖（每行都要回表，20 万行时是秒级）：\n'
+            + '\n'.join(f'  {k}\n    {v}' for k, v in bad.items()),
+        )
+
+    def test_assertion_is_not_vacuous(self) -> None:
+        """反证：把索引换成更窄的 `(ts, status)` 后，断言必须**真的会红**。
+
+        没有这一步，断言可能因为「计划字符串里碰巧总有 COVERING 字样」而永远
+        通过 —— 那样它就不保护任何东西了。这里换成真实存在但不够宽的索引，
+        模拟的正是「有人删掉几列」这个退化方向。
+        """
+        db.execute('DROP INDEX idx_logs_cover')
+        db.execute('CREATE INDEX idx_logs_cover ON request_logs(ts, status)')
+        plans = self._plans()
+        self.assertTrue(plans, '没捕获到任何 request_logs 查询')
+        self.assertTrue(
+            any('COVERING INDEX' not in v.upper() for v in plans.values()),
+            '索引变窄后计划里仍全是 COVERING，说明这条断言测不出列缺失',
+        )

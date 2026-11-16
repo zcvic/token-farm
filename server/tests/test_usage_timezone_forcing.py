@@ -83,7 +83,7 @@ def _can_force_tz() -> bool:
         out = subprocess.run(
             [sys.executable, '-c',
              "import time;print(time.strftime('%z', time.localtime()))"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
             env={**os.environ, 'TZ': _TZ_VALUE},
         )
     except Exception:  # noqa: BLE001
@@ -97,7 +97,7 @@ class ForcedTimezone(unittest.TestCase):
         code = _SNIPPET.format(root=str(ROOT))
         proc = subprocess.run(
             [sys.executable, '-c', code],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120,
             cwd=str(ROOT),
             env={**os.environ, 'TZ': _TZ_VALUE},
         )

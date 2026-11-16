@@ -678,7 +678,7 @@ class DockerAssetsTest(unittest.TestCase):
             self.skipTest('本环境没有 bash')
         r = subprocess.run(
             [sys.executable, str(_ROOT / 'dev' / 'check_dockerfile_build.py')],
-            capture_output=True, text=True, timeout=180,
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=180,
         )
         self.assertEqual(r.returncode, 0,
                          '前端阶段分支判定不正确：' + r.stdout + r.stderr)

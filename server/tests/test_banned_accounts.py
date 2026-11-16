@@ -12,7 +12,7 @@ class BannedAccountsTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), '未安装 node，跳过前端逻辑测试')
     def test_frontend_credit_availability(self):
         node = shutil.which('node')
-        version = subprocess.check_output([node, '--version'], text=True).strip().lstrip('v')
+        version = subprocess.check_output([node, '--version'], text=True, encoding='utf-8', errors='replace').strip().lstrip('v')
         if tuple(map(int, version.split('.')[:2])) < (22, 6):
             self.skipTest('需要 node >= 22.6 的 type stripping')
         root = Path(__file__).resolve().parents[2]

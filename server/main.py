@@ -25,9 +25,9 @@ from .routers import (
     proxies, settings, stats, system, tokens, upstreams, watchdog as watchdog_router,
 )
 from .services import (
-    accountlog, accountrisk, autoupdate, cooling, dailyplan, modelpolicy,
-    modelrecovery, pgsync, qoderaccountlog, renew, requestctx, tasklog, taskrun,
-    watchdog,
+    accountlog, accountrisk, autoupdate, cooling, dailyplan, gatewaycors,
+    modelpolicy, modelrecovery, pgsync, qoderaccountlog, renew, requestctx,
+    tasklog, taskrun, watchdog,
 )
 
 # 最早时刻把标准输出/错误钉成 UTF-8：Windows 中文区域默认按 cp936 编码，日志里
@@ -210,6 +210,175 @@ if config.CORS_ORIGINS:
         allow_methods=['*'],
         allow_headers=['*'],
     )
+
+# ── 数据面 CORS（`/v1`、`/v2`）────────────────────────────────────
+#
+# 与上面 `WB_CORS_ORIGINS` 是**两套**东西，别合并：
+#   · 上面那套管 `/api/*`（Cookie 会话），`allow_credentials=True`，禁止 `*`；
+#   · 这一套管 `/v1`、`/v2`（`Authorization: Bearer`），不涉及 Cookie，因此
+#     可以允许 `*` —— 任何网页都能跨域发请求，但拿不到密钥还是调不动。
+#
+# 为什么不用 `CORSMiddleware`：它的 allow_origins 是启动时固定的，改配置要重启。
+# 而这是面板上的配置项 —— 改完不生效会被当成「没保存成功」，所以这里每请求现读
+# 设置（读 SQLite 一行），即时生效。
+#
+# 预检由这里直接应答：`/v1/*` 只有 POST 路由，OPTIONS 落到路由表会被 405，
+# 浏览器那边就报跨域失败 —— 这是上游 #445 现象的直接来源。
+_CORS_ALLOW_HEADERS = 'authorization,content-type,x-api-key,anthropic-version,x-trace-id'
+
+# 预检里回显 `Access-Control-Request-Headers` 的白名单前缀/全名。
+#
+# 为什么不能直接把请求方要的头原样回显：那等于对任意头放行。但只回一份固定
+# 列表又会挡住真实客户端 —— OpenAI SDK 会带 `openai-organization`、
+# `openai-beta`，Anthropic SDK 会带 `anthropic-beta`，这些请求会因为预检失败
+# 而根本发不出去。折中：命名空间前缀 + 明确列出的头名，其余一律不放。
+_CORS_ALLOWED_HEADER_EXACT = frozenset(_CORS_ALLOW_HEADERS.split(','))
+_CORS_ALLOWED_HEADER_PREFIXES = ('x-stainless-', 'anthropic-', 'openai-')
+
+
+def _echo_request_headers(requested: str) -> str:
+    """把预检请求要的头裁到白名单内，返回可直接写进响应头的值。
+
+    返回空串表示「一个都不允许」——调用方据此把整个预检拒掉，而不是给一个
+    缺头的允许响应（那样浏览器照样拦，但报错方向会误导人）。
+    """
+    wanted: list[str] = []
+    for raw in (requested or '').split(','):
+        name = raw.strip().lower()
+        if not name or not name.isascii():
+            continue
+        # 头名只允许 token 字符（RFC 7230）——防止有人拿逗号/换行拼出额外的头
+        if any(ch not in 'abcdefghijklmnopqrstuvwxyz0123456789-_' for ch in name):
+            continue
+        if name in _CORS_ALLOWED_HEADER_EXACT or name.startswith(_CORS_ALLOWED_HEADER_PREFIXES):
+            # 只有前缀、没有后半截（如 `openai-`）不是有效头名
+            if name.endswith('-'):
+                continue
+            if name not in wanted:
+                wanted.append(name)
+    return ','.join(wanted)
+
+
+_CORS_ALLOW_METHODS = 'GET,POST,OPTIONS'
+
+
+def _merge_vary_origin(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+    """把 `Origin` 并进 `Vary`（已有值保留）。
+
+    CORS 响应的缓存正确性依赖 `Vary: Origin`：同一个 URL 对不同来源回不同的
+    `Access-Control-Allow-Origin`，不声明就会让共享缓存把一份响应发给另一个来源。
+    下游可能已经写了 `Vary: Accept-Encoding`（压缩），所以这里**合并**而不是追加
+    一条独立的 `Vary`（多条 Vary 的语义是「所有值的并集」，但不少代理只看第一条）。
+    """
+    out: list[tuple[bytes, bytes]] = []
+    merged: list[str] = []
+    for key, value in headers:
+        if key.lower() != b'vary':
+            out.append((key, value))
+            continue
+        for item in value.decode('latin-1').split(','):
+            name = item.strip()
+            if name and not any(n.lower() == name.lower() for n in merged):
+                merged.append(name)
+    if not any(n.lower() == 'origin' for n in merged):
+        merged.append('Origin')
+    # 只写一条 Vary：多条虽然语义上是并集，但不少代理/缓存实现只看第一条
+    out.append((b'vary', ', '.join(merged).encode('latin-1')))
+    return out
+
+
+class GatewayCorsMiddleware:
+    """纯 ASGI：只处理数据面路径，来源白名单每次现读面板设置。"""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get('type') != 'http':
+            await self.app(scope, receive, send)
+            return
+        path = scope.get('path') or ''
+        if not gatewaycors.is_data_api_path(path):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.decode('latin-1').lower(): v.decode('latin-1')
+                   for k, v in scope.get('headers') or []}
+        origin = headers.get('origin') or ''
+        cfg = gatewaycors.settings()
+        allow = gatewaycors.allow_origin_value(origin, cfg)
+
+        # 预检：直接应答，不进路由（进了也是 405）。
+        if scope.get('method') == 'OPTIONS' and headers.get('access-control-request-method'):
+            if not allow:
+                # 来源未放行：回 403 而不是静默 200 —— 静默放行会让浏览器在
+                # 真实请求上才失败，用户看不到「预检被拒」这个明确信号。
+                # 403 也带 `Vary: Origin`：否则中间缓存可能把一个来源的拒绝
+                # 结果复用给另一个来源。
+                response = JSONResponse(
+                    {'error': {'message': '来源不在网关 CORS 白名单内',
+                               'type': 'cors_error', 'code': 'origin_not_allowed'}},
+                    status_code=403,
+                    headers={'Vary': 'Origin'})
+                await response(scope, receive, send)
+                return
+            # 没有 `Access-Control-Request-Headers` 是**合法**的（简单请求的
+            # 预检只问方法）；只有「要了头但一个都不在白名单里」才拒。
+            raw_requested = headers.get('access-control-request-headers') or ''
+            requested = _echo_request_headers(raw_requested)
+            if raw_requested.strip() and not requested:
+                response = JSONResponse(
+                    {'error': {'message': '预检请求了不被允许的自定义请求头',
+                               'type': 'cors_error', 'code': 'header_not_allowed'}},
+                    status_code=403,
+                    headers={'Vary': 'Origin'})
+                await response(scope, receive, send)
+                return
+            extra = [
+                (b'access-control-allow-origin', allow.encode('latin-1')),
+                (b'access-control-allow-methods', _CORS_ALLOW_METHODS.encode()),
+                (b'access-control-allow-headers', requested.encode('latin-1')),
+                (b'access-control-max-age', str(cfg['max_age']).encode()),
+                (b'vary', b'Origin'),
+            ]
+            await send({'type': 'http.response.start', 'status': 204, 'headers': extra})
+            await send({'type': 'http.response.body', 'body': b''})
+            return
+
+        if not allow:
+            await self.app(scope, receive, send)
+            return
+
+        # 普通请求：补上 CORS 头。注意**不加** allow-credentials —— 数据面用
+        # Bearer，不需要 Cookie；带上一旦将来来源放宽成 `*` 就会与规范冲突。
+        #
+        # **必须先删掉下游已有的同名头再加自己的**：`WB_CORS_ORIGINS` 装上全局
+        # `CORSMiddleware` 时它也会处理 `/v1`，两层各加一次的结果是
+        # `Access-Control-Allow-Origin: https://a, https://a` —— 浏览器按单个值
+        # 解析，重复值直接判定为非法来源，表现为「明明加了白名单还是跨域」。
+        # 实测确认过（见 test_gateway_cors.GlobalCorsCoexistenceTest）。
+        # 同理丢掉对方的 allow-credentials：数据面不该声明它。
+        async def send_with_cors(message):
+            if message.get('type') == 'http.response.start':
+                message = dict(message)
+                drop = {b'access-control-allow-origin', b'access-control-allow-credentials'}
+                headers = [(k, v) for k, v in message.get('headers') or []
+                           if k.lower() not in drop]
+                headers.append((b'access-control-allow-origin', allow.encode('latin-1')))
+                if b'access-control-expose-headers' not in {k.lower() for k, _ in headers}:
+                    headers.append((b'access-control-expose-headers',
+                                    b'x-trace-id,x-request-id'))
+                # Vary 必须**并进已有值**，不能「有就跳过」：下游可能已经带了
+                # `Vary: Accept-Encoding`（压缩中间件），跳过就等于没声明按 Origin
+                # 区分，共享缓存会把 A 来源的响应复用给 B 来源。
+                headers = _merge_vary_origin(headers)
+                message['headers'] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+
+app.add_middleware(GatewayCorsMiddleware)
 
 # 管理端请求体上限。网关那条路有自己的逐块校验（gateway._read_json_body），
 # 但 `/api/*` 此前**没有任何上限** —— 未鉴权的 `/api/login` 就能用大 body

@@ -119,7 +119,7 @@ def _node_major() -> int | None:
         return None
     try:
         out = subprocess.run([_NODE, '--version'], capture_output=True,
-                             text=True, timeout=15).stdout.strip()
+                             text=True, encoding='utf-8', errors='replace', timeout=15).stdout.strip()
         return int(out.lstrip('v').split('.')[0])
     except Exception:  # noqa: BLE001
         return None
@@ -186,7 +186,7 @@ class AsyncStateBehaviourTest(unittest.TestCase):
         self.assertTrue(_SCRIPT.is_file(), f'缺少测试脚本: {_SCRIPT}')
         proc = subprocess.run(
             [_NODE, '--experimental-strip-types', str(_SCRIPT)],
-            capture_output=True, text=True, timeout=120, cwd=str(_ROOT),
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120, cwd=str(_ROOT),
         )
         out = (proc.stdout or '') + (proc.stderr or '')
         self.assertEqual(proc.returncode, 0, f'取数状态推导不符合预期：\n{out}')
@@ -608,11 +608,22 @@ class KeysPageHonestyTest(unittest.TestCase):
         )
         at = code.find("t('keys.emptyTitle')")
         self.assertGreaterEqual(at, 0, '找不到「暂无密钥」这句，断言前提不成立')
-        # 只看这句话**近旁**的条件：全文搜 `!keysFailed` 的话，把它挪到别处
-        # （比如某个跟列表无关的分支上）也会通过，等于没断言。
-        near = code[max(0, at - 400):at]
+        # 断言「包裹这句的那个 JSX 条件里有 !keysFailed」，而不是「往前 N 个字符
+        # 内有 !keysFailed」。后者被现实打穿过两次：
+        #
+        #   · 窗口开大（全文搜）→ 把守卫挪到别处也通过，等于没断言；
+        #   · 窗口开小（400）→ 密钥分组筛选加进来之后，「暂无密钥」被三个分组
+        #     分支（分组为空 / 分组已删除 / 无分组）推到了守卫之后 1200+ 字符，
+        #     守卫明明还在、测试却红了（实测）。
+        #
+        # 结构上找更准：从这句往回，**最后一个** `{<cond> && (` 就是包住它的那个
+        # 条件块。分组分支用的是 `? (`，不会被误认成守卫。
+        guard = None
+        for m in re.finditer(r'\{[^{}]*&&\s*\(\s*$', code[:at], re.M):
+            guard = m
+        self.assertIsNotNone(guard, '找不到包裹「暂无密钥」的条件块，断言前提不成立')
         self.assertIn(
-            '!keysFailed', near,
+            '!keysFailed', guard.group(0),
             '密钥页的空状态没有按 keysFailed 收窄——刷新失败时会显示成「暂无 API 密钥」，'
             '用户会以为密钥被删了，并顺手重建出重复密钥',
         )

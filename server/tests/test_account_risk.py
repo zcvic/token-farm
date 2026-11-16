@@ -16,7 +16,7 @@ class AccountRiskTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node is required for the frontend status test')
     def test_frontend_safety_pause_status(self):
         node = shutil.which('node')
-        version = subprocess.check_output([node, '--version'], text=True).strip().lstrip('v')
+        version = subprocess.check_output([node, '--version'], text=True, encoding='utf-8', errors='replace').strip().lstrip('v')
         if tuple(map(int, version.split('.')[:2])) < (22, 6):
             self.skipTest('Node >= 22.6 is required')
         root = Path(__file__).resolve().parents[2]
