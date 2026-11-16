@@ -569,6 +569,9 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 	// 两者皆无而流已结束 = 中途断掉，不是「模型说完了」。
 	sawDone := false
 	sawFinish := false
+	// errorSent 本流已向客户端写出过 error 帧（上游 error 透传）：error 帧本身就是终态，
+	// 流尾不得再补截断终态——客户端按最后一个终态判结果，「截断」会盖掉「失败」。
+	errorSent := false
 	flushTail := func() error {
 		for _, p := range tailBuf {
 			if _, err := io.WriteString(w, "data: "+p+"\n\n"); err != nil {
@@ -680,6 +683,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 		if _, hasErr := obj["error"]; hasErr {
+			errorSent = true
 			// 已进入收尾段：先把缓冲的收尾帧发出去，再发错误帧，避免顺序反转。
 			if werr := flushTail(); werr != nil {
 				return 0, werr
@@ -835,7 +839,9 @@ readLoop:
 	//
 	// 判据与非流式 Aggregate 同构：那边同样以 !sawDone 认定「未正常收尾」。
 	// 空流（validFrames == 0）走上方的 errEmptyStream 分支，不重复判定。
-	truncated := validFrames > 0 && !sawDone && !sawFinish
+	// 已写出 error 帧同样算终态：否则「上游报错后断开」会被后面补的 length 帧洗成
+	// 「只是截断」，客户端据此续写一条注定失败的回合。
+	truncated := validFrames > 0 && !sawDone && !sawFinish && !errorSent
 	if truncated {
 		// 第一帧：截断终态 finish_reason=length（TruncationFinishReason）。
 		//

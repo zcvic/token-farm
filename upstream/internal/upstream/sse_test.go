@@ -986,6 +986,86 @@ func TestStreamMidStreamErrorFramePassthrough(t *testing.T) {
 	}
 }
 
+// TestStreamErrorFrameNotFollowedByTruncation 正文之后上游给了 error 帧再断开：error 帧
+// 就是终态，不得再补 finish_reason=length。客户端按最后一个终态判结果，「截断」会盖掉
+// 「失败」，于是它去续写一条注定失败的回合。
+func TestStreamErrorFrameNotFollowedByTruncation(t *testing.T) {
+	raw := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"半句\"}}]}\n\n" +
+		"data: {\"error\":{\"message\":\"upstream exploded\",\"type\":\"upstream_error\",\"code\":\"x\"}}\n\n"
+	rec := httptest.NewRecorder()
+	if err := Stream(rec, strings.NewReader(raw)); err != nil {
+		t.Fatalf("error 帧已是终态，不该再报截断: %v", err)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"finish_reason":"length"`) {
+		t.Fatalf("error 帧之后又补了截断终态: %q", body)
+	}
+	if strings.Contains(body, "upstream_truncated") {
+		t.Fatalf("error 帧之后又补了截断 error 帧: %q", body)
+	}
+	if n := strings.Count(body, "data: [DONE]"); n != 1 {
+		t.Errorf("[DONE] count=%d want 1: %q", n, body)
+	}
+	if !strings.Contains(body, "upstream exploded") {
+		t.Errorf("上游 error 原文被吞: %q", body)
+	}
+}
+
+// terminalCount 统计客户端可见的终态帧数：finish_reason 非空的帧 + error 帧。
+// 只用 Contains 查「有没有 length」抓不到重复终态——后一个会把前一个洗掉。
+func terminalCount(t *testing.T, body string) int {
+	t.Helper()
+	n := 0
+	for _, line := range strings.Split(body, "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		var obj struct {
+			Error   any `json:"error"`
+			Choices []struct {
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &obj) != nil {
+			continue
+		}
+		if obj.Error != nil {
+			n++
+		}
+		for _, c := range obj.Choices {
+			if c.FinishReason != "" {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// TestStreamTerminalsExactlyOnce 每种收尾形态都必须「恰好一个终态 + 恰好一条 [DONE]」：
+// 多一个终态就会盖掉前面的语义（截断盖成功、成功盖失败）。
+func TestStreamTerminalsExactlyOnce(t *testing.T) {
+	head := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"正文\"}}]}\n\n"
+	cases := map[string]string{
+		"stop+DONE":   head + "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+		"stop 无 DONE": head + "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+		"error 后断开":   head + "data: {\"error\":{\"message\":\"boom\",\"type\":\"upstream_error\"}}\n\n",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			_ = Stream(rec, strings.NewReader(raw))
+			body := rec.Body.String()
+			if n := strings.Count(body, "data: [DONE]"); n != 1 || !strings.HasSuffix(body, "data: [DONE]\n\n") {
+				t.Fatalf("[DONE] 应恰好一条且在末尾，got %d: %q", n, body)
+			}
+			if got := terminalCount(t, body); got != 1 {
+				t.Fatalf("终态（finish_reason 帧 + error 帧）应恰好一个，got %d: %q", got, body)
+			}
+		})
+	}
+}
+
 // TestStreamGarbageAfterDone 校验 DONE 之后的垃圾帧不出现在响应里。
 func TestStreamGarbageAfterDone(t *testing.T) {
 	raw := "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n" +
