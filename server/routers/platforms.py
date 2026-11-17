@@ -588,9 +588,12 @@ async def checkin(name: str, account_id: str,
         # 只为拿昵称 / 版本写签到记录；列表失败不应挡在签到前面（签到本身
         # 会给出真正的错误），记录里缺这些字段也能落库。
         account = next((a for a in adapter.list_accounts()
-                        if str(a.get('uid') or '') == str(account_id or '')), {})
+                        if str(a.get('uid') or '') == str(account_id or '')),
+                       {'uid': str(account_id or '')})
     except Exception:  # noqa: BLE001
-        account = {}
+        # 列表读不到时至少保住 uid：`_log_platform_checkin` 见 uid 为空会直接
+        # 返回，那这条签到就白签了（积分收支里也看不到）。昵称 / 版本缺失无妨。
+        account = {'uid': str(account_id or '')}
     try:
         result = await adapter.checkin(account_id)
     except PlatformError as exc:

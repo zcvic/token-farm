@@ -170,7 +170,7 @@ class CheckinAllPacingTest(_DbCase):
 
 class SettingsRouteTest(_DbCase):
     def test_checkin_fields_can_be_saved_without_max_in_flight(self) -> None:
-        """界面单独改签到节奏时，不必连带提交池级并发（旧接口会因此 400）。"""
+        """界面单独改签到节奏时，不必连带提交单账号并发（旧接口会因此 400）。"""
         class _Adapter:
             name = 'fake'
             label = 'Fake'
@@ -189,6 +189,61 @@ class SettingsRouteTest(_DbCase):
         self.assertEqual(out['checkin_delay_min'], 1)
         self.assertEqual(out['checkin_delay_max'], 2)
         fake_security.audit.assert_called_once()
+
+
+class ManualCheckinLogTest(_DbCase):
+    """手动单账号签到：账号列表读不到时也必须把这条签到记下来。
+
+    `_log_platform_checkin` 见 uid 为空会直接 return —— 签到真的成功了，但
+    积分收支里没有这笔收入，用户只会看到「签到了却没加分」。
+    """
+
+    class _Adapter:
+        name = 'fake'
+        label = 'Fake'
+
+        def __init__(self, accounts=None, broken: bool = False) -> None:
+            self._accounts = accounts or []
+            self._broken = broken
+
+        def list_accounts(self) -> list[dict]:
+            if self._broken:
+                raise RuntimeError('账号目录读不到')
+            return list(self._accounts)
+
+        async def checkin(self, account_id: str) -> dict:
+            return {'uid': account_id, 'ok': True, 'earned_credit': 200,
+                    'credits': 200, 'message': '签到成功'}
+
+    def _run(self, adapter) -> dict:  # noqa: ANN001
+        with mock.patch.object(platforms_router, '_adapter',
+                               return_value=adapter):
+            return asyncio.run(platforms_router.checkin(
+                adapter.name, 'u1', user={'role': 'admin'}))
+
+    def _rows(self) -> list[dict]:
+        return db.query('SELECT * FROM checkin_logs WHERE platform = ?',
+                        ('fake',))
+
+    def test_list_accounts_failure_keeps_the_record(self) -> None:
+        self._run(self._Adapter(broken=True))
+        rows = self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['uid'], 'u1')
+        self.assertEqual(rows[0]['credits'], 200)
+        self.assertEqual(rows[0]['source'], 'platform-manual')
+
+    def test_account_missing_from_list_keeps_the_record(self) -> None:
+        self._run(self._Adapter(accounts=[{'uid': 'other'}]))
+        rows = self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['uid'], 'u1')
+
+    def test_found_account_keeps_nickname(self) -> None:
+        self._run(self._Adapter(accounts=[{'uid': 'u1', 'nickname': '小号'}]))
+        rows = self._rows()
+        self.assertEqual(rows[0]['nickname'], '小号')
+        self.assertEqual(rows[0]['credits'], 200)
 
 
 if __name__ == '__main__':

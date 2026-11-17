@@ -2429,5 +2429,72 @@ class SoloEventTest(unittest.TestCase):
         self.assertEqual(events, [('done', {'finish_reason': 'stop'})])
 
 
+class CheckinClaimTest(unittest.TestCase):
+    """签到到账口径：`credits + extra_credits`，不是前后余额差额。
+
+    签到状态接口的 `credits` 是**活动当日奖励额度**（免费 150 / 会员 200），
+    签到前后都是同一个标称值。旧实现算 `after - before`，恒为 0，于是签到
+    成功也只在积分收支里记 0，整笔收入看不到。
+    """
+
+    @staticmethod
+    def _claim(statuses: list[dict], claim: dict | None = None) -> tuple[dict, Any]:
+        fake_status = mock.AsyncMock(side_effect=statuses)
+        fake_claim = mock.AsyncMock(return_value=claim or {'code': 0,
+                                                          'message': 'success'})
+        with mock.patch.object(client, 'checkin_status', new=fake_status), \
+                mock.patch.object(client, 'request_json', new=fake_claim):
+            out = _run(client.claim_checkin({'realm': 'cn'}))
+        return out, fake_claim
+
+    def test_reward_counts_credits_plus_extra(self) -> None:
+        out, _ = self._claim([
+            {'checked_in': False, 'credits': 150, 'extra_credits': 50},
+            {'checked_in': True, 'credits': 150, 'extra_credits': 50},
+        ])
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['credits'], 200)
+        self.assertEqual(out['earned_credit'], 200)
+
+    def test_already_checked_in_earns_nothing(self) -> None:
+        out, fake_claim = self._claim([
+            {'checked_in': True, 'credits': 100, 'extra_credits': 100},
+        ])
+        self.assertTrue(out['already'])
+        self.assertEqual(out['earned_credit'], 0)
+        # 已签到不该再发 claim 请求（幂等，但少一次往返）。
+        fake_claim.assert_not_called()
+
+    def test_not_checked_in_after_claim_earns_nothing(self) -> None:
+        out, _ = self._claim([
+            {'checked_in': False, 'credits': 150, 'extra_credits': 50},
+            {'checked_in': False, 'credits': 150, 'extra_credits': 50},
+        ])
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['earned_credit'], 0)
+
+    def test_business_error_code_earns_nothing(self) -> None:
+        out, _ = self._claim([
+            {'checked_in': False, 'credits': 150, 'extra_credits': 50},
+            {'checked_in': True, 'credits': 150, 'extra_credits': 50},
+        ], claim={'code': 9074, 'message': '活动已结束'})
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['earned_credit'], 0)
+
+    def test_missing_extra_credits_still_counts(self) -> None:
+        out, _ = self._claim([
+            {'checked_in': False, 'credits': 100},
+            {'checked_in': True, 'credits': 100},
+        ])
+        self.assertEqual(out['earned_credit'], 100)
+
+    def test_reward_helper_ignores_bad_values(self) -> None:
+        self.assertEqual(client.checkin_reward({'credits': 'x',
+                                               'extra_credits': None}), 0)
+        self.assertEqual(client.checkin_reward({'credits': -5,
+                                               'extra_credits': 20}), 20)
+        self.assertEqual(client.checkin_reward(None), 0)
+
+
 if __name__ == '__main__':
     unittest.main()

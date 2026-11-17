@@ -1430,26 +1430,49 @@ async def checkin_status(account: dict, *, realm: str | None = None,
     return data if isinstance(data, dict) else {}
 
 
+def checkin_reward(status: dict) -> int:
+    """状态接口里的**今日签到奖励**（`credits + extra_credits`）。
+
+    为什么不能拿它当「账户余额」算前后差额：`credits` 是签到活动当日的奖励
+    额度（实测出现过 100 / 150 / 200），`extra_credits` 是额外加成，两者在
+    签到前后**都是同一个标称值**，差值恒为 0。真实到账 = 两者之和，社区实现
+    （scriptcat 脚本）也是这么算的。
+    """
+    status = status if isinstance(status, dict) else {}
+    total = 0
+    for key in ('credits', 'extra_credits'):
+        try:
+            total += max(0, int(status.get(key) or 0))
+        except (TypeError, ValueError):
+            # 上游偶尔给字符串 / null：宁可少算这一项，也不能让整次签到抛错。
+            continue
+    return total
+
+
 async def claim_checkin(account: dict, *, realm: str | None = None,
                         timeout: float = 30) -> dict:
-    """领取签到（幂等），用领取前后的 credits 差额计算真实到账。"""
+    """领取签到（幂等），用状态接口的今日奖励额度计算真实到账。
+
+    **不要**再用领取前后 `credits` 的差额：那是活动额度不是余额，前后不变，
+    差额恒为 0（签到成功也会记成 0，积分收支里就看不到这笔收入）。
+    """
     realm = normalize_realm(realm or account.get('realm'))
     before = await checkin_status(account, realm=realm, timeout=timeout)
-    before_credits = int(before.get('credits') or 0)
+    before_reward = checkin_reward(before)
     if before.get('checked_in'):
         return {'ok': True, 'checked_in': True, 'already': True,
-                'credits': before_credits, 'earned_credit': 0,
-                'message': f'今日已签到（积分 {before_credits}）',
+                'credits': before_reward, 'earned_credit': 0,
+                'message': f'今日已签到（今日奖励 {before_reward}）',
                 'raw': before}
     raw = await request_json(account, PATH_CHECKIN_CLAIM,
                              {'req_source': _checkin_req_source(realm)},
                              realm=realm, base='ug', timeout=timeout)
     after = await checkin_status(account, realm=realm, timeout=timeout)
-    after_credits = int(after.get('credits') or 0)
+    after_reward = checkin_reward(after)
     ok = bool(after.get('checked_in')) and (
         not isinstance(raw, dict) or raw.get('code') in (0, None))
     if ok:
-        message = f'签到成功（积分 {after_credits}）'
+        message = f'签到成功（今日奖励 {after_reward}）'
     else:
         # 「接口 200」不等于「已到账」：优先用状态接口的说明，其次领取响应，
         # 都没有就给一句中性的，绝不把失败说成成功。
@@ -1460,8 +1483,9 @@ async def claim_checkin(account: dict, *, realm: str | None = None,
         'ok': ok,
         'checked_in': bool(after.get('checked_in')),
         'already': False,
-        'credits': after_credits,
-        'earned_credit': max(0, after_credits - before_credits),
+        'credits': after_reward,
+        # 只有真的签到成功才记收入；失败 / 未生效一律 0。
+        'earned_credit': after_reward if ok else 0,
         'message': message,
         'raw': {'claim': raw, 'status': after},
     }
