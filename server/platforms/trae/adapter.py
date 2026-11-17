@@ -16,13 +16,13 @@ import asyncio
 import logging
 import secrets
 import time
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from ... import config, db
 from ...services.session_affinity import SessionAffinity, affinity_key
 from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
-from ..limiter import PoolLimiter
+from ..limiter import AccountLimiter
 from . import catalog, chat as chatmod, client, desktop, rates, store
 from .constants import DEFAULT_REALM, REALMS, normalize_realm
 
@@ -77,6 +77,28 @@ def _account_weight(account: dict) -> float:
     if value <= 0:
         return 1.0
     return min(store.WEIGHT_MAX, max(store.WEIGHT_MIN, value))
+
+
+def _noop() -> None:
+    """未占位时的空释放动作（`_ensure_token` 失败等路径复用同一段收尾）。"""
+
+
+def _lease_releaser(limiter: AccountLimiter, lease) -> Callable[[], None]:
+    """把一个已占到的名额包成**只释放一次**的闭包。
+
+    流式请求会把它挂到 `PlatformChat.closer` 上；失败换号时则立刻调用。
+    两处都可能走到，所以必须幂等。
+    """
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        limiter.release(lease)
+
+    return release
 
 
 def _is_model_unknown(exc: PlatformError) -> bool:
@@ -222,9 +244,9 @@ class TraeAdapter(PlatformAdapter):
         # 模型 -> 实际可用的通道（chat / solo）。4023 换通道成功后写入，
         # 后续同模型请求不再先撞一次失败。
         self._routes: dict[str, str] = {}
-        # 池级并发闸门：一个平台上所有账号合计的在途上限，配置见 settings
-        # `platforms.trae.max_in_flight`。流式请求会占到流结束才释放。
-        self._limiter = PoolLimiter(self.name)
+        # 单账号并发闸门：每个账号各自一个在途上限，配置见 settings
+        # `platforms.trae.max_in_flight`（0 = 不限）。流式请求会占到流结束才释放。
+        self._limiter = AccountLimiter(self.name)
         # 账号权重的 SWRR 游标（uid -> current）。只在选号时原地推进被选中的
         # 那一个，重启后从头开始，不需要持久化。
         self._swrr: dict[str, float] = {}
@@ -492,6 +514,10 @@ class TraeAdapter(PlatformAdapter):
           · `credits` / `remain` / `limit` / `used` —— 套餐积分池，界面主数字；
           · `checkin_credits` / `checked_in` —— 今日签到奖池，单独标注。
 
+        签到奖池按 `credits + extra_credits` 计：`credits` 是活动标称额度，
+        `extra_credits` 是额外加成，真实到账是两者之和（见
+        `client.checkin_reward`）。
+
         国际版没有签到接口，且额度口径是**美元**而非积分：走网页同款的
         `user_current_entitlement_list`（`basic/bonus_usage_limit` 与
         `basic/bonus_usage_amount`）。两边都取不到时才抛错——返回 0 会被
@@ -556,7 +582,7 @@ class TraeAdapter(PlatformAdapter):
             try:
                 status = await client.checkin_status(ready, realm=realm,
                                                      timeout=timeout)
-                checkin_credits = int(status.get('credits') or 0)
+                checkin_credits = client.checkin_reward(status)
                 checked_in = bool(status.get('checked_in'))
             except PlatformError as exc:
                 failures.append(exc)
@@ -985,7 +1011,7 @@ class TraeAdapter(PlatformAdapter):
 
     async def chat(self, model: str, body: dict,
                    ctx: ChatContext | None = None) -> PlatformChat:
-        """池级并发闸门 + 一次真实的对话调用。
+        """一次真实的对话调用（单账号并发闸门在 `_chat_accounts` 里占位）。
 
         闸门**必须占到这个请求结束**：非流式在聚合完释放，流式在 `closer`
         里释放（客户端断开也会走到 `PlatformChat.aclose`）。在 `chat()`
@@ -994,41 +1020,8 @@ class TraeAdapter(PlatformAdapter):
         `ctx` 是本签名的公共参数（见 `platforms/base.py`）。Trae 用不上它：
         选哪个账号由自己的池决定，与调用方是谁无关——收下并忽略即可。
         """
-        lease = await self._limiter.acquire()
-        if lease is False:
-            raise PlatformError(
-                'Trae 并发已满（平台池级上限），请稍后重试',
-                status=429, code='pool_busy', retry_after=1)
-        released = False
-
-        def release() -> None:
-            nonlocal released
-            if released:
-                return
-            released = True
-            self._limiter.release(lease)
-
-        try:
-            result = await self._chat_accounts(model, body,
-                                               realm_hint=ctx.realm if ctx else None)
-        except BaseException:
-            release()
-            raise
-        if result.stream is None:
-            release()
-            return result
-
-        inner = result.closer
-
-        async def closer() -> None:
-            try:
-                if inner is not None:
-                    await inner()
-            finally:
-                release()
-
-        result.closer = closer
-        return result
+        return await self._chat_accounts(
+            model, body, realm_hint=ctx.realm if ctx else None)
 
     def _cool_down(self, uid: str, exc: PlatformError, channel: str) -> bool:
         """按设置把出错的账号冻结一段时间；返回 True = 应换下一个账号。
@@ -1086,13 +1079,28 @@ class TraeAdapter(PlatformAdapter):
             if normalize_realm(account.get('realm')) == 'cn':
                 order.append('solo' if preferred == 'chat' else 'chat')
             for channel in order:
+                lease = None
+                release: Callable[[], None] = _noop
                 try:
                     ready = await self._ensure_token(account)
+                    # 单账号并发：只占**这个账号**自己的名额，账号之间互不影响。
+                    # 令牌刷新不占名额（它有自己的账号级锁），拿到可用凭据后再占位。
+                    lease = await self._limiter.acquire(uid)
+                    if lease is False:
+                        lease = None
+                        last_error = PlatformError(
+                            f'Trae 账号并发已满（单账号上限 '
+                            f'{self._limiter.limit()}），请稍后重试',
+                            status=429, code='account_busy', retry_after=1)
+                        break
+                    release = _lease_releaser(self._limiter, lease)
                     result = await self._chat_once(
                         ready, model, body, wrapper_model, channel=channel,
                         request_timeout=runtime['request_timeout'],
                         idle_timeout=runtime['idle_timeout'])
                 except PlatformError as exc:
+                    # 失败换号 / 换通道前先把名额还回去，否则这个账号会永久少一个槽。
+                    release()
                     last_error = exc
                     # 只有「凭据不可用」才换号；429/5xx 换号往往只是把限流扩散到更多账号
                     if exc.status in (401, 403):
@@ -1111,12 +1119,31 @@ class TraeAdapter(PlatformAdapter):
                     if self._cool_down(uid, exc, channel):
                         break
                     raise
+                except BaseException:
+                    # 取消 / 非 PlatformError 的意外异常：同样要把名额还回去。
+                    release()
+                    raise
                 if channel != preferred:
                     self._routes[model] = channel
                 self._last_used[uid] = time.time()
                 # 换号成功后改绑：否则这个会话每轮都会先撞一次坏号。
                 if affinity:
                     self._affinity.bind(affinity, uid)
+                if result.stream is None:
+                    release()
+                    return result
+                # 流式：名额要占到流关闭。把释放挂在外层 closer 上，客户端断开
+                # （`PlatformChat.aclose`）也会走到。
+                inner = result.closer
+
+                async def closer() -> None:
+                    try:
+                        if inner is not None:
+                            await inner()
+                    finally:
+                        release()
+
+                result.closer = closer
                 return result
         # 试过的号都不可用：解绑，下一轮重新按权重选，不继续撞同一个坏号。
         if affinity:
@@ -1129,13 +1156,13 @@ class TraeAdapter(PlatformAdapter):
                             concurrency=None) -> dict:
         """只改调度参数，不动凭据。
 
-        单账号并发上限**不支持**：并发是平台池级的（`platforms.trae.max_in_flight`）。
-        给每个账号各设一个数字在账号很多时等于没有上限，而且与 WorkBuddy 的
-        `pool.max_in_flight` 语义不一致。
+        并发是**平台设置里的「单账号并发」**（`platforms.trae.max_in_flight`），
+        对所有账号同样生效；不提供逐账号的并发覆盖——同一个数字才是「保护
+        每个账号」的口径，逐账号填写只会让配置散落在几十个文件里。
         """
         if concurrency is not None:
             raise PlatformError(
-                'Trae 只支持平台池级并发上限，不支持单账号并发',
+                'Trae 的并发在「平台设置」里按单账号统一配置，不支持逐账号设置',
                 status=400, code='unsupported_option')
         if weight is None:
             raise PlatformError('没有要修改的项', status=400, code='nothing_to_update')
@@ -1181,7 +1208,7 @@ class TraeAdapter(PlatformAdapter):
                                 code='invalid_cooling') from exc
 
     def invalidate_limit(self) -> None:
-        """池级上限改了之后立刻生效，不用等 5 秒缓存。"""
+        """单账号并发上限改了之后立刻生效，不用等 5 秒缓存。"""
         self._limiter.invalidate()
 
     # ── 每请求实扣积分（面板「实扣积分模式」/ TF_TRAE_CREDIT_METER）──

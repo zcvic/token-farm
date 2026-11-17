@@ -167,7 +167,7 @@ registry.register(FooAdapter())
 | GET | `/api/platforms/{name}/accounts/{id}/usage` | 额度快照 |
 | POST | `/api/platforms/{name}/accounts/{id}/checkin` | 单个签到 |
 | POST | `/api/platforms/{name}/checkin-all` | 批量签到（并发与账号间隔按平台设置，默认并发 2、间隔 2–5 秒；单条失败不中断；跳过已冻结账号） |
-| GET | `/api/platforms/{name}/settings` | 平台设置：池级在途上限 + 批量签到节奏 + 请求超时 / 换号次数 / 平台专属开关（会话亲和、桌面端回写） |
+| GET | `/api/platforms/{name}/settings` | 平台设置：单账号在途上限（总吞吐按可用账号数折算）+ 批量签到节奏 + 请求超时 / 换号次数 / 平台专属开关（会话亲和、桌面端回写） |
 | PUT | `/api/platforms/{name}/settings` | 改上述设置（可只提交要改的字段；不支持的字段会 400） |
 | PATCH | `/api/platforms/{name}/accounts/{id}` | 账号调度参数（`weight` / `disabled`） |
 | POST | `/api/platforms/{name}/accounts/{id}/cooling` | 强制冷却（定时 / 永久） |

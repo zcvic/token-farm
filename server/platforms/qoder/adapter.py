@@ -106,7 +106,9 @@ class QoderAdapter(PlatformAdapter):
 
     def __init__(self, client: QoderClient | None = None) -> None:
         self.client = client or QoderClient()
-        self._limiter = PoolLimiter(self.name)
+        # Qoder 的账号由内置网关自己选，适配器拿不到「本次用了哪个账号」，
+        # 所以总闸门 = 单账号上限 × 可用账号数（见 limiter.PoolLimiter）。
+        self._limiter = PoolLimiter(self.name, scale=self._usable_accounts)
         self._models: list[dict] = []
         self._models_at = 0.0
         self._models_error: PlatformError | None = None
@@ -115,6 +117,9 @@ class QoderAdapter(PlatformAdapter):
         self._accounts_at = 0.0
         self._accounts_error: PlatformError | None = None
         self._accounts_error_at = 0.0
+        # 「可用账号数」缓存：供并发闸门折算总上限，最多 5 秒刷新一次。
+        self._usable_count = 0
+        self._usable_at = 0.0
 
     # ── 账号快照 ────────────────────────────────────────────
     def has_accounts_hint(self) -> bool:
@@ -140,6 +145,9 @@ class QoderAdapter(PlatformAdapter):
         self._accounts_at = 0.0
         self._accounts_error = None
         self._accounts_error_at = 0.0
+        # 账号增删 / 停用后总闸门的折算基数也要重算。
+        self._usable_count = 0
+        self._usable_at = 0.0
 
     def _accounts_snapshot(self, max_age: float = 0) -> list[dict]:
         """网关账号列表；`max_age` > 0 时允许复用短缓存（批量积分查询用）。
@@ -166,6 +174,45 @@ class QoderAdapter(PlatformAdapter):
         self._accounts = data
         self._accounts_at = time.time()
         return data
+
+    def _usable_accounts(self) -> int:
+        """参与调度的账号数：单账号并发 × 它 = Qoder 的总在途上限。
+
+        内置网关自己选号，适配器拿不到「本次用了哪个账号」，所以只能按可用
+        账号数**折算总闸门**。这里**只读缓存**、不碰网络：真正的刷新在
+        `_refresh_usable_accounts` 里用线程跑，避免把本机网关的往返塞进事件
+        循环。还没算过时按 1 个账号算——总上限退化成单账号上限，至少不会因为
+        读不到账号数而变成「不限」。
+        """
+        return self._usable_count or 1
+
+    async def _refresh_usable_accounts(self) -> None:
+        """刷新「可用账号数」缓存（最多 5 秒一次，线程里读网关）。
+
+        停用 / 冷却中的账号不算（网关也不会选它们）。网关没起来时保持旧值
+        （首次为 0 → `_usable_accounts` 按 1 算），不因为一次失败把闸门放宽。
+        """
+        # 不限并发时不需要账号数：跳过本机网关往返（默认就是这一档）。
+        if self._limiter.per_account() <= 0:
+            return
+        now = time.time()
+        if self._usable_at and now - self._usable_at < _ACCOUNTS_TTL:
+            return
+        try:
+            accounts = await asyncio.to_thread(
+                self._accounts_snapshot, _ACCOUNTS_TTL)
+        except Exception:  # noqa: BLE001 —— 网关没起来时按单账号上限执行
+            self._usable_at = now
+            return
+        count = 0
+        for account in accounts:
+            if account.get('enabled') is False or account.get('inCooldown'):
+                continue
+            if account.get('hasRefreshToken') or account.get('hasPAT') \
+                    or account.get('expiresAt'):
+                count += 1
+        self._usable_count = max(1, count)
+        self._usable_at = now
 
     def _require(self, account_id: str) -> dict:
         target = str(account_id or '')
@@ -296,8 +343,9 @@ class QoderAdapter(PlatformAdapter):
     def set_account_options(self, account_id: str, *, weight=None) -> dict:
         """修改账号权重（Qoder 网关的 `/accounts/weight`）。
 
-        Qoder 目前只支持这一个调度参数：并发上限由网关整池控制，不像 Trae
-        有按账号的 in-flight 概念。`weight` 传 0 = 恢复默认 1.0。
+        Qoder 目前只支持这一个调度参数：并发在平台设置里按单账号统一配置，
+        由「单账号上限 × 可用账号数」折算成整池总闸门（内置网关自己选号，
+        适配器无法逐账号计数）。`weight` 传 0 = 恢复默认 1.0。
         """
         if weight is None:
             raise PlatformError('没有要修改的项', status=400,
@@ -441,10 +489,13 @@ class QoderAdapter(PlatformAdapter):
     # ── 对话 ────────────────────────────────────────────────
     async def chat(self, model: str, body: dict,
                    ctx: ChatContext | None = None) -> PlatformChat:
+        # 总闸门 = 单账号上限 × 可用账号数：网关自己选号，这里无法按单个账号
+        # 占位（见 limiter.PoolLimiter 的说明）。
+        await self._refresh_usable_accounts()
         lease = await self._limiter.acquire()
         if lease is False:
             raise PlatformError(
-                'Qoder 并发已满（平台池级上限），请稍后重试',
+                'Qoder 并发已满（单账号并发 × 可用账号数），请稍后重试',
                 status=429, code='pool_busy', retry_after=1)
         released = False
 
@@ -564,6 +615,7 @@ class QoderAdapter(PlatformAdapter):
 
     # ── 平台设置 ────────────────────────────────────────────
     def invalidate_limit(self) -> None:
+        """单账号并发上限改了之后立刻生效，不用等 5 秒缓存。"""
         self._limiter.invalidate()
 
 

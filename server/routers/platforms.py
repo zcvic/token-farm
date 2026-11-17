@@ -165,7 +165,7 @@ async def model_catalog(user: dict = Depends(security.current_user)) -> dict:
     return {'platforms': out}
 
 
-# ── 平台设置（池级并发上限 / 签到节奏）────────────────────
+# ── 平台设置（单账号并发上限 / 签到节奏）──────────────────
 def _settings_payload(name: str) -> dict:
     return {
         'platform': name,
@@ -181,7 +181,7 @@ def _settings_payload(name: str) -> dict:
 @router.get('/{name}/settings')
 def platform_settings(name: str,
                       user: dict = Depends(security.current_user)) -> dict:
-    """平台级设置：在途请求上限 + 批量签到节奏 + 单次请求预算 / 平台开关。"""
+    """平台级设置：单账号在途请求上限 + 批量签到节奏 + 单次请求预算 / 平台开关。"""
     _adapter(name)
     return _settings_payload(name)
 
@@ -189,7 +189,7 @@ def platform_settings(name: str,
 @router.put('/{name}/settings')
 def save_platform_settings(name: str, body: dict = Body(...),
                            user: dict = Depends(security.require_admin)) -> dict:
-    """改平台设置（池级并发 / 签到节奏 / 超时与换号 / 平台专属开关）。
+    """改平台设置（单账号并发 / 签到节奏 / 超时与换号 / 平台专属开关）。
 
     各部分可以分开提交：界面改签到节奏时不必把 `max_in_flight` 一起带上。
     保存后立刻让适配器丢掉缓存的信号量（`invalidate_limit`）：否则新上限要等

@@ -191,11 +191,11 @@ export function PlatformAccountsPanel({
     [accounts, realm, realmAware],
   );
 
-  // ── 平台调度：池级并发上限 ────────────────────────────
+  // ── 平台调度：单账号并发上限 ──────────────────────────
   //
-  // 只做「池级」：一个平台上所有账号合计的在途上限。账号级并发**不提供**——
-  // 上游没有这个字段，而账号一多，每号一个数字等于没有上限（见后端
-  // `platforms/limiter.py`）。
+  // 一个数字，按**账号**生效：每个账号最多同时跑几个上游请求，0 = 不限。
+  // 总吞吐随账号数增长（Trae 严格按账号占位；Qoder 由内置网关选号，按
+  // 「上限 × 可用账号数」折算总闸门，见后端 `platforms/limiter.py`）。
   const [pool, setPool] = useState<PlatformSettings | null>(null);
   const [poolDraft, setPoolDraft] = useState('');
   const [poolBusy, setPoolBusy] = useState(false);
@@ -203,7 +203,7 @@ export function PlatformAccountsPanel({
   /**
    * 批量签到的节奏（并发 + 账号间隔）。
    *
-   * 与上面的池级并发是两个口径：那个限制推理请求的在途数，这个决定「全部
+   * 与上面的单账号并发是两个口径：那个限制推理请求的在途数，这个决定「全部
    * 签到」时几个账号同时跑、相邻两个账号隔多久开始。默认并发 2、间隔 2–5
    * 秒；间隔填 0 = 不间隔。
    */
@@ -782,8 +782,8 @@ export function PlatformAccountsPanel({
             </Badge>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
-            {/* 池级并发：一个平台上所有账号合计的在途上限（0 = 不限）。
-                非管理员只读展示——它影响的是全局吞吐，不是单个账号的开关。 */}
+            {/* 单账号并发：每个账号最多几个在途请求（0 = 不限）。
+                非管理员只读展示——它影响的是整体吞吐，不是单个账号的开关。 */}
             {pool && (
               <label
                 className="flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground"

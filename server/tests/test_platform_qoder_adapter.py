@@ -565,6 +565,42 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(body['model'], 'Qwen3.8-Max')
         self.assertIsNone(realm)
 
+    def test_usable_accounts_defaults_to_one(self) -> None:
+        """还没算过账号数时按 1 个算：总上限退化成单账号上限，不能变成不限。"""
+        self.assertEqual(self.adapter._usable_accounts(), 1)
+
+    def test_usable_accounts_counts_only_schedulable_accounts(self) -> None:
+        """停用 / 冷却中的账号网关不会选，不能算进并发折算基数。"""
+        self.client.accounts = [
+            _raw_account(uid='u-1'),
+            _raw_account(uid='u-2', hasRefreshToken=False, hasPAT=True),
+            _raw_account(uid='u-3', enabled=False),
+            _raw_account(uid='u-4', inCooldown=True),
+        ]
+        with mock.patch.object(self.adapter._limiter, 'per_account',
+                               return_value=2):
+            asyncio.run(self.adapter._refresh_usable_accounts())
+            # 单账号上限 2 × 可用账号 2 = 整池总闸门 4。
+            self.assertEqual(self.adapter._usable_accounts(), 2)
+            self.assertEqual(self.adapter._limiter.limit(), 4)
+
+    def test_unlimited_limit_skips_gateway_roundtrip(self) -> None:
+        """默认「不限」时不该为了折算总闸门去打本机网关。"""
+        with mock.patch.object(self.adapter._limiter, 'per_account',
+                               return_value=0):
+            asyncio.run(self.adapter._refresh_usable_accounts())
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.adapter._usable_accounts(), 1)
+
+    def test_gateway_failure_keeps_previous_account_count(self) -> None:
+        """网关抖一下不能把闸门放宽：保留旧基数，首次失败则按 1 个算。"""
+        self.adapter._usable_count = 3
+        self.client.list_accounts_error = PlatformError('网关不可达', status=502)
+        with mock.patch.object(self.adapter._limiter, 'per_account',
+                               return_value=2):
+            asyncio.run(self.adapter._refresh_usable_accounts())
+        self.assertEqual(self.adapter._usable_accounts(), 3)
+
     def test_chat_stream_error_frame_raises(self) -> None:
         self.client.stream_lines = [
             'data: {"error":{"message":"quota exceeded","code":"quota"}}']

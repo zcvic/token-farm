@@ -48,11 +48,11 @@ import type {
  * 切换换内容，比让用户记住「WorkBuddy 在这个 Tab、其它平台在另一个 Tab」更顺。
  *
  * 与账号页标题栏里那几个内联输入框的关系：那几项仍然能改（它们在同一份设置
- * 接口上），这里提供的是**完整视图**——池级并发、签到节奏、请求预算与平台
+ * 接口上），这里提供的是**完整视图**——单账号并发、签到节奏、请求预算与平台
  * 专属开关放在一起，并且有明确的保存 / 撤销。两边改的是同一份数据。
  */
 /**
- * 表单里的数值键：平台的数值参数 + 池级并发 / 签到节奏。
+ * 表单里的数值键：平台的数值参数 + 单账号并发 / 签到节奏。
  *
  * 后四个属于别的模块（`limiter.py` / `checkinpacing.py`），不在
  * `PlatformNumericField` 里，但它们同一张表单、同一套「字符串 + 校验」流程。
@@ -402,7 +402,7 @@ export function PlatformConfigPanel({
         )}
       </div>
 
-      {/* ── 调度：池级并发 + 签到节奏 ── */}
+      {/* ── 调度：单账号并发 + 签到节奏 ── */}
       <section className="rounded-[20px] bg-muted p-4">
         <div className="mb-3 flex items-center gap-2">
           <Gauge className="h-3.5 w-3.5 text-muted-foreground" />

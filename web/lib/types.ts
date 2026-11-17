@@ -2181,11 +2181,11 @@ export interface PlatformUsage {
  * 平台的调度设置（`/api/platforms/{name}/settings`）。
  *
  * 两组口径互不相干：
- *   · `max_in_flight` —— **池级**推理并发（所有账号合计的在途请求上限，0 = 不限）；
+ *   · `max_in_flight` —— **单账号**推理并发（每个账号最多几个在途请求，0 = 不限）；
+ *     总吞吐 = 该上限 × 可用账号数。Trae 严格按账号占位；Qoder 由内置网关
+ *     选号，按「单账号上限 × 可用账号数」折算成整池总闸门。
  *   · `checkin_*` —— **批量签到**节奏：同时签到的账号数 + 相邻两个账号开始
  *     签到之间的随机间隔（秒，0 = 不间隔）。
- *
- * 不做账号级推理并发——上游没有这个字段，而账号一多，每号一个数字等于没有上限。
  */
 
 /** 数值型运行参数：与后端 `platforms/settings.py` 的 `_INT_FIELDS` 同名同口径。 */
@@ -2220,6 +2220,7 @@ export type PlatformSettingField =
 
 export interface PlatformSettings {
   platform: string;
+  /** 每个账号的在途请求上限（0 = 不限）；总量 = 该值 × 可用账号数 */
   max_in_flight: number;
   limits: {min: number; max: number};
   /** 同时进行签到的账号数（默认 2） */

@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from server import config, db  # noqa: E402
 from server.platforms import settings as runtime_settings  # noqa: E402
-from server.platforms.base import PlatformError  # noqa: E402
+from server.platforms.base import PlatformChat, PlatformError  # noqa: E402
 from server.platforms.qoder import embedded as qoder_embedded  # noqa: E402
 from server.platforms.trae import chat as trae_chat  # noqa: E402
 from server.platforms.trae import client as trae_client  # noqa: E402
@@ -273,7 +273,8 @@ class TraeWiringTest(_DbCase):
              mock.patch.object(self.adapter, '_ensure_token',
                                mock.AsyncMock(side_effect=lambda a: a)), \
              mock.patch.object(self.adapter, '_chat_once',
-                               mock.AsyncMock(return_value='ok')) as chat_once:
+                               mock.AsyncMock(return_value=PlatformChat(
+                                   payload={'ok': True}))) as chat_once:
             result = asyncio.run(self.adapter._chat_accounts('m', body))
         return result, candidates, chat_once
 
@@ -282,7 +283,7 @@ class TraeWiringTest(_DbCase):
                                        'idle_timeout': 30,
                                        'max_accounts_try': 1})
         result, _, chat_once = self._run_chat({'prompt_cache_key': 's1'})
-        self.assertEqual(result, 'ok')
+        self.assertEqual(result.payload, {'ok': True})
         kwargs = chat_once.call_args.kwargs
         self.assertEqual(kwargs['request_timeout'], 120)
         self.assertEqual(kwargs['idle_timeout'], 30)
@@ -479,7 +480,8 @@ class TraeCooldownTest(_DbCase):
                          {'uid': 'u2', 'realm': 'cn'}]
 
     def _run(self, exc: Exception):
-        chat_once = mock.AsyncMock(side_effect=[exc, 'ok'])
+        chat_once = mock.AsyncMock(side_effect=[
+            exc, PlatformChat(payload={'ok': True})])
         with mock.patch.object(self.adapter, '_candidates',
                                return_value=self.accounts), \
              mock.patch.object(self.adapter, '_ensure_token',
@@ -501,7 +503,7 @@ class TraeCooldownTest(_DbCase):
         runtime_settings.save('trae', {'cooldown_429': 90})
         out, cooling = self._run(
             PlatformError('limited', status=429, code='rate_limited'))
-        self.assertEqual(out, 'ok')
+        self.assertEqual(out.payload, {'ok': True})
         cooling.assert_called_once()
         uid, until, reason = cooling.call_args.args
         self.assertEqual(uid, 'u1')
@@ -512,7 +514,7 @@ class TraeCooldownTest(_DbCase):
         runtime_settings.save('trae', {'cooldown_5xx': 30})
         out, cooling = self._run(
             PlatformError('boom', status=503, code='upstream_error'))
-        self.assertEqual(out, 'ok')
+        self.assertEqual(out.payload, {'ok': True})
         cooling.assert_called_once()
         self.assertAlmostEqual(cooling.call_args.args[1] - time.time(), 30,
                                delta=10)
