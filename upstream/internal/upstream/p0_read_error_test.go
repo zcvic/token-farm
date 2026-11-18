@@ -96,7 +96,7 @@ func TestChatStreamReadErrorNotClassified(t *testing.T) {
 		return readErrResp(500, `{"code":0,"msg":"rate limit quota`), nil
 	})
 	rc, status, respBody, terr := c.ChatStreamContext(context.Background(),
-		&auth.Auth{AccessToken: "at"}, []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-read-err"})
+		&auth.Auth{AccessToken: "at"}, []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-read-err"}, nil)
 	if terr == nil {
 		t.Fatalf("want transport error on mid-body read failure, got nil (status=%d body=%q)", status, respBody)
 	}
@@ -155,7 +155,7 @@ func TestChatStreamContextSinglePathNoPanic(t *testing.T) {
 		}, nil
 	})
 	rc, status, _, err := c.ChatStreamContext(context.Background(),
-		&auth.Auth{AccessToken: "at"}, []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-p01-a"})
+		&auth.Auth{AccessToken: "at"}, []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-p01-a"}, nil)
 	if err != nil || status != 200 {
 		t.Fatalf("status=%d err=%v", status, err)
 	}
@@ -187,7 +187,7 @@ func TestChatStreamContextFallbackCancelsEachAttempt(t *testing.T) {
 	c.IdleTimeout = time.Second
 
 	_, status, _, err := c.ChatStreamContext(context.Background(),
-		globalAuth(), []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-p01-b"})
+		globalAuth(), []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-p01-b"}, nil)
 	var ue *Error
 	if !errors.As(err, &ue) || ue.Kind != ErrNotFound || status != 404 {
 		t.Fatalf("chat 404: want status=404 + *Error{not_found}, got status=%d err=%v", status, err)
@@ -217,7 +217,7 @@ func TestChatStreamContextCompileGuarantee(t *testing.T) {
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
 
 	_, status, _, err := c.ChatStreamContext(context.Background(),
-		globalAuth(), []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-p01-c"})
+		globalAuth(), []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-p01-c"}, nil)
 	// 404 错误路径现在返回已分类 *Error（Kind=ErrNotFound）；旧「不可达代码返回
 	// (nil,0,nil,nil) 吞错」的形态是 status=0 + err=nil，二者均不再出现。
 	var ue *Error

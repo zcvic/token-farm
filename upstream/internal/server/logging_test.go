@@ -199,7 +199,7 @@ func TestUIDPrefix(t *testing.T) {
 func TestLogChatRowFormat(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4.1-flash", "stream", "00e26541abcdef", "sample", http.StatusOK, 1234)
+		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4.1-flash", "stream", "00e26541abcdef", "sample", http.StatusOK, 1234, 0, 0)
 	})
 	for _, want := range []string{
 		"| #", "deepseek-v4.1-flash", "| stream |", "| 200 |", "sample(00e26541)", "TTFB=412ms", "tok=1234", "tok/s", "total=",
@@ -211,6 +211,22 @@ func TestLogChatRowFormat(t *testing.T) {
 	if strings.Contains(out, "00e26541abcdef") {
 		t.Errorf("full uid leaked: %s", out)
 	}
+	// 未测量分段耗时 → 不出现 prep/do 尾段（旧行格式不变）。
+	if strings.Contains(out, "prep=") || strings.Contains(out, "do=") {
+		t.Errorf("未测量却输出了分段耗时:\n%s", out)
+	}
+}
+
+// 分段耗时（见 upstream.ChatTiming）：测量过才追加，并把 TTFB 拆成两段。
+func TestLogChatRowShowsPrepDo(t *testing.T) {
+	withChatLog(t)
+	out := captureStdout(t, func() {
+		logChatRow(1200*time.Millisecond, 8*time.Second, "deepseek-v4.1-flash", "stream", "00e26541abcdef", "sample",
+			http.StatusOK, 1450, 15*time.Millisecond, 1400*time.Millisecond)
+	})
+	if !strings.Contains(out, "prep=15ms do=1400ms") {
+		t.Errorf("row missing prep/do split:\n%s", out)
+	}
 }
 
 // TestLogChatRowModelNotTruncated 守护模型名不再被截断。
@@ -220,7 +236,7 @@ func TestLogChatRowModelNotTruncated(t *testing.T) {
 	withChatLog(t)
 	for _, model := range []string{"cn:deepseek-v4.1-flash", "global:deepseek-v4.1-flash"} {
 		out := captureStdout(t, func() {
-			logChatRow(0, time.Second, model, "stream", "00e26541abcdef", "sample", http.StatusOK, 1)
+			logChatRow(0, time.Second, model, "stream", "00e26541abcdef", "sample", http.StatusOK, 1, 0, 0)
 		})
 		if !strings.Contains(out, model) {
 			t.Errorf("model %q truncated to something else:\n%s", model, out)
@@ -232,7 +248,7 @@ func TestLogChatRowModelNotTruncated(t *testing.T) {
 func TestLogChatRowNicknameFallback(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "00e26541abcdef", "", http.StatusOK, 1)
+		logChatRow(0, time.Second, "glm-5.2", "sync", "00e26541abcdef", "", http.StatusOK, 1, 0, 0)
 	})
 	if !strings.Contains(out, "00e26541 ") && !strings.Contains(out, "00e26541|") {
 		t.Errorf("want bare uid8 label without nickname:\n%s", out)
@@ -245,7 +261,7 @@ func TestLogChatRowNicknameFallback(t *testing.T) {
 func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1)
+		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1, 0, 0)
 	})
 	for _, want := range []string{"TTFB=-", "tok=-", "| 503 |"} {
 		if !strings.Contains(out, want) {
@@ -261,8 +277,8 @@ func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 func TestLogChatRowSeqIncrements(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
+		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1, 0, 0)
+		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1, 0, 0)
 	})
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 2 {

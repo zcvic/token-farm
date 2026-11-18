@@ -1401,7 +1401,7 @@ func IsChannelCheck(body string) bool {
 // 路径（含 WAF 特征中和，见 issue #119 / pr162-review.md）。本注释即"坏了再说"的锚点。
 // cn：/v2/chat/completions 现状不变。
 func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	return c.ChatStreamContext(context.Background(), a, body, clientIP, meta)
+	return c.ChatStreamContext(context.Background(), a, body, clientIP, meta, nil)
 }
 
 // ChatStreamContext 同 ChatStream，但从 ctx 派生请求 context：调用方（handler）传入
@@ -1414,10 +1414,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta Cha
 // 网关再分类一次」的双路径漂移面），Retry-After 也随信封流动。respBody 仍原样
 // 返回（错误透传语义 5755fe3：message 透传上游原文）。判定为 ErrNone 的响应
 // （理论上不存在，防御）err 为 nil，handler 按 respBody 自行兜底。
-func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byte, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
+//
+// timing 为可选分段耗时出参（nil = 零开销、零行为变化）：Prep 记本地请求体准备，
+// Do 记上游往返并在路径 fallback 时逐次累加，供日志把 TTFB 拆开归因（见 timing.go）。
+func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byte, clientIP string, meta ChatMeta, timing *ChatTiming) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	prepStart := time.Now()
 	// ensureConsoleSystem 在 prepareBody 后统一套用全局脚本：首条消息非 system 时前置
 	// 兜底 system（防 console 域上游 code 11-128；#119 后 global 出站固定 /v2，
 	// 该兜底保留——上游对 /v2 是否需要 system 无实测反证，删了无回滚路径）。
@@ -1438,6 +1442,11 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// 请求体压缩（issue #297）：>64KB 才压；Compressed 为空表示未压缩。
 	// 这里算一次、循环内复用：路径回落（/v2 → /console）不需要重新压。
 	outBody, contentEncoding := c.outboundBody(prepared)
+	// 本地准备到此结束（压缩也算本地 CPU）：Prep 只覆盖进 handler 到能发请求这一段，
+	// 剩下的时间都归 Do，日志里两段相加 + 选号等待 ≈ TTFB。
+	if timing != nil {
+		timing.Prep += time.Since(prepStart)
+	}
 	// gzipRetried 防止「压缩版失败 → 未压缩重试」再次进入同一分支。
 	gzipRetried := false
 	// channelRetried 渠道校验命中且已无备用路径时，允许**原样重发一次**
@@ -1465,7 +1474,11 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
+		doStart := time.Now()
 		resp, err := chatClient.Do(req)
+		if timing != nil {
+			timing.Do += time.Since(doStart)
+		}
 		if err != nil {
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)

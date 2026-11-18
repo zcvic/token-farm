@@ -32,6 +32,10 @@ type chatStat struct {
 	toks   int // <0 表示 usage 缺失 → 显示 "-"
 	status int
 
+	// 上游调用分段耗时（见 upstream.ChatTiming）：prep 本地准备、do 上游往返。
+	// 零值 = 未测量（非流式 / 还没走到上游），日志里不输出该段。
+	prep, do time.Duration
+
 	// metrics 采集字段（供 /v1/stats 聚合）：全部来自上游 usage，缺失时保持零值
 	// 并由 hasUsage 区分「缺观测」与「显式 0」——与成本账本同一纪律。
 	hasUsage  bool
@@ -64,7 +68,7 @@ func (s *chatStat) done() {
 	}
 	s.logged = true
 	total := time.Since(s.start)
-	logChatRow(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks)
+	logChatRow(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks, s.prep, s.do)
 	recordChatMetric(s, total)
 }
 
@@ -244,7 +248,9 @@ const (
 //   - uid/nick：完整 uid 与账号昵称，经 logfmt.Label 拼成 "昵称(uid8)" 展示——只有
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
-func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
+//   - prep/do 为上游调用分段耗时（见 upstream.ChatTiming）：两段都为 0 表示没测量
+//     （非流式 / 没走到上游），此时旧行格式逐字节不变。
+func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int, prep, do time.Duration) {
 	if !chatLogEnabled {
 		return
 	}
@@ -266,7 +272,12 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 	if ttfb > 0 {
 		ttfbMS = fmt.Sprintf("%dms", ttfb.Milliseconds())
 	}
-	fmt.Fprintf(os.Stdout, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |\n",
+	// 分段耗时尾段：只在本跳真测量过时输出，非流式/未走到上游保持旧行格式。
+	split := ""
+	if prep > 0 || do > 0 {
+		split = fmt.Sprintf(" prep=%dms do=%dms", prep.Milliseconds(), do.Milliseconds())
+	}
+	fmt.Fprintf(os.Stdout, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |%s\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
@@ -277,5 +288,6 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status
 		logfmt.Pad(tokField, chatTokWidth),
 		logfmt.Pad(tokpsField, chatRateWidth),
 		total.Seconds(),
+		split,
 	)
 }

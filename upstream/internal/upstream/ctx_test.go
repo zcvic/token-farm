@@ -34,7 +34,7 @@ func TestChatStreamContextCancelPropagates(t *testing.T) {
 	c.IdleTimeout = 5 * time.Second // 足够大:若只靠 idle 掐流则测试会变慢/超时
 
 	ctx, cancel := context.WithCancel(context.Background())
-	rc, status, _, err := c.ChatStreamContext(ctx, &auth.Auth{AccessToken: "at"}, []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-ctx-test"})
+	rc, status, _, err := c.ChatStreamContext(ctx, &auth.Auth{AccessToken: "at"}, []byte(`{"model":"m"}`), "", ChatMeta{ConversationRequestID: "req-ctx-test"}, nil)
 	if err != nil || status != 200 {
 		t.Fatalf("ChatStreamContext: status=%d err=%v", status, err)
 	}
@@ -73,7 +73,7 @@ func TestChatStreamContextNilFallback(t *testing.T) {
 		}, nil
 	})
 	// 传 nil ctx(显式断言不 panic 且正常返回)。
-	rc, status, _, err := c.ChatStreamContext(nil, &auth.Auth{AccessToken: "at"}, []byte(`{}`), "", ChatMeta{ConversationRequestID: "req-nil-ctx"})
+	rc, status, _, err := c.ChatStreamContext(nil, &auth.Auth{AccessToken: "at"}, []byte(`{}`), "", ChatMeta{ConversationRequestID: "req-nil-ctx"}, nil)
 	if err != nil || status != 200 {
 		t.Fatalf("nil ctx: status=%d err=%v", status, err)
 	}
