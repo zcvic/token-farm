@@ -824,5 +824,104 @@ class ToolResultImageTest(unittest.TestCase):
         self.assertTrue(url.startswith('data:image/png;base64,'))
 
 
+class ThinkTagSplitTest(unittest.TestCase):
+    """上游漏进正文的 `<think:SUF>` 标签（issue #194）。
+
+    reasoning parser 偶发把整段 CoT 当 content 下发：usage 里
+    `reasoning_tokens=0`，正文首尾却带模型控制 token。拆分只在 content **以**
+    `<think:` 开头时启用——正文中间提到这几个字不能重写。
+    """
+
+    @staticmethod
+    def _blocks(events: list[bytes]) -> tuple[str, str, list[str]]:
+        """收出 (思考全文, 正文全文, text_delta 片段) —— 只关心内容，不关心块结构。"""
+        think, text, chunks = '', '', []
+        for name, payload in _parse(events):
+            if name != 'content_block_delta':
+                continue
+            delta = payload.get('delta') or {}
+            if delta.get('type') == 'thinking_delta':
+                think += delta.get('thinking') or ''
+            elif delta.get('type') == 'text_delta':
+                text += delta.get('text') or ''
+                chunks.append(delta.get('text') or '')
+        return think, text, chunks
+
+    def test_nonstream_split_into_thinking_and_text(self) -> None:
+        out = to_anthropic_response({
+            'choices': [{'message': {
+                'role': 'assistant',
+                'content': '<think:6124c78e>先想一下</think:6124c78e>答案在这里',
+            }, 'finish_reason': 'stop'}],
+        }, 'm', thinking=True)
+        blocks = out['content']
+        self.assertEqual(blocks[0]['type'], 'thinking')
+        self.assertEqual(blocks[0]['thinking'], '先想一下')
+        self.assertEqual(blocks[1], {'type': 'text', 'text': '答案在这里'})
+        self.assertNotIn('<think:', blocks[1]['text'], '控制 token 不得出现在正文')
+
+    def test_nonstream_merges_upstream_reasoning_first(self) -> None:
+        """reasoning_content 与内联 CoT 归到同一个 thinking 块，上游那段在前。"""
+        out = to_anthropic_response({
+            'choices': [{'message': {
+                'role': 'assistant',
+                'reasoning_content': '上游思考',
+                'content': '<think:x>内联补充</think:x>正文',
+            }}],
+        }, 'm', thinking=True)
+        self.assertEqual(out['content'][0]['thinking'], '上游思考内联补充')
+        self.assertEqual(out['content'][1]['text'], '正文')
+
+    def test_nonstream_middle_mention_not_rewritten(self) -> None:
+        """只有**开头**是标签才拆：正文中间聊到这几个字保持原样。"""
+        raw = '文档里写了 <think:x> 这种标记，但这不是思考'
+        out = to_anthropic_response({
+            'choices': [{'message': {'role': 'assistant', 'content': raw}}],
+        }, 'm', thinking=True)
+        self.assertEqual(out['content'], [{'type': 'text', 'text': raw}])
+
+    def test_stream_split_across_chunks(self) -> None:
+        t = _StreamTranslator('m', thinking=True)
+        events: list[bytes] = []
+        for piece in ('<thi', 'nk:', 'SUF>思', '考</think:', 'SUF>正', '文'):
+            events += t.feed({'choices': [{'delta': {'content': piece}}]})
+        events += t.finish('stop')
+        think, text, chunks = self._blocks(events)
+        self.assertEqual(think, '思考')
+        self.assertEqual(text, '正文')
+        self.assertFalse(any('<think:' in c for c in chunks),
+                         f'控制 token 漏进了 text_delta: {chunks}')
+
+    def test_stream_without_thinking_drops_cot_keeps_body(self) -> None:
+        """未启用思考的客户端不显示 CoT（与 reasoning_content 同一口径），正文照常。"""
+        t = _StreamTranslator('m')
+        events = t.feed({'choices': [{'delta': {
+            'content': '<think:x>内心戏</think:x>外面的话'}}]})
+        events += t.finish('stop')
+        think, text, _ = self._blocks(events)
+        self.assertEqual(think, '', '没请求思考却回了 thinking 块')
+        self.assertEqual(text, '外面的话')
+
+    def test_stream_unclosed_tag_flushed_at_finish(self) -> None:
+        """流在上游截断处结束时，压着的 CoT 不能丢。"""
+        t = _StreamTranslator('m', thinking=True)
+        events = t.feed({'choices': [{'delta': {'content': '<think:a>没闭合'}}]})
+        events += t.finish('length')
+        think, text, _ = self._blocks(events)
+        self.assertEqual(think, '没闭合')
+        self.assertEqual(text, '')
+
+    def test_stream_partial_prefix_becomes_text_on_flush(self) -> None:
+        """只收到 `<thi` 就结束：不是标签，按正文发出去，不能静默丢字。"""
+        t = _StreamTranslator('m', thinking=True)
+        events = t.feed({'choices': [{'delta': {'content': '<thi'}}]})
+        self.assertEqual([n for n, _ in _parse(events) if n.startswith('content_block_')], [],
+                         '半个标签前缀不该提前当正文发')
+        events += t.finish('stop')
+        think, text, _ = self._blocks(events)
+        self.assertEqual(think, '')
+        self.assertEqual(text, '<thi')
+
+
 if __name__ == '__main__':
     unittest.main()

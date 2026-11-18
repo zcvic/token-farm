@@ -705,6 +705,121 @@ def _reasoning_effort(body: dict) -> str | None:
     return effort
 
 
+# 上游思考控制 token 的两种形态（hy4 的 vLLM reasoning parser 用 <think:SUF> /
+# </think:SUF>，SUF 是模型的 checkpoint token 后缀，不是请求 id）。与 Go 侧
+# upstream/thinktag.go 同一口径。
+_THINK_OPEN = '<think:'
+_THINK_CLOSE = '</think:'
+
+
+class _ThinkTagSplitter:
+    """把漏进正文的 `<think:SUF>…</think:SUF>` 拆回思考与正文（issue #194）。
+
+    上游 reasoning parser 偶发把整段 CoT 当 content 下发：usage 里
+    `reasoning_tokens=0`，正文首尾却带模型自己的控制 token。Anthropic 客户端
+    只认 `content_block.type=thinking`，内联标签会被当成正文显示；聊天协议
+    客户端更糟——控制 token 与 CoT 一起混进回答。
+
+    **只在 content 以 `<think:` 开头时启用**：正文中间聊到这几个字不重写。
+    `suffix` 只认带冒号的 `<think:SUF>` 形态，不带冒号的裸 `<think>` 不处理。
+
+    流式时尾部可能压着半个标签，等下一片再判；流结束必须 `flush()`，否则
+    最后几个字符会丢。
+    """
+
+    def __init__(self) -> None:
+        self.decided = False   # 已判定这段 content 是否内联思考
+        self.on = False        # 启用摘除
+        self.in_tag = False    # 当前位置在标签内
+        self.pend = ''         # 尾部可能是半个标签，等下一片
+
+    def feed(self, s: str) -> tuple[str, str]:
+        """吃一片正文，返回本片里的 (思考, 正文)，各自按原顺序拼接。"""
+        if not s:
+            return '', ''
+        self.pend += s
+        if not self.decided:
+            # 开头还没看够：先等一片，别把 "<thi" 当正文发出去。
+            if len(self.pend) < len(_THINK_OPEN) and _THINK_OPEN.startswith(self.pend):
+                return '', ''
+            self.decided = True
+            self.on = self.pend.startswith(_THINK_OPEN)
+            if not self.on:
+                out, self.pend = self.pend, ''
+                return '', out
+        if not self.on:
+            out, self.pend = self.pend, ''
+            return '', out
+        return self._scan(flush=False)
+
+    def flush(self) -> tuple[str, str]:
+        """吐出尾部残留。流结束（或非流式一次吃完）时必须调用。"""
+        if not self.pend:
+            return '', ''
+        if not self.decided:
+            self.decided = True
+            self.on = self.pend.startswith(_THINK_OPEN)
+            if not self.on:
+                out, self.pend = self.pend, ''
+                return '', out
+        if not self.on:
+            out, self.pend = self.pend, ''
+            return '', out
+        return self._scan(flush=True)
+
+    def _scan(self, *, flush: bool) -> tuple[str, str]:
+        """消费 `pend`；flush=False 时把可能是半个标签的尾巴留到下一片。"""
+        think_parts: list[str] = []
+        body_parts: list[str] = []
+
+        def emit(s: str) -> None:
+            if not s:
+                return
+            (think_parts if self.in_tag else body_parts).append(s)
+
+        while True:
+            p = self.pend
+            idx, closing = -1, False
+            for tag, is_close in ((_THINK_OPEN, False), (_THINK_CLOSE, True)):
+                k = p.find(tag)
+                if k >= 0 and (idx < 0 or k < idx):
+                    idx, closing = k, is_close
+            if idx < 0:
+                keep = 0
+                if not flush:
+                    # 尾巴可能是下一个标签的前半截（最长 len("</think:")-1）。
+                    for n in range(min(len(p), len(_THINK_CLOSE) - 1), 0, -1):
+                        tail = p[len(p) - n:]
+                        if _THINK_CLOSE.startswith(tail) or _THINK_OPEN.startswith(tail):
+                            keep = n
+                            break
+                emit(p[:len(p) - keep])
+                self.pend = p[len(p) - keep:]
+                return ''.join(think_parts), ''.join(body_parts)
+            emit(p[:idx])
+            rest = p[idx:]
+            gt = rest.find('>')
+            if gt < 0:
+                # 标签还没收全：留到下一片。flush 时上游已经结束了，按正文发出去，
+                # 少一次改写好过丢内容。
+                if flush:
+                    emit(rest)
+                    self.pend = ''
+                else:
+                    self.pend = rest
+                return ''.join(think_parts), ''.join(body_parts)
+            self.pend = rest[gt + 1:]
+            self.in_tag = not closing
+
+
+def _split_think_tags(s: str) -> tuple[str, str]:
+    """非流式的一次性版本（完整 content 进来，(思考, 正文) 出去）。"""
+    t = _ThinkTagSplitter()
+    a, b = t.feed(s)
+    c, d = t.flush()
+    return a + c, b + d
+
+
 def _thinking_block(text: str) -> dict:
     """Anthropic 的 thinking 块：`thinking` 给人看，`signature` 供客户端回传。
 
@@ -735,10 +850,19 @@ def to_anthropic_response(data: dict, model: str, *, thinking: bool = False) -> 
 
     content: list[dict] = []
     reasoning = message.get('reasoning_content')
-    if thinking and isinstance(reasoning, str) and reasoning:
-        content.append(_thinking_block(reasoning))
-    text = message.get('content')
-    if isinstance(text, str) and text:
+    raw_text = message.get('content')
+    text = raw_text if isinstance(raw_text, str) else ''
+    # reasoning parser 偶发把整段 CoT 当正文下发（issue #194）：正文里的
+    # <think:SUF>…</think:SUF> 归到同一个 thinking 块，别当正文发出去。
+    inline, text = _split_think_tags(text)
+    thinking_text = ''
+    if thinking and isinstance(reasoning, str):
+        thinking_text += reasoning
+    if thinking:
+        thinking_text += inline
+    if thinking_text:
+        content.append(_thinking_block(thinking_text))
+    if text:
         content.append({'type': 'text', 'text': text})
 
     for call in message.get('tool_calls') or []:
@@ -808,6 +932,9 @@ class _StreamTranslator:
         self.think_buf = ''                      # 思考全文（用于算签名）
         self.next_index = 0
         self.tool_seen = False
+        # 正文里漏出的 <think:SUF> 标签拆分（issue #194）。与 reasoning_content
+        # 共用同一个 thinking 块，但只在正文**以** <think: 开头时启用。
+        self.think_tag = _ThinkTagSplitter()
         # 是否见过正文增量：首字延迟据此判定（用「第一个含正文的 delta」，而不是
         # 「第一个 chunk」——后者会把建连时间也算进去，数字偏小且失真）
         self.saw_content = False
@@ -913,27 +1040,41 @@ class _StreamTranslator:
 
         text = delta.get('content')
         if isinstance(text, str) and text:
-            self.saw_content = True
-            # 切到正文前先把思考块关掉（含发签名）——思考与正文是两个块，
-            # 顺序保证签名在对应的正文之前送达。
-            out += self._close_think()
-            # 从工具块切回文本时，先把工具块关掉
-            if self.tool_index is not None:
-                out += self._close(self.tool_index)
-                self.tool_index = None
-            if self.text_index is None:
-                self.text_index = self.next_index
-                self.next_index += 1
-                out.append(_event('content_block_start', {
-                    'type': 'content_block_start',
-                    'index': self.text_index,
-                    'content_block': {'type': 'text', 'text': ''},
+            # 上游 reasoning parser 偶发把整段 CoT 当正文下发：拆开后控制 token
+            # 不进 text_delta，思考部分归到 thinking 块（未启用思考时丢弃——
+            # 与 reasoning_content 同一口径，未请求思考的客户端不显示 CoT）。
+            inline, body = self.think_tag.feed(text)
+            if self.thinking and inline:
+                if self.think_index is None:
+                    out += self._open_think()
+                self.think_buf += inline
+                out.append(_event('content_block_delta', {
+                    'type': 'content_block_delta',
+                    'index': self.think_index,
+                    'delta': {'type': 'thinking_delta', 'thinking': inline},
                 }))
-            out.append(_event('content_block_delta', {
-                'type': 'content_block_delta',
-                'index': self.text_index,
-                'delta': {'type': 'text_delta', 'text': text},
-            }))
+            if body:
+                self.saw_content = True
+                # 切到正文前先把思考块关掉（含发签名）——思考与正文是两个块，
+                # 顺序保证签名在对应的正文之前送达。
+                out += self._close_think()
+                # 从工具块切回文本时，先把工具块关掉
+                if self.tool_index is not None:
+                    out += self._close(self.tool_index)
+                    self.tool_index = None
+                if self.text_index is None:
+                    self.text_index = self.next_index
+                    self.next_index += 1
+                    out.append(_event('content_block_start', {
+                        'type': 'content_block_start',
+                        'index': self.text_index,
+                        'content_block': {'type': 'text', 'text': ''},
+                    }))
+                out.append(_event('content_block_delta', {
+                    'type': 'content_block_delta',
+                    'index': self.text_index,
+                    'delta': {'type': 'text_delta', 'text': body},
+                }))
 
         for call in delta.get('tool_calls') or []:
             if not isinstance(call, dict):
@@ -987,6 +1128,33 @@ class _StreamTranslator:
         out: list[bytes] = []
         if not self.started:
             out += self._start_message()
+        # 拆分器里可能还压着半个标签，收尾前吐完，否则末尾几个字符会丢。
+        inline, body = self.think_tag.flush()
+        if self.thinking and inline:
+            if self.think_index is None:
+                out += self._open_think()
+            self.think_buf += inline
+            out.append(_event('content_block_delta', {
+                'type': 'content_block_delta',
+                'index': self.think_index,
+                'delta': {'type': 'thinking_delta', 'thinking': inline},
+            }))
+        if body:
+            self.saw_content = True
+            out += self._close_think()
+            if self.text_index is None:
+                self.text_index = self.next_index
+                self.next_index += 1
+                out.append(_event('content_block_start', {
+                    'type': 'content_block_start',
+                    'index': self.text_index,
+                    'content_block': {'type': 'text', 'text': ''},
+                }))
+            out.append(_event('content_block_delta', {
+                'type': 'content_block_delta',
+                'index': self.text_index,
+                'delta': {'type': 'text_delta', 'text': body},
+            }))
         # 思考块先关（含发签名）：顺序与开块顺序一致，也让签名一定落在 stop 之前
         out += self._close_think()
         out += self._close(self.text_index)
