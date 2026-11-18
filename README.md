@@ -202,6 +202,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zcvic/token-farm/main/deploy
 | `POST` | `/api/login` `/api/logout` | 无 | 登录 / 登出 |
 | `GET` | `/api/accounts` | 会话 | 账号列表 |
 | `GET` | `/api/accounts/credits-snapshot` | 会话 / 只读令牌 | 已登记积分的只读快照（给看板 / 对账脚本，不查上游） |
+| `GET` | `/api/platforms/{name}/credits-snapshot` | 会话 / 只读令牌 | Trae / Qoder 账号已登记积分的只读快照（同上，不查上游） |
 | `POST` | `/api/auth/start` `/api/auth/poll` | 管理员 | 扫码授权流程 |
 | `POST` | `/api/accounts/{file}/checkin` `/test` `/refresh` | 管理员 | 签到 / 测活 / 刷新 |
 | `DELETE` | `/api/accounts/{file}` | 管理员 | 删除账号 |

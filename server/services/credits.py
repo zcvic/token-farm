@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import threading
 import time
 import uuid
 
@@ -31,6 +32,17 @@ TTL_SECONDS = 60
 
 # 余额快照持久化在 settings 表，重启后仍能继续比对
 _SNAP_KEY = 'credits_snapshot'
+
+# 平台（Trae / Qoder）的余额快照**单独一份**。
+#
+# 为什么不并进上面那个 key：平台账号的 uid 与 WorkBuddy 不在同一个命名空间，
+# 而 WorkBuddy 的余额合计（`balance.py` 的兜底）与积分收入比对都按 uid 取快照。
+# 混在一起会让「某个平台的余额」被算进 WorkBuddy 的池子，金额虚高且很难查。
+_PLATFORM_SNAP_KEY = 'credits_snapshot_platforms'
+
+# 平台的批量积分查询会并发写快照（`asyncio.gather` / `to_thread`），
+# 读改写同一份 JSON 必须串行，否则后写的会覆盖先写的账号。
+_snap_lock = threading.Lock()
 
 # 单次余额增加的记录上限，避免异常值刷屏（正常任务收益都远小于此）
 _MAX_DELTA = 1_000_000
@@ -307,3 +319,136 @@ def snapshot_entries() -> dict:
     rows.sort(key=lambda r: r['uid'])
     newest = max((r['registered_at'] or 0 for r in rows), default=0)
     return {'snapshot_at': newest, 'count': len(rows), 'accounts': rows}
+
+
+# ── 平台账号（Trae / Qoder）的余额快照 ────────────────────
+def _platform_key(platform: str) -> str:
+    return str(platform or '').strip().lower()
+
+
+def _load_platform_snapshot() -> dict:
+    raw = db.get_setting(_PLATFORM_SNAP_KEY, None)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): value for key, value in data.items() if isinstance(value, dict)}
+
+
+def _save_platform_snapshot(snap: dict) -> None:
+    try:
+        db.set_setting(_PLATFORM_SNAP_KEY, json.dumps(snap, ensure_ascii=False))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _platform_value(raw: object) -> int | float | None:
+    """平台快照条目的数值。与 `_snapshot_value` 的区别是**保留小数**：
+
+    国际版额度是美元（0.75），按 WorkBuddy 的整数口径 `int()` 会截成 0。
+    """
+    if isinstance(raw, dict):
+        raw = raw.get('credits')
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        number = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float('inf'), float('-inf')):
+        return None
+    return int(number) if number.is_integer() else round(number, 2)
+
+
+def record_platform_balance(platform: str, uid: str,
+                            credits: int | float | None) -> int | None:
+    """登记一次平台账号余额，返回登记时刻（epoch 秒）。
+
+    与 `record_balance` 的区别：**不写积分流水**。平台模式的收入已经由签到路由
+    写进带 `platform` 列的 `checkin_logs`；而 `task_logs` 没有平台列，在这里再写
+    `kind='credit'` 会被 WorkBuddy 的「积分收支」一起统计，等于重复入账。
+
+    所以这里只保存「最近一次看到的余额」，用途有两个：只读对账、以及实时查询
+    失败时给界面一个明确标注过时间的上次登记值（而不是一个 `—`）。
+    """
+    return record_platform_balances(platform, {uid: credits})
+
+
+def record_platform_balances(platform: str, entries: dict[str, object]) -> int | None:
+    """批量登记（一次读改写），返回登记时刻；没有可登记的值时返回 None。
+
+    批量查询是并发拿回 N 个账号的，逐个调用会让这份 JSON 被读改写 N 次；
+    这里合并成一次，锁也只进一次。
+    """
+    platform = _platform_key(platform)
+    if not platform or not isinstance(entries, dict):
+        return None
+    clean: dict[str, int | float] = {}
+    for uid, credits in entries.items():
+        uid = str(uid or '').strip()
+        value = _platform_value(credits)
+        if uid and value is not None:
+            clean[uid] = value
+    if not clean:
+        return None
+    now = int(time.time())
+    with _snap_lock:
+        snap = _load_platform_snapshot()
+        bucket = snap.get(platform)
+        if not isinstance(bucket, dict):
+            bucket = {}
+        for uid, value in clean.items():
+            bucket[uid] = {'credits': value, 'at': now}
+        snap[platform] = bucket
+        _save_platform_snapshot(snap)
+    return now
+
+
+def platform_snapshot_entry(platform: str, uid: str) -> dict | None:
+    """单个平台账号的上次登记值（没有登记过返回 None）。"""
+    bucket = _load_platform_snapshot().get(_platform_key(platform)) or {}
+    raw = bucket.get(str(uid or '').strip())
+    value = _platform_value(raw)
+    if value is None:
+        return None
+    return {'uid': str(uid), 'credits': value, 'registered_at': _snapshot_time(raw)}
+
+
+def platform_snapshot_entries(platform: str) -> dict:
+    """某个平台的已登记余额（只读本地记录，不触发上游查询）。"""
+    key = _platform_key(platform)
+    bucket = _load_platform_snapshot().get(key) or {}
+    rows: list[dict] = []
+    for uid, raw in bucket.items():
+        value = _platform_value(raw)
+        if value is None:
+            continue
+        rows.append({'uid': str(uid), 'credits': value,
+                     'registered_at': _snapshot_time(raw)})
+    rows.sort(key=lambda r: r['uid'])
+    newest = max((r['registered_at'] or 0 for r in rows), default=0)
+    return {'platform': key, 'snapshot_at': newest,
+            'count': len(rows), 'accounts': rows}
+
+
+def forget_platform(platform: str, uid: str) -> None:
+    """删号后清掉该平台的登记（快照不是审计日志，见 `forget`）。"""
+    key = _platform_key(platform)
+    uid = str(uid or '').strip()
+    if not key or not uid:
+        return
+    with _snap_lock:
+        snap = _load_platform_snapshot()
+        bucket = snap.get(key)
+        if not isinstance(bucket, dict) or uid not in bucket:
+            return
+        bucket.pop(uid, None)
+        if bucket:
+            snap[key] = bucket
+        else:
+            snap.pop(key, None)
+        _save_platform_snapshot(snap)

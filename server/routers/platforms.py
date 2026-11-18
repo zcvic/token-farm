@@ -28,6 +28,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from .. import db, security
 from ..platforms import PlatformAdapter, PlatformError, all_adapters, get as get_platform
 from ..platforms import checkinpacing, limiter, settings as runtime_settings
+from ..services import credits as creditsvc
 
 logger = logging.getLogger('workbuddy.platforms')
 
@@ -486,6 +487,8 @@ async def delete_account(name: str, account_id: str,
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not removed:
         raise HTTPException(status_code=404, detail='账号不存在')
+    # 快照不是审计日志：账号都删了，留着登记值只会让对账汇总虚高。
+    creditsvc.forget_platform(name, account_id)
     return {'platform': name, 'deleted': account_id}
 
 
@@ -511,6 +514,15 @@ async def account_usage(name: str, account_id: str,
         raise _fail(exc) from exc
 
 
+def _with_last_platform_credits(name: str, item: dict) -> dict:
+    """查询失败时附上「上次登记」的值与时刻，让界面能如实显示旧数据。"""
+    last = creditsvc.platform_snapshot_entry(name, str(item.get('uid') or ''))
+    if last:
+        item['last_credits'] = last['credits']
+        item['last_registered_at'] = last['registered_at']
+    return item
+
+
 @router.get('/{name}/credits')
 async def list_credits(name: str,
                        user: dict = Depends(security.current_user)) -> dict:
@@ -519,6 +531,10 @@ async def list_credits(name: str,
     为什么要批量：余额是列表里的一列，逐个账号请求会让「打开页面」变成 N 次
     往返。单个账号失败只记进该条，不影响其他账号——某个号的令牌过期了，
     不该让整张表都显示「—」。
+
+    成功的一条会**登记快照**（`credits_snapshot_platforms`，与 WorkBuddy 的
+    快照分开存）：Trae 只有 60 秒内存缓存、Qoder 的快照在内置网关里，面板重启
+    或上游查询失败后就什么都看不到。登记后失败时能回一个明确标注时间的旧值。
 
     只读能力，`current_user` 即可（与账号列表、用量弹窗同档）。
     """
@@ -529,15 +545,84 @@ async def list_credits(name: str,
     async def run(uid: str) -> dict:
         async with semaphore:
             try:
-                return await adapter.credits(uid)
+                out = await adapter.credits(uid)
             except PlatformError as exc:
                 return {'uid': uid, 'error': exc.message, 'code': exc.code}
             except Exception as exc:  # noqa: BLE001 —— 单个账号异常不该拖垮整张表
                 logger.warning('平台积分查询异常（%s/%s）: %s', name, uid, exc)
                 return {'uid': uid, 'error': str(exc), 'code': 'exception'}
+        # 适配器可能把缓存里的同一个 dict 交出来（Trae 的 60 秒 TTL），复制一份
+        # 再加字段，避免把 `registered_at` 写进缓存、下次读出旧时刻。
+        item = dict(out) if isinstance(out, dict) else {}
+        item.setdefault('uid', uid)
+        return item
 
-    items = await asyncio.gather(*(run(str(a.get('uid') or '')) for a in accounts))
-    return {'platform': name, 'credits': list(items)}
+    items = list(await asyncio.gather(*(run(str(a.get('uid') or '')) for a in accounts)))
+    # 一批查询只读改写快照一次：逐个登记会让这份 JSON 被读改写 N 次。
+    at = creditsvc.record_platform_balances(
+        name, {str(item.get('uid') or ''): item.get('credits') for item in items})
+    for item in items:
+        value = item.get('credits')
+        if at is not None and isinstance(value, (int, float)) \
+                and not isinstance(value, bool):
+            item['registered_at'] = at
+        else:
+            # 抛异常，或适配器正常返回但带 error（Qoder 没有网关侧快照）：
+            # 退到面板登记过的上次数值，由界面标成旧值。
+            _with_last_platform_credits(name, item)
+    return {'platform': name, 'credits': items}
+
+
+@router.get('/{name}/credits-snapshot')
+def platform_credits_snapshot(name: str,
+                              include_inactive: bool = Query(False),
+                              user: dict = Depends(security.current_user)) -> dict:
+    """已登记的平台余额快照（只读，**不触发任何上游查询**）。
+
+    与 `/api/accounts/credits-snapshot` 同一定位：给看板 / 对账脚本一个
+    「最近一次看到的余额 + 登记时刻」。区别是账号来自该平台自己的存储，
+    而 WorkBuddy 那份来自上游账号池。
+
+    默认只返回**还能被调度**的账号（`disabled=false`）；停用账号传
+    `include_inactive=true` 一并返回，每行带 `active=false`。账号已删除的
+    登记值不再下发（删号路径已清理，这里兜住升级前的残留）。
+
+    账号列表读不到时（内置网关没起来 / 凭据目录不可读）**不报 500**：照常返回
+    已登记的数值，只是不带 `active` 标记，并给出 `accounts_unavailable`。这正是
+    对账脚本最需要旧值的时候。
+    """
+    adapter = _adapter(name)
+    payload = creditsvc.platform_snapshot_entries(name)
+    try:
+        accounts = adapter.list_accounts()
+    except Exception as exc:  # noqa: BLE001 —— 见 docstring：读不到账号不该挡住旧值
+        logger.warning('平台积分快照读账号列表失败（%s）: %s', name, exc)
+        rows = payload['accounts']
+        return {
+            'platform': payload['platform'],
+            'snapshot_at': payload['snapshot_at'],
+            'count': len(rows),
+            'total_registered': payload['count'],
+            'accounts': rows,
+            'accounts_unavailable': str(exc),
+        }
+    local = {str(a.get('uid') or ''): a for a in accounts if isinstance(a, dict)}
+    rows: list[dict] = []
+    for row in payload['accounts']:
+        info = local.get(row['uid'])
+        if info is None:
+            continue
+        row['known'] = True
+        row['active'] = not bool(info.get('disabled'))
+        if row['active'] or include_inactive:
+            rows.append(row)
+    return {
+        'platform': payload['platform'],
+        'snapshot_at': max((r['registered_at'] or 0 for r in rows), default=0),
+        'count': len(rows),
+        'total_registered': payload['count'],
+        'accounts': rows,
+    }
 
 
 # ── 任务 ────────────────────────────────────────────────

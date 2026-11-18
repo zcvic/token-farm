@@ -112,10 +112,22 @@ function isExpired(value: string): boolean {
   return ms !== null && ms <= Date.now();
 }
 
-/** 积分显示：加载中 `…`，拿不到 `—`（失败原因由调用方写进 title）。 */
+/** 积分显示：加载中 `…`，拿不到实时值就退到「上次登记」（`~` 前缀），都没有给 `—`。 */
 function creditText(entry: PlatformCredits | undefined, loading: boolean): string {
   if (entry && typeof entry.credits === 'number') return String(entry.credits);
+  if (entry && typeof entry.last_credits === 'number') return `~${entry.last_credits}`;
   return loading ? '…' : '—';
+}
+
+/** 积分单元格的 tooltip：失败原因；有旧值时补一句「上次登记于 …」。 */
+function creditTitle(entry: PlatformCredits | undefined, hint: string,
+                     lastRecorded: (when: string) => string): string {
+  if (!entry?.error) return hint;
+  if (typeof entry.last_credits === 'number' && entry.last_registered_at) {
+    const when = fmtDateTime(entry.last_registered_at * 1000);
+    return `${entry.error} · ${lastRecorded(when)}`;
+  }
+  return entry.error;
 }
 
 /** 数值展示：拿不到给 `—`，小数保留两位（上游金额是浮点）。 */
@@ -1199,7 +1211,8 @@ export function PlatformAccountsPanel({
                                   ? 'text-muted-foreground'
                                   : 'text-foreground',
                               )}
-                              title={credits[a.uid]?.error || creditsHint}
+                              title={creditTitle(credits[a.uid], creditsHint,
+                                (when) => t('platforms.creditsLastRecorded', {when}))}
                             >
                               {creditText(credits[a.uid], creditsLoading)}
                               {typeof credits[a.uid]?.checkin_credits === 'number'
@@ -1567,7 +1580,8 @@ export function PlatformAccountsPanel({
                         </span>
                         <span
                           className="text-sm font-medium tabular-nums"
-                          title={usageCredit?.error || creditsHint}
+                          title={creditTitle(usageCredit, creditsHint,
+                            (when) => t('platforms.creditsLastRecorded', {when}))}
                         >
                           {creditText(usageCredit, creditsLoading)}
                         </span>

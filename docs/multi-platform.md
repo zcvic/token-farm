@@ -418,9 +418,15 @@ Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBudd
   `platform` 为 NULL 或空串；其他值按平台名精确匹配。
 - 升级时 `_backfill_platform_from_model` 按 `trae/` 前缀回填一次历史日志与
   汇总，幂等。
-- 平台模式下积分**收入**不追踪（签到流水只有 WorkBuddy 的 `task_logs` 口径），
-  `/api/stats/credits` 返回 `income_tracked=false`；**支出**（`usage.credit`）
-  与 token 用量照常按平台统计。
+- 平台模式下积分**收入**只覆盖签到：由本端路由写入 `checkin_logs.credits`（带
+  `platform` / `realm`），`/api/stats/credits` 同时返回 `income_partial=true`——
+  平台没有 WorkBuddy 那样的活跃 / 旅行流水。**支出**（`usage.credit`）与 token
+  用量照常按平台统计。
+- 每次平台余额查询成功都会登记一份快照（存在 `credits_snapshot_platforms`，
+  与 WorkBuddy 的 `credits_snapshot` 分开），可用
+  `GET /api/platforms/{name}/credits-snapshot` 只读对账。查询失败时账号列表会
+  带回 `last_credits` / `last_registered_at`，界面以 `~` 标成上次登记值，而不是
+  把旧数字伪装成实时余额。
 - **版本的统计口径按平台分两类**。WorkBuddy 的版本是账号池划分，看客户端传的
   `global:` 前缀；Trae 这类分版本的平台，模型名是 `trae/<model>`、本身不含
   版本，版本由**实际选中的账号**决定。适配器在 `PlatformChat.realm` 里回报

@@ -189,6 +189,7 @@ in [the usage guide](docs/usage.md).
 | `POST` | `/api/login` `/api/logout` | none | Sign in / out |
 | `GET` | `/api/accounts` | session | Account list |
 | `GET` | `/api/accounts/credits-snapshot` | session / read-only token | Read-only snapshot of recorded credits (dashboards / reconciliation; never queries upstream) |
+| `GET` | `/api/platforms/{name}/credits-snapshot` | session / read-only token | Same snapshot for Trae / Qoder accounts (also never queries upstream) |
 | `POST` | `/api/auth/start` `/api/auth/poll` | admin | QR authorisation flow |
 | `POST` | `/api/accounts/{file}/checkin` `/test` `/refresh` | admin | Check-in / probe / refresh |
 | `DELETE` | `/api/accounts/{file}` | admin | Delete an account |
