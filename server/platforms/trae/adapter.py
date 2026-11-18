@@ -565,9 +565,10 @@ class TraeAdapter(PlatformAdapter):
           · `credits` / `remain` / `limit` / `used` —— 套餐积分池，界面主数字；
           · `checkin_credits` / `checked_in` —— 今日签到奖池，单独标注。
 
-        签到奖池按 `credits + extra_credits` 计：`credits` 是活动标称额度，
-        `extra_credits` 是额外加成，真实到账是两者之和（见
-        `client.checkin_reward`）。
+        签到奖池取状态接口的**基础额度**（`credits`），签到后若能读到当天的
+        签到权益包，就用包里实际发下来的额度（免费 100、会员 200）。两个字段
+        `credits` / `extra_credits` **不能相加**：后者是会员加赠位的展示值，
+        免费号也会带上（见 `client.checkin_reward`）。
 
         国际版没有签到接口，且额度口径是**美元**而非积分：走网页同款的
         `user_current_entitlement_list`（`basic/bonus_usage_limit` 与
@@ -593,6 +594,7 @@ class TraeAdapter(PlatformAdapter):
         expires: list[dict] = []
         checkin_credits: int | None = None
         checked_in = False
+        ent_usage: dict | None = None
         failures: list[PlatformError] = []
 
         # 「刷新积分」按钮会清缓存，这里只做普通的 TTL 复用
@@ -632,6 +634,11 @@ class TraeAdapter(PlatformAdapter):
                                                      timeout=timeout)
                 checkin_credits = client.checkin_reward(status)
                 checked_in = bool(status.get('checked_in'))
+                if checked_in:
+                    # 已签到就用权益包里实际发下来的额度；读不到才留基础额度。
+                    verified = client.checkin_credited_from_usage(ent_usage)
+                    if verified is not None:
+                        checkin_credits = verified
             except PlatformError as exc:
                 failures.append(exc)
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import unittest
 from typing import Any, AsyncIterator
@@ -2430,43 +2431,60 @@ class SoloEventTest(unittest.TestCase):
 
 
 class CheckinClaimTest(unittest.TestCase):
-    """签到到账口径：`credits + extra_credits`，不是前后余额差额。
+    """签到到账口径：以权益包里当天的签到包为准，绝不把两个字段相加。
 
-    签到状态接口的 `credits` 是**活动当日奖励额度**（免费 150 / 会员 200），
-    签到前后都是同一个标称值。旧实现算 `after - before`，恒为 0，于是签到
-    成功也只在积分收支里记 0，整笔收入看不到。
+    免费号的 status 也会同时给 `credits=100` 和 `extra_credits=100`（后者是
+    「会员每日多领 100」的展示位），实际只发 100。上游 magpie#3529 踩过同一个
+    坑：按两者之和显示，面板 200、账号到账 100。
+
+    旧实现还有另一个问题：用领取前后 `credits` 的差额算，恒为 0，签到成功
+    也只在积分收支里记 0。
     """
 
     @staticmethod
-    def _claim(statuses: list[dict], claim: dict | None = None) -> tuple[dict, Any]:
+    def _claim(statuses: list[dict], claim: dict | None = None,
+               credited: int | None = None) -> tuple[dict, Any, Any]:
         fake_status = mock.AsyncMock(side_effect=statuses)
         fake_claim = mock.AsyncMock(return_value=claim or {'code': 0,
                                                           'message': 'success'})
+        fake_credited = mock.AsyncMock(return_value=credited)
         with mock.patch.object(client, 'checkin_status', new=fake_status), \
-                mock.patch.object(client, 'request_json', new=fake_claim):
+                mock.patch.object(client, 'request_json', new=fake_claim), \
+                mock.patch.object(client, 'checkin_credited', new=fake_credited):
             out = _run(client.claim_checkin({'realm': 'cn'}))
-        return out, fake_claim
+        return out, fake_claim, fake_credited
 
-    def test_reward_counts_credits_plus_extra(self) -> None:
-        out, _ = self._claim([
-            {'checked_in': False, 'credits': 150, 'extra_credits': 50},
-            {'checked_in': True, 'credits': 150, 'extra_credits': 50},
-        ])
+    def test_free_account_earns_base_not_the_sum(self) -> None:
+        out, _, credited = self._claim([
+            {'checked_in': False, 'credits': 100, 'extra_credits': 100},
+            {'checked_in': True, 'credits': 100, 'extra_credits': 100},
+        ], credited=None)
+        credited.assert_awaited_once()
         self.assertTrue(out['ok'])
+        self.assertEqual(out['credits'], 100)
+        self.assertEqual(out['earned_credit'], 100)
+        self.assertIn('100', out['message'])
+
+    def test_member_earns_the_pack_amount(self) -> None:
+        out, _, _ = self._claim([
+            {'checked_in': False, 'credits': 100, 'extra_credits': 100},
+            {'checked_in': True, 'credits': 100, 'extra_credits': 100},
+        ], credited=200)
         self.assertEqual(out['credits'], 200)
         self.assertEqual(out['earned_credit'], 200)
 
     def test_already_checked_in_earns_nothing(self) -> None:
-        out, fake_claim = self._claim([
+        out, fake_claim, credited = self._claim([
             {'checked_in': True, 'credits': 100, 'extra_credits': 100},
         ])
         self.assertTrue(out['already'])
         self.assertEqual(out['earned_credit'], 0)
-        # 已签到不该再发 claim 请求（幂等，但少一次往返）。
+        # 已签到不该再发 claim 请求，也不该为记账再查一次权益包。
         fake_claim.assert_not_called()
+        credited.assert_not_awaited()
 
     def test_not_checked_in_after_claim_earns_nothing(self) -> None:
-        out, _ = self._claim([
+        out, _, _ = self._claim([
             {'checked_in': False, 'credits': 150, 'extra_credits': 50},
             {'checked_in': False, 'credits': 150, 'extra_credits': 50},
         ])
@@ -2474,7 +2492,7 @@ class CheckinClaimTest(unittest.TestCase):
         self.assertEqual(out['earned_credit'], 0)
 
     def test_business_error_code_earns_nothing(self) -> None:
-        out, _ = self._claim([
+        out, _, _ = self._claim([
             {'checked_in': False, 'credits': 150, 'extra_credits': 50},
             {'checked_in': True, 'credits': 150, 'extra_credits': 50},
         ], claim={'code': 9074, 'message': '活动已结束'})
@@ -2482,11 +2500,19 @@ class CheckinClaimTest(unittest.TestCase):
         self.assertEqual(out['earned_credit'], 0)
 
     def test_missing_extra_credits_still_counts(self) -> None:
-        out, _ = self._claim([
+        out, _, _ = self._claim([
             {'checked_in': False, 'credits': 100},
             {'checked_in': True, 'credits': 100},
-        ])
+        ], credited=None)
         self.assertEqual(out['earned_credit'], 100)
+
+    def test_reward_helper_never_sums(self) -> None:
+        self.assertEqual(client.checkin_reward({'credits': 100,
+                                               'extra_credits': 100}), 100)
+        self.assertEqual(client.checkin_reward({'credits': 150,
+                                               'extra_credits': 50}), 150)
+        # 只有加赠位时仍能给出一个数（个别账号只回这个字段）。
+        self.assertEqual(client.checkin_reward({'extra_credits': 20}), 20)
 
     def test_reward_helper_ignores_bad_values(self) -> None:
         self.assertEqual(client.checkin_reward({'credits': 'x',
@@ -2494,6 +2520,60 @@ class CheckinClaimTest(unittest.TestCase):
         self.assertEqual(client.checkin_reward({'credits': -5,
                                                'extra_credits': 20}), 20)
         self.assertEqual(client.checkin_reward(None), 0)
+
+
+class CheckinPackTest(unittest.TestCase):
+    """当天签到到账额来自 `checkin_<北京日期>_<uid>` 权益包。"""
+
+    @staticmethod
+    def _pack(ent_id: str, limit: object) -> dict:
+        return {'entitlement_base_info': {'entitlement_id': ent_id,
+                                          'quota': {'credits_limit': limit}}}
+
+    def _usage(self, packs: list[dict]) -> dict:
+        return {'user_entitlement_pack_list': packs}
+
+    def test_takes_only_todays_checkin_pack(self) -> None:
+        usage = self._usage([
+            self._pack('checkin_20261118_1', 100),
+            self._pack('checkin_20261117_1', 100),
+            self._pack('monthly_bonus_202611_1', 500),
+            self._pack('389842879490', 4000),
+        ])
+        self.assertEqual(
+            client.checkin_credited_from_usage(usage, day='20261118'), 100)
+
+    def test_member_pack_is_two_hundred(self) -> None:
+        usage = self._usage([self._pack('checkin_20261118_1', 200)])
+        self.assertEqual(
+            client.checkin_credited_from_usage(usage, day='20261118'), 200)
+
+    def test_same_id_is_not_double_counted(self) -> None:
+        pack = self._pack('checkin_20261118_1', 100)
+        self.assertEqual(
+            client.checkin_credited_from_usage(self._usage([pack, pack]),
+                                               day='20261118'), 100)
+
+    def test_no_pack_returns_none(self) -> None:
+        self.assertIsNone(
+            client.checkin_credited_from_usage({}, day='20261118'))
+        self.assertIsNone(
+            client.checkin_credited_from_usage(None, day='20261118'))
+
+    def test_bad_quota_is_skipped(self) -> None:
+        usage = self._usage([
+            self._pack('checkin_20261118_1', 'x'),
+            self._pack('checkin_20261118_2', 0),
+            self._pack('checkin_20261118_3', 100),
+        ])
+        self.assertEqual(
+            client.checkin_credited_from_usage(usage, day='20261118'), 100)
+
+    def test_day_key_follows_beijing_midnight(self) -> None:
+        when = datetime.datetime(2026, 11, 18, 0, 30,
+                                 tzinfo=datetime.timezone(
+                                     datetime.timedelta(hours=8)))
+        self.assertEqual(client._beijing_day_key(when.timestamp()), '20261118')
 
 
 if __name__ == '__main__':

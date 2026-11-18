@@ -246,5 +246,81 @@ class ManualCheckinLogTest(_DbCase):
         self.assertEqual(rows[0]['credits'], 200)
 
 
+class AccountCheckinLockTest(_DbCase):
+    """同一个账号的签到必须串行：手动与定时同时进来时只能有一次带收入。
+
+    竞态：两路都先读到「未签到」，再各自 claim。上游按自然日幂等、不会多发
+    积分，但两路都会看到「已签到」，于是各自写一条带收入的记录，同一天的
+    奖励在积分收支里翻倍。锁按「平台 + 账号」，不同账号之间不互相阻塞。
+    """
+
+    class _Adapter:
+        name = 'race'
+        label = 'Race'
+
+        def __init__(self, uids: tuple[str, ...] = ('u1',)) -> None:
+            self.uids = list(uids)
+            self.signed: set[str] = set()
+            self.claims: list[str] = []
+            self.active = 0
+            self.max_active = 0
+
+        def list_accounts(self) -> list[dict]:
+            return [{'uid': uid, 'nickname': uid} for uid in self.uids]
+
+        async def checkin(self, account_id: str) -> dict:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                # 让出控制权：没有账号锁时，第二路会在这里之前看到同一个
+                # 「未签到」，两边都往 claims 里记一次。
+                await asyncio.sleep(0.01)
+                if account_id in self.signed:
+                    return {'ok': True, 'already': True, 'earned_credit': 0,
+                            'credits': 100, 'message': '今日已签到'}
+                self.signed.add(account_id)
+                self.claims.append(account_id)
+                return {'ok': True, 'already': False, 'earned_credit': 100,
+                        'credits': 100, 'message': '签到成功'}
+            finally:
+                self.active -= 1
+
+    def tearDown(self) -> None:
+        for key in [k for k in platforms_router._CHECKIN_LOCKS if k[0] == 'race']:
+            platforms_router._CHECKIN_LOCKS.pop(key, None)
+        super().tearDown()
+
+    @staticmethod
+    async def _checkin_all(uids: tuple[str, ...]) -> list[dict]:
+        return list(await asyncio.gather(*(
+            platforms_router.checkin('race', uid, user={'role': 'admin'})
+            for uid in uids)))
+
+    def _run(self, adapter) -> list[dict]:  # noqa: ANN001
+        with mock.patch.object(platforms_router, '_adapter',
+                               return_value=adapter):
+            return asyncio.run(self._checkin_all(tuple(adapter.uids)))
+
+    def _income_rows(self) -> list[dict]:
+        return db.query('SELECT * FROM checkin_logs WHERE platform = ? '
+                        'AND credits > 0', ('race',))
+
+    def test_same_account_is_serialized_and_earns_once(self) -> None:
+        adapter = self._Adapter()
+        self._run(adapter)
+        self.assertEqual(adapter.max_active, 1, '同一个账号被并发处理了')
+        self.assertEqual(adapter.claims, ['u1'], '上游被 claim 了不止一次')
+        rows = self._income_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['credits'], 100)
+
+    def test_other_accounts_are_not_blocked(self) -> None:
+        adapter = self._Adapter(uids=('u1', 'u2'))
+        self._run(adapter)
+        self.assertEqual(adapter.max_active, 2, '不同账号被串行化了')
+        self.assertEqual(sorted(adapter.claims), ['u1', 'u2'])
+        self.assertEqual(len(self._income_rows()), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

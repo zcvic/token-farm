@@ -1431,27 +1431,90 @@ async def checkin_status(account: dict, *, realm: str | None = None,
 
 
 def checkin_reward(status: dict) -> int:
-    """状态接口里的**今日签到奖励**（`credits + extra_credits`）。
+    """状态接口里的**基础签到额度**（`credits`，取不到才用 `extra_credits`）。
 
-    为什么不能拿它当「账户余额」算前后差额：`credits` 是签到活动当日的奖励
-    额度（实测出现过 100 / 150 / 200），`extra_credits` 是额外加成，两者在
-    签到前后**都是同一个标称值**，差值恒为 0。真实到账 = 两者之和，社区实现
-    （scriptcat 脚本）也是这么算的。
+    **不要把两者相加**：`extra_credits` 是「会员每日加赠」的展示位，免费号的
+    status 同样会带 100，但账号实际只发基础额度。官方规则是免费 100/天、
+    会员 200/天；上游 magpie#3529 记录过同一个坑——把两者相加后「面板 200、
+    到账 100」。真实到账以 `checkin_credited` 读权益包为准。
     """
     status = status if isinstance(status, dict) else {}
-    total = 0
     for key in ('credits', 'extra_credits'):
         try:
-            total += max(0, int(status.get(key) or 0))
+            value = max(0, int(status.get(key) or 0))
         except (TypeError, ValueError):
             # 上游偶尔给字符串 / null：宁可少算这一项，也不能让整次签到抛错。
             continue
-    return total
+        if value:
+            return value
+    return 0
+
+
+def _beijing_day_key(now: float | None = None) -> str:
+    """签到的结算日按**北京自然日**（上游 beijingDayKey，权益包 id 里也是这天）。"""
+    ts = time.time() if now is None else now
+    return datetime.datetime.fromtimestamp(
+        ts, datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y%m%d')
+
+
+def checkin_credited_from_usage(ent_usage: object,
+                                day: str | None = None) -> int | None:
+    """从权益包列表里取**当天签到实际到账**的积分；找不到返回 None。
+
+    签到每成功一次，上游会新建一个 `checkin_<北京日期>_<uid>` 的权益包，
+    `quota.credits_limit` 就是发到账号里的额度（免费 100、会员 200），
+    与「积分收支」要的到账额是同一个数。
+    """
+    if not isinstance(ent_usage, dict):
+        return None
+    prefix = f'checkin_{day or _beijing_day_key()}_'
+    total = 0
+    seen: set[str] = set()
+    for pack in ent_usage.get('user_entitlement_pack_list') or []:
+        info = pack.get('entitlement_base_info') if isinstance(pack, dict) else None
+        if not isinstance(info, dict):
+            continue
+        ent_id = str(info.get('entitlement_id') or '')
+        if not ent_id.startswith(prefix) or ent_id in seen:
+            continue
+        quota = info.get('quota') if isinstance(info.get('quota'), dict) else {}
+        try:
+            limit = int(quota.get('credits_limit') or 0)
+        except (TypeError, ValueError):
+            continue
+        if limit <= 0:
+            continue
+        seen.add(ent_id)
+        total += limit
+    return total or None
+
+
+async def checkin_credited(account: dict, *, realm: str | None = None,
+                           timeout: float = 20, day: str | None = None) -> int | None:
+    """查一次权益包，返回当天签到实际到账额度；查不到返回 None。
+
+    失败 / 落账延迟时返回 None，由调用方退回基础额度——**绝不**把
+    `credits` 与 `extra_credits` 相加。
+    """
+    realm = normalize_realm(realm or account.get('realm'))
+    if not REALMS[realm]['supports_checkin']:
+        return None
+    path = PATH_ENT_USAGE_V2 if realm == 'cn' else PATH_ENT_USAGE_V1
+    try:
+        data = await request_json(account, path, {}, realm=realm, base='pay',
+                                  timeout=timeout)
+    except PlatformError:
+        return None
+    return checkin_credited_from_usage(data, day=day)
 
 
 async def claim_checkin(account: dict, *, realm: str | None = None,
                         timeout: float = 30) -> dict:
-    """领取签到（幂等），用状态接口的今日奖励额度计算真实到账。
+    """领取签到（幂等），按**当天实际到账的签到权益包**记账。
+
+    状态接口的 `credits` 只是基础额度，`extra_credits` 是会员加赠位的展示值，
+    两者不能相加（见 `checkin_reward`）。领取成功后读一次权益包，用
+    `checkin_<日期>_<uid>` 的 `credits_limit` 作为到账额；读不到才退回基础额度。
 
     **不要**再用领取前后 `credits` 的差额：那是活动额度不是余额，前后不变，
     差额恒为 0（签到成功也会记成 0，积分收支里就看不到这笔收入）。
@@ -1462,7 +1525,7 @@ async def claim_checkin(account: dict, *, realm: str | None = None,
     if before.get('checked_in'):
         return {'ok': True, 'checked_in': True, 'already': True,
                 'credits': before_reward, 'earned_credit': 0,
-                'message': f'今日已签到（今日奖励 {before_reward}）',
+                'message': f'今日已签到（基础奖励 {before_reward} 积分）',
                 'raw': before}
     raw = await request_json(account, PATH_CHECKIN_CLAIM,
                              {'req_source': _checkin_req_source(realm)},
@@ -1471,8 +1534,13 @@ async def claim_checkin(account: dict, *, realm: str | None = None,
     after_reward = checkin_reward(after)
     ok = bool(after.get('checked_in')) and (
         not isinstance(raw, dict) or raw.get('code') in (0, None))
+    credited = await checkin_credited(account, realm=realm,
+                                      timeout=timeout) if ok else None
+    earned = credited if credited is not None else after_reward
     if ok:
-        message = f'签到成功（今日奖励 {after_reward}）'
+        message = (f'签到成功（本次到账 {credited} 积分）'
+                   if credited is not None
+                   else f'签到成功（基础奖励 {after_reward} 积分）')
     else:
         # 「接口 200」不等于「已到账」：优先用状态接口的说明，其次领取响应，
         # 都没有就给一句中性的，绝不把失败说成成功。
@@ -1483,9 +1551,9 @@ async def claim_checkin(account: dict, *, realm: str | None = None,
         'ok': ok,
         'checked_in': bool(after.get('checked_in')),
         'already': False,
-        'credits': after_reward,
+        'credits': earned,
         # 只有真的签到成功才记收入；失败 / 未生效一律 0。
-        'earned_credit': after_reward if ok else 0,
+        'earned_credit': earned if ok else 0,
         'message': message,
         'raw': {'claim': raw, 'status': after},
     }

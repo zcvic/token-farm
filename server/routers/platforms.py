@@ -40,6 +40,22 @@ _CREDITS_CONCURRENCY = 4
 # 常量同值；路由层不 import 平台内部模块，否则每接一个平台都要改这里。
 _PERMANENT_UNTIL = 4102444799
 
+# 签到按「平台 + 账号」串行：手动「签到」与定时「全部签到」可能同时命中同一个
+# 号——两边都先读到「未签到」，再各自 claim。上游按自然日幂等，不会多发积分，
+# 但两边都会看到「已签到」并各写一条带收入的记录，同一天的奖励就在积分收支里
+# 记了两遍。锁只在**本进程**内有效；多副本部署仍靠上游幂等兜底（重复调用不会
+# 多发，最多多一条 0 收入的「今日已签到」）。
+_CHECKIN_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def _checkin_lock(name: str, account_id: object) -> asyncio.Lock:
+    """同一个平台账号的签到锁（进程内、按账号，不阻塞其它账号）。"""
+    key = (str(name or '').strip().lower(), str(account_id or ''))
+    lock = _CHECKIN_LOCKS.get(key)
+    if lock is None:
+        lock = _CHECKIN_LOCKS[key] = asyncio.Lock()
+    return lock
+
 
 def _adapter(name: str):
     adapter = get_platform(name)
@@ -680,12 +696,13 @@ async def checkin(name: str, account_id: str,
         # 返回，那这条签到就白签了（积分收支里也看不到）。昵称 / 版本缺失无妨。
         account = {'uid': str(account_id or '')}
     try:
-        result = await adapter.checkin(account_id)
+        async with _checkin_lock(name, account_id):
+            result = await adapter.checkin(account_id)
+            _log_platform_checkin(name, account, result, 'platform-manual')
     except PlatformError as exc:
         _log_platform_checkin(name, account, {'ok': False, 'message': exc.message},
                               'platform-manual')
         raise _fail(exc) from exc
-    _log_platform_checkin(name, account, result, 'platform-manual')
     return {'platform': name, 'result': result}
 
 
@@ -714,24 +731,27 @@ async def checkin_all(name: str,
         account_id = str(account.get('uid') or '')
         async with semaphore:
             await pacer.wait()
-            try:
-                result = await adapter.checkin(account_id)
-                _log_platform_checkin(name, account, result, 'platform-batch')
-                return {'uid': account_id, 'ok': bool(result.get('ok')),
-                        'message': result.get('message') or '', 'result': result}
-            except PlatformError as exc:
-                _log_platform_checkin(
-                    name, account,
-                    {'ok': False, 'message': exc.message}, 'platform-batch')
-                return {'uid': account_id, 'ok': False, 'message': exc.message,
-                        'code': exc.code}
-            except Exception as exc:  # noqa: BLE001
-                logger.warning('平台签到异常（%s/%s）: %s', name, account_id, exc)
-                _log_platform_checkin(
-                    name, account,
-                    {'ok': False, 'message': str(exc)}, 'platform-batch')
-                return {'uid': account_id, 'ok': False, 'message': str(exc),
-                        'code': 'exception'}
+            # 账号锁放在并发名额之内：一个号被手动签到时，批量这一路等它签完
+            # 再问状态，第二路会拿到「今日已签到」、收入记 0，不会重复入账。
+            async with _checkin_lock(name, account_id):
+                try:
+                    result = await adapter.checkin(account_id)
+                    _log_platform_checkin(name, account, result, 'platform-batch')
+                    return {'uid': account_id, 'ok': bool(result.get('ok')),
+                            'message': result.get('message') or '', 'result': result}
+                except PlatformError as exc:
+                    _log_platform_checkin(
+                        name, account,
+                        {'ok': False, 'message': exc.message}, 'platform-batch')
+                    return {'uid': account_id, 'ok': False, 'message': exc.message,
+                            'code': exc.code}
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning('平台签到异常（%s/%s）: %s', name, account_id, exc)
+                    _log_platform_checkin(
+                        name, account,
+                        {'ok': False, 'message': str(exc)}, 'platform-batch')
+                    return {'uid': account_id, 'ok': False, 'message': str(exc),
+                            'code': 'exception'}
 
     results = await asyncio.gather(*(run(a) for a in accounts))
     return {'platform': name, 'total': len(results),
