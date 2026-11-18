@@ -441,3 +441,30 @@ ae44d739f6f9fc9a0b37aea5667c69a0c6dd3814
 #      未取：27b7458f 的 AutoBot 换址部分（本地无该运行时）。
 27b7458f7251942066f912c5677a0f9bc0c3ebdd
 e14a3d03face0961fc9a7a98449e7fc859e52b3c
+
+# ---- 2026-11 第八批：misakano 34120825 附录 E 落地 ----
+#      E-3 /v1/responses 回放补齐（0e41952f / 94a68792 / fdf05eae / f6682159）：
+#        · Chat 形状的 tool 消息（role=tool + tool_call_id）按
+#          function_call_output 处理：保留 tool_call_id 与 name，同样拆出图片、
+#          同样不在并行结果之间落图（94a68792）。
+#        · Chat 形状的 assistant 保留内联 reasoning_content 与 tool_calls：
+#          只有 tool_calls 没有 content 的 assistant 不再被整条丢掉（否则留下
+#          孤儿 tool 消息撞 11148）；内联思考与 reasoning 项按序拼接，完全相同
+#          只留一份（0e41952f 的缺口部分；reasoning 暂存主体本地已有）。
+#        · 惰性项（_replay_inert）：additional_tools / compaction_trigger /
+#          local_shell_call(_output) 等元数据项，以及 web_search_call /
+#          image_generation_call / mcp_call / computer_call 等无 role、无内容的
+#          托管工具回执，不生成消息、不清待挂推理、不打断工具组；带内容的未知
+#          类型照旧送达（fdf05eae）。
+#        · compaction / compaction_summary / context_compaction：解
+#          base64(JSON summary) 得到交接摘要，以 system 消息保留；解不出且像
+#          密文（base64/token 字符且长度 >= 32）就丢，其余按纯文本保留；
+#          UTF-8 字节封顶 32 KiB（f6682159）。
+#        · 新增 server/tests/test_responses_replay.py。
+#      未取：Go 侧 reasoning 前瞻归属（reasoningGroupTarget）——本地用「累积 +
+#      回落最后一条 assistant」的既有口径，E-3 判定为主体已覆盖，不重复改。
+0e41952fe4e1fc660c3d8e766dc5bc7b08dd6eb4
+94a6879211d2ee57856be30c1dc2f9e3670495e8
+fdf05eaeb63059823a6f17c4127c3028b4dc8bdf
+f668215979ef80d407d0e3a57197d110db93833e
+

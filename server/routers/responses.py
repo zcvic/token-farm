@@ -479,6 +479,108 @@ def _reasoning_text(item: dict) -> str:
     return ''
 
 
+def _append_visible_reasoning(current: str, addition: str) -> str:
+    """按序拼接两段可回放的思考文本（对齐 Go 侧 appendVisibleReasoning）。
+
+    任一为空返回另一段；两段完全相同只留一份（客户端可能把同一段思考既放进
+    reasoning 项又内联在 assistant 消息上）；否则用 "\\n" 连接。**不做 trim**：
+    思考里的缩进与换行按原样送达上游，模型才能按原始格式续读。
+    """
+    if not addition:
+        return current
+    if not current:
+        return addition
+    if current == addition:
+        return current
+    return current + '\n' + addition
+
+
+# ── 回放：元数据项、托管工具回执与上下文压缩 ──────────────────
+
+# 元数据/控制项：不生成消息，也不动「待挂推理 / 工具组」状态。
+_REPLAY_META_TYPES = frozenset({
+    'additional_tools', 'compaction_trigger',
+    'local_shell_call', 'local_shell_call_output',
+})
+
+# convertInputItems 里有专门分支的类型；其余类型落默认分支按消息处理。
+_REPLAY_HANDLED_TYPES = frozenset({
+    'message', 'reasoning', 'item_reference',
+    'compaction', 'compaction_summary', 'context_compaction',
+    'function_call', 'function_call_output',
+    'custom_tool_call', 'custom_tool_call_output',
+    'agent_message',
+})
+
+
+def _replay_inert(item: dict) -> bool:
+    """回放项是否「不产生消息、也不动任何状态」。
+
+    元数据项，以及不认识、没有 role、也没有可用内容的类型项——托管工具的
+    回执（web_search_call / image_generation_call / mcp_call / computer_call /
+    file_search_call / code_interpreter_call 等）都是这种形状，上游没有对应物。
+    它们落进默认分支会变成一条 user 空消息：拆开同一批工具调用、把图片插进
+    并行 tool 结果之间（11148）、清空调用前暂存的思考。
+
+    带内容的未知项照旧按消息送达，不因此丢内容。
+    """
+    kind = str(item.get('type') or '')
+    if kind in _REPLAY_META_TYPES:
+        return True
+    if not kind or kind in _REPLAY_HANDLED_TYPES or item.get('role') is not None:
+        return False
+    text, blocks = _text_of_parts(item.get('content'))
+    return not text.strip() and not blocks
+
+
+# 交接摘要送上游的字节上限：摘要每轮都随历史重发，来源又是客户端，不封顶时
+# 一份异常大的摘要会让此后每一轮都更早撞上 11115。
+_COMPACTION_SUMMARY_MAX = 32 << 10
+# 只由 base64 / base64url / token 字符组成、且够长的串：真实的 encrypted_content
+# 是密文（URL-safe base64 不带 padding 时标准解码会失败），解不出摘要就是对上游
+# 无意义的乱码。纯文本摘要总会有空白或非 ASCII 字符；短于 32 的放行，免得
+# "Done" 这类单词被当成密文。
+_OPAQUE_COMPACTION_BLOB = re.compile(r'^[A-Za-z0-9+/=_.\-]{32,}$')
+
+
+def _truncate_utf8(text: str, limit: int) -> str:
+    """按 UTF-8 字节截断，且不切断多字节字符（对齐 logfmt.Truncate）。"""
+    text = text.strip()
+    raw = text.encode('utf-8')
+    if len(raw) <= limit:
+        return text
+    raw = raw[:limit]
+    while raw and (raw[-1] & 0xC0) == 0x80:  # 丢掉被切一半的续字节
+        raw = raw[:-1]
+    return raw.decode('utf-8', 'ignore')
+
+
+def _decode_compaction_summary(blob: object) -> str:
+    """尽力解码 compaction 项的 encrypted_content。
+
+    正常形态是 base64(JSON {"v":1,"summary":...})，先补齐 base64 padding 再解，
+    解出的 summary 为空就是没有摘要；解不开时，像密文的丢弃，其余按纯文本摘要
+    保留——外部提供者可能塞的是纯文本摘要，丢了它就丢了唯一一份上下文交接。
+    结果封顶 _COMPACTION_SUMMARY_MAX。
+    """
+    if not isinstance(blob, str):
+        return ''
+    text = blob.strip()
+    if not text:
+        return ''
+    padded = text + '=' * ((4 - len(text) % 4) % 4)
+    try:
+        raw = base64.b64decode(padded, validate=True)
+        obj = json.loads(raw.decode('utf-8'))
+        if isinstance(obj, dict) and isinstance(obj.get('summary'), str):
+            return _truncate_utf8(obj['summary'], _COMPACTION_SUMMARY_MAX)
+    except Exception:  # noqa: BLE001 - 解不出就按纯文本处理
+        pass
+    if _OPAQUE_COMPACTION_BLOB.match(text):
+        return ''
+    return _truncate_utf8(text, _COMPACTION_SUMMARY_MAX)
+
+
 def _convert_tools(tools: object, bridge: _ToolBridge | None = None) -> list[dict] | None:
     """Responses 的扁平工具定义 → Chat Completions 的嵌套形状。"""
     mapped = (bridge or _ToolBridge(tools)).chat_tools
@@ -696,6 +798,21 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
                         'output': json.dumps({'tools': _loaded_tool_overview(item.get('tools', [])),
                                               'status': item.get('status', 'completed')}, ensure_ascii=False)}
                 kind = 'function_call_output'
+            if (not kind and str(item.get('role') or '') == 'tool'
+                    and str(item.get('tool_call_id') or '')):
+                # Chat 形状的工具结果（客户端把 chat messages 直接塞进 input）按
+                # function_call_output 处理：落进默认分支只剩 role/content，
+                # tool_call_id 丢了，出站的配对清理会把这一对调用与结果一起删掉。
+                # 走同一分支也就同样拆出图片、同样不在并行结果之间落图。
+                item = {'type': 'function_call_output',
+                        'call_id': item.get('tool_call_id'),
+                        'name': item.get('name'),
+                        'output': item.get('content')}
+                kind = 'function_call_output'
+            if _replay_inert(item):
+                # 元数据项与托管工具回执：不生成消息、不清空待挂推理、不落图——
+                # 被它们隔开的连续思考段、同一批工具调用与并行工具结果都保持原样。
+                continue
             if kind in ('function_call', 'custom_tool_call'):
                 # 防御性收尾：工具结果后若直接跟新调用（非正常历史），先把
                 # 本组图片落成 user，保持「tool 组 → user 图片」先于新的
@@ -759,11 +876,16 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
                     # 保持既有契约：带 call_id 的结果一律按 tool 消息处理
                     if raw_call_id in open_call_ids:
                         open_call_ids.remove(raw_call_id)
-                    messages.append({
+                    tool_msg = {
                         'role': 'tool',
                         'tool_call_id': raw_call_id,
                         'content': out_text,
-                    })
+                    }
+                    # 只有 Chat 形状的结果带 name（见上面 shape 归一化），原样保留。
+                    tool_name = str(item.get('name') or '')
+                    if tool_name:
+                        tool_msg['name'] = tool_name
+                    messages.append(tool_msg)
                 elif open_call_ids:
                     # 客户端未下发 call_id：若恰好有未消费调用，按声明顺序配对
                     matched_id = open_call_ids.pop(0)
@@ -787,6 +909,19 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
                 # 图片**不立即落**：插在两条 tool 结果之间会破坏上游的
                 # 成组配对校验（11148），等组结束由 flush_tool_group 补。
                 pending_tool_images.extend(out_images)
+                continue
+            if kind in ('compaction', 'compaction_summary', 'context_compaction'):
+                # 上一轮的上下文压缩结果：对上游它是后续对话赖以延续的交接摘要，
+                # 以 system 消息保留在回放历史里；解不出内容（或只是密文）则跳过，
+                # 不造空消息。至此待挂推理已过期，就地清掉，别泄漏到后面的轮次。
+                pending_reasoning = None
+                summary = _decode_compaction_summary(item.get('encrypted_content'))
+                if summary.strip():
+                    messages.append({
+                        'role': 'system',
+                        'content': 'Summary of the earlier conversation '
+                                   '(context checkpoint):\n\n' + summary.strip(),
+                    })
                 continue
             if kind == 'reasoning':
                 # reasoning item **不能丢**：它是 DeepSeek 多轮对话的一致性凭据。
@@ -842,9 +977,14 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
             if role == 'developer':
                 role = 'system'
             text, blocks = _text_of_parts(item.get('content'))
+            # Chat 形状回放的 assistant 可以只带 tool_calls（content 为空 / null）：
+            # 丢了这些调用就会留下孤儿 tool 消息，上游判 11148。
+            inline_calls = item.get('tool_calls') if role == 'assistant' else None
+            if not isinstance(inline_calls, list) or not inline_calls:
+                inline_calls = None
             if blocks and any(b.get('type') == 'image_url' for b in blocks):
                 msg: dict | None = {'role': role, 'content': blocks}
-            elif text:
+            elif text or inline_calls:
                 msg = {'role': role, 'content': text}
             else:
                 msg = None
@@ -862,8 +1002,18 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
                 # 丢掉就又是一次 11155。
                 if role == 'assistant':
                     pending = take_reasoning()
-                    if pending is not None:
-                        attach_reasoning(msg, pending)
+                    # Chat 形状回放的 assistant 还可能内联 reasoning_content：
+                    # 与刚取走的 reasoning 项按序拼接（完全相同的只留一份）。
+                    inline_reasoning = item.get('reasoning_content')
+                    if not isinstance(inline_reasoning, str):
+                        inline_reasoning = ''
+                    if pending is not None or inline_reasoning:
+                        attach_reasoning(msg, _append_visible_reasoning(
+                            pending if isinstance(pending, str) else '',
+                            inline_reasoning,
+                        ))
+                    if inline_calls:
+                        msg['tool_calls'] = list(inline_calls)
                 messages.append(msg)
         # 历史以工具结果收尾时，本组图片还没补 user 消息。
         flush_calls()
