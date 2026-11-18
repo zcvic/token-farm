@@ -180,20 +180,77 @@ def _local_date(ts: float | None = None) -> str:
 # ── 模型名归一 ────────────────────────────────────────────
 
 
+def _platform_prefixes() -> tuple[str, ...]:
+    """已注册平台在模型名上产生的前缀（`trae/`、`traecn/`、`combo/` …）。
+
+    延迟导入 platforms：pricing 被 db 反向依赖（`_estimate_cost`），顶层 import
+    会成环；而且只有真正要归一模型名时才需要这份清单。
+
+    不按 `routable` 过滤：WorkBuddy 适配器不参与网关前缀解析，但组合成员记账
+    时会写出 `workbuddy/<model>`（见 `platforms/combo/adapter.py`），同样要剥。
+    """
+    try:
+        from .. import platforms
+    except Exception:  # noqa: BLE001 - 拿不到清单时退回只认版本前缀
+        return ()
+    out: set[str] = set()
+    for adapter in platforms.all_adapters():
+        name = str(getattr(adapter, 'name', '') or '').strip().lower()
+        if not name:
+            continue
+        out.add(f'{name}/')
+        # 区域化前缀（`traecn/`、`traecom/`、`qodercn/` …）。适配器自己知道
+        # 版本 → 后缀的映射，不要在这里复制一份。
+        for realm in ('cn', 'global'):
+            try:
+                prefix = str(adapter.model_prefix_for(realm) or '').strip().lower()
+            except Exception:  # noqa: BLE001
+                continue
+            if prefix:
+                out.add(prefix)
+    # 长的优先：即便将来出现互为前缀的平台名，也先剥更具体的那个。
+    return tuple(sorted(out, key=len, reverse=True))
+
+
+def _strip_namespaces(name: str) -> str:
+    """剥掉记账号里的平台前缀与版本前缀，直到剥不动为止。
+
+    顺序可能是 `combo/` → 真实成员 `trae/` → `global:`，所以不能只试一轮。
+    """
+    prefixes = _platform_prefixes()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                changed = True
+                break
+        for prefix in ('cn:', 'global:'):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                changed = True
+                break
+    return name
+
+
 def normalize_model(model: str | None) -> str | None:
     """把上游模型名折成价目表里的键。
 
-    `cn:deepseek-v4.1-flash` / `global:deepseek-v4.1-flash` 这类版本前缀要剥掉：
-    两个版本跑的是同一个官方模型，价格一样。没收录的名字返回 None（不猜价格）。
+    三种前缀都要剥：平台 / 组合前缀（`trae/`、`traecn/`、`combo/` …）、
+    版本前缀（`cn:` / `global:`）。它们指的是同一个官方模型，价格一样；
+    不剥就会让组合与平台调用全部落到「未收录」而漏计费。
+
+    没收录的名字返回 None（不猜价格）。管理员仍可为带前缀的名字配 `alias`
+    精确覆盖：完全匹配优先于剥离后的归一。
     """
-    name = (model or '').strip().lower()
-    if not name:
+    raw = (model or '').strip().lower()
+    if not raw:
         return None
-    for prefix in ('cn:', 'global:'):
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-            break
     aliases = _merged().get('model_aliases') or {}
+    if raw in aliases:
+        return aliases[raw]
+    name = _strip_namespaces(raw)
     return aliases.get(name) or (name if _has_model(name) else None)
 
 

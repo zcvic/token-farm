@@ -82,6 +82,38 @@ class UnitPriceTest(unittest.TestCase):
         self.assertIsNone(pricing.normalize_model('glm-5.3'))
         self.assertIsNone(pricing.normalize_model(''))
 
+    def test_platform_and_combo_prefixes_are_stripped(self) -> None:
+        # 日志里的 mapped_model 是**实际去向**：直连平台是 `trae/x`，组合成员是
+        # `<平台>/<模型>`，用量表里则可能是请求名 `combo/x`。它们跑的都是同一个
+        # 官方模型，不能因为前缀就漏计费（issue #380 的计费缺口）。
+        for name in (
+            'trae/deepseek-v4.1-flash',
+            'traecn/deepseek-v4.1-flash',
+            'traecom/deepseek-v4.1-flash',
+            'trae/global:deepseek-v4.1-flash',
+            'qoder/deepseek-v4.1-flash',
+            'qodercn/deepseek-v4.1-flash',
+            'workbuddy/deepseek-v4.1-flash',
+            'workbuddy/global:deepseek-v4.1-flash',
+            'combo/deepseek-v4.1-flash',
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(pricing.normalize_model(name), 'deepseek-flash')
+        # 未知平台前缀不当成「平台 + 模型」硬剥：宁可不计价，也不猜
+        self.assertIsNone(pricing.normalize_model('foo/deepseek-v4.1-flash'))
+        # 平台能剥，但模型本身没收录价目 → 仍然算不出
+        self.assertIsNone(pricing.normalize_model('trae/glm-5.3'))
+
+    def test_platform_prefixed_model_is_priced(self) -> None:
+        self.assertAlmostEqual(
+            pricing.cost_of('combo/deepseek-v4.1-flash', 1_000_000, 1_000_000,
+                            ts=PEAK_WEEKDAY),
+            10.0, places=6)
+        self.assertAlmostEqual(
+            pricing.cost_of('traecn/deepseek-v4.1-flash', 1_000_000, 1_000_000,
+                            ts=PEAK_WEEKDAY),
+            10.0, places=6)
+
     def test_peak_and_off_peak_rates(self) -> None:
         peak = pricing.unit_prices('deepseek-v4.1-flash', PEAK_WEEKDAY)
         off = pricing.unit_prices('deepseek-v4.1-flash', OFFPEAK_LUNCH)
@@ -229,6 +261,30 @@ class DbIntegrationTest(unittest.TestCase):
         )
         row = db.query_one('SELECT cost FROM request_logs ORDER BY id DESC LIMIT 1')
         self.assertAlmostEqual(float(row['cost']), 2.0, places=6)
+
+    def test_platform_mapped_model_gets_cost(self) -> None:
+        # 组合/平台调用：`model` 是请求名 `combo/x`，`mapped_model` 是实际去向
+        # `trae/x`。两边都带前缀，修复后都应能算出费用。
+        db.add_request_log(
+            ts=int(PEAK_WEEKDAY), key_id=None, ip='127.0.0.1',
+            model='combo/deepseek-v4.1-flash',
+            mapped_model='trae/deepseek-v4.1-flash',
+            status=200, prompt_tokens=1_000_000, completion_tokens=0,
+            latency_ms=10, first_token_ms=5, ua='test', error=None, stream=1,
+            credit=None, realm='cn', cache_hit_tokens=None, cache_miss_tokens=None,
+            cache_write_tokens=None,
+        )
+        row = db.query_one('SELECT cost FROM request_logs ORDER BY id DESC LIMIT 1')
+        self.assertAlmostEqual(float(row['cost']), 2.0, places=6)
+
+    def test_bump_usage_prices_combo_request_name(self) -> None:
+        # usage_daily / usage_hourly 记的是**请求名**（组合入口），不是实际去向。
+        db.bump_usage(1, 'combo/deepseek-v4.1-flash', 1_000_000, 0, None,
+                      realm='cn', cache_hit=None, cache_miss=None, ts=PEAK_WEEKDAY)
+        daily = db.query_one('SELECT SUM(cost) AS c FROM usage_daily')
+        self.assertAlmostEqual(float(daily['c']), 2.0, places=6)
+        hourly = db.query_one('SELECT SUM(cost) AS c FROM usage_hourly')
+        self.assertAlmostEqual(float(hourly['c']), 2.0, places=6)
 
     def test_unpriced_model_leaves_cost_null(self) -> None:
         db.add_request_log(
