@@ -81,10 +81,10 @@ func (p *Pool) StartAuthDirWatch(dir string) (stop func()) {
 // reloadAuthDir 重新扫描目录并对齐账号池。
 //
 // 全量重扫而非增量：目录只有几十个文件，全扫的代价远低于维护增量状态
-// （增量需要处理"文件改名""写了一半"等边界）。auth.LoadDir 自身跳过坏文件，
-// 故半写入的临时文件（login.sh 用 tempfile + os.replace 原子替换）不会造成误判。
+// （增量需要处理"文件改名""写了一半"等边界）。auth.LoadDirReport 自身跳过坏文件
+// 并回报失败数：有失败时本轮只增不删，避免半写文件被当成「文件已删」。
 func (p *Pool) reloadAuthDir(dir string) {
-	auths, err := auth.LoadDir(dir)
+	auths, failed, err := auth.LoadDirReport(dir)
 	if err != nil {
 		log.Printf("WARN: [watch] 重新加载 %s 失败: %v（保持现有池状态）", dir, err)
 		return
@@ -97,7 +97,15 @@ func (p *Pool) reloadAuthDir(dir string) {
 		return
 	}
 	before := len(p.AvailableUIDs())
-	p.SyncToDir(auths)
+	if failed > 0 {
+		// 有文件读不出来（半写 / 掉电写坏 / 权限抖动）：这一轮只增不删。
+		// 否则那个账号会被当成「文件已删」剔除并落盘，重启也不会自己复活——
+		// 这是热重载最典型的踢号形态。下一轮扫干净了再走正常对齐。
+		p.SyncToDirAddOnly(auths)
+		log.Printf("WARN: [watch] %s 本轮有 %d 个文件解析/读取失败，只增不删（保持现有账号）", dir, failed)
+	} else {
+		p.SyncToDir(auths)
+	}
 	after := len(p.AvailableUIDs())
 	if after != before {
 		log.Printf("[watch] auths 目录变化：账号数 %d → %d（已热加载，无需重启）", before, after)

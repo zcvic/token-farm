@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -314,6 +315,24 @@ func (p *Pool) Add(a *auth.Auth) {
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
 // 剔除结果持久化回 state.json，避免已删账号在下次启动时被 load() 复活。
 func (p *Pool) SyncToDir(auths []*auth.Auth) {
+	p.syncToDir(auths, false)
+}
+
+// SyncToDirAddOnly 本轮只做 upsert，**不剔除任何账号**。
+//
+// 用于「本轮扫到了解析/读取失败的文件」：半写文件（SaveAtomic 瞬间）会被当成
+// 「文件已删」，而剔除结果会持久化，下次启动也不复活。失败的这一轮先按「只增
+// 不删」处理，下一轮扫干净了再走正常对齐。
+func (p *Pool) SyncToDirAddOnly(auths []*auth.Auth) {
+	p.syncToDir(auths, true)
+}
+
+// syncToDir 是 SyncToDir / SyncToDirAddOnly 的共同实现。
+//
+// addOnly=true 时跳过整个剔除阶段。false 时剔除前逐个检查在途请求：账号文件
+// 这一轮没扫到、但仍有请求在用这个 entry，先留着——此时删掉会丢掉刚记上的
+// credits/冷却状态，在途请求结束后也没有 entry 可记账。
+func (p *Pool) syncToDir(auths []*auth.Auth, addOnly bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	seen := make(map[string]bool, len(auths))
@@ -321,12 +340,20 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 		seen[a.UID] = true
 		p.upsertLocked(a)
 	}
+	if addOnly {
+		return
+	}
 	changed := false
-	for uid := range p.byUID {
-		if !seen[uid] {
-			delete(p.byUID, uid)
-			changed = true
+	for uid, e := range p.byUID {
+		if seen[uid] {
+			continue
 		}
+		if e.inFlight.Load() > 0 {
+			log.Printf("WARN: [pool] %s 本轮未扫到但仍有在途请求，暂不剔除", uid)
+			continue
+		}
+		delete(p.byUID, uid)
+		changed = true
 	}
 	if changed {
 		p.saveLocked()

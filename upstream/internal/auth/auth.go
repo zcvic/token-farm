@@ -537,14 +537,27 @@ func sortAuthFilesByModTime(files []string) {
 // 文件写盘会刷新它的 mtime，下次启动它就成了「最新」——同 uid 双 realm 文件的胜负
 // 来回翻，账号在两个域之间跳。
 func LoadDir(dir string) ([]*Auth, error) {
+	out, _, err := LoadDirReport(dir)
+	return out, err
+}
+
+// LoadDirReport 是 LoadDir 的带计数版本：额外回报本轮**解析/读取失败**的文件数。
+//
+// 热重载用它区分两种「本轮没看到某个 uid」：真被删了（文件不在），还是这份文件
+// 此刻读不出来（半写、掉电写坏、权限抖动）。后者若当成删除，会把这个账号从池里
+// 剔除并持久化——下次启动也不会自己复活，属于最典型的「热重载踢号」。
+// 文件在扫描后、读取前被删掉的 ErrNotExist 不计入失败：那本来就是一次删除，
+// 计入会让删除被无限推迟一轮。
+func LoadDirReport(dir string) ([]*Auth, int, error) {
 	files, err := LoadAuthFiles(dir)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// seenUID 重复 UID 检测：同 UID 出现在多个文件时（双 realm 同名 UID 概率近零）
 	// 打 WARN 告警含两文件路径，由「后载入者胜出」保持现状行为（不改变加载结果）。
 	seenUID := make(map[string]string, len(files))
 	var out []*Auth
+	failed := 0
 	for _, f := range files {
 		// Read 而非裸 os.ReadFile：文件被截断/掉电写坏时回退 <f>.bak，避免
 		// 「读坏 → Parse 失败 → continue」把该账号静默丢出池。
@@ -552,12 +565,14 @@ func LoadDir(dir string) ([]*Auth, error) {
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				log.Printf("WARN: auth 文件不可用，跳过 %s: %v", f, err)
+				failed++
 			}
 			continue
 		}
 		a, err := Parse(raw)
 		if err != nil {
 			log.Printf("WARN: auth 文件解析失败，跳过 %s: %v", f, err)
+			failed++
 			continue
 		}
 		a.FilePath = f
@@ -584,5 +599,5 @@ func LoadDir(dir string) ([]*Auth, error) {
 			}
 		}
 	}
-	return out, nil
+	return out, failed, nil
 }

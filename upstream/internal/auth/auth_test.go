@@ -88,6 +88,30 @@ func TestLoadDirLoadsAllValid(t *testing.T) {
 	}
 }
 
+// TestLoadDirReportCountsBadFiles 热重载要靠失败数决定「本轮只增不删」：
+// 坏文件必须被计数，而「扫到后真被删了」的 ErrNotExist 不能计数（否则删除永远
+// 被推迟一轮）。
+func TestLoadDirReportCountsBadFiles(t *testing.T) {
+	dir := t.TempDir()
+	good := `{"auth":{"accessToken":"at1","refreshToken":"r","expiresAt":1},"account":{"uid":"u1"}}`
+	os.WriteFile(filepath.Join(dir, "workbuddy-u1.json"), []byte(good), 0o600)
+	os.WriteFile(filepath.Join(dir, "workbuddy-bad.json"), []byte(`{"auth":`), 0o600)
+
+	list, failed, err := LoadDirReport(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(list) != 1 || failed != 1 {
+		t.Fatalf("list=%d failed=%d want 1/1", len(list), failed)
+	}
+
+	// 只有好文件时失败数为 0（正常对齐可以删号）。
+	os.Remove(filepath.Join(dir, "workbuddy-bad.json"))
+	if _, failed, err := LoadDirReport(dir); err != nil || failed != 0 {
+		t.Fatalf("failed=%d err=%v want 0/nil", failed, err)
+	}
+}
+
 func TestNeedsRefresh(t *testing.T) {
 	a := &Auth{ExpiresAt: 0}
 	if !a.NeedsRefresh(0) {

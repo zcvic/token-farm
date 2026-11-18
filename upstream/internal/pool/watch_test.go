@@ -245,6 +245,89 @@ func TestReloadAuthDirEmptyDirKeepsPool(t *testing.T) {
 	}
 }
 
+// TestReloadAuthDirBadFileKeepsPool 本轮有文件解析失败时只增不删：
+// 半写文件（SaveAtomic 瞬间）会被当成「文件已删」，剔除结果还会持久化，
+// 下次启动也不复活——这是热重载最典型的踢号形态。
+func TestReloadAuthDirBadFileKeepsPool(t *testing.T) {
+	dir := t.TempDir()
+	writeAuthFile(t, dir, "u1", "一号")
+	f2 := writeAuthFile(t, dir, "u2", "二号")
+	auths, _ := auth.LoadDir(dir)
+	p := New(filepath.Join(t.TempDir(), "state.json"))
+	defer p.Close()
+	p.SyncToDir(auths)
+
+	// 一个坏文件在场 + 删掉 u2：本轮失败数 > 0 → u2 不能被剔除。
+	bad := filepath.Join(dir, "workbuddy-bad.json")
+	if err := os.WriteFile(bad, []byte(`{"auth":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(f2); err != nil {
+		t.Fatal(err)
+	}
+	p.reloadAuthDir(dir)
+	if n := len(p.AvailableUIDs()); n != 2 {
+		t.Fatalf("坏文件在场时账号数=%d want 2（删号被误判成解析失败）", n)
+	}
+
+	// 坏文件消失后恢复正常对齐，u2 这才被真正剔除。
+	if err := os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	p.reloadAuthDir(dir)
+	if n := len(p.AvailableUIDs()); n != 1 {
+		t.Errorf("坏文件清掉后账号数=%d want 1（删除应恢复）", n)
+	}
+}
+
+// TestReloadAuthDirBadFileStillAdds 只增不删 ≠ 不加载：同一轮里新账号仍要进池。
+func TestReloadAuthDirBadFileStillAdds(t *testing.T) {
+	dir := t.TempDir()
+	writeAuthFile(t, dir, "u1", "一号")
+	auths, _ := auth.LoadDir(dir)
+	p := New(filepath.Join(t.TempDir(), "state.json"))
+	defer p.Close()
+	p.SyncToDir(auths)
+
+	writeAuthFile(t, dir, "u2", "二号")
+	if err := os.WriteFile(filepath.Join(dir, "workbuddy-bad.json"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.reloadAuthDir(dir)
+	if n := len(p.AvailableUIDs()); n != 2 {
+		t.Errorf("坏文件在场时新账号也应入池，账号数=%d want 2", n)
+	}
+}
+
+// TestReloadAuthDirKeepsInFlight 在途请求未结束不剔除：此时删 entry 会连同
+// 刚记上的 credits/冷却一起丢掉，请求结束后也无处记账。
+func TestReloadAuthDirKeepsInFlight(t *testing.T) {
+	dir := t.TempDir()
+	writeAuthFile(t, dir, "u1", "一号")
+	f2 := writeAuthFile(t, dir, "u2", "二号")
+	auths, _ := auth.LoadDir(dir)
+	p := New(filepath.Join(t.TempDir(), "state.json"))
+	defer p.Close()
+	p.SyncToDir(auths)
+
+	if !p.Acquire("u2") {
+		t.Fatal("前置：u2 应在池中")
+	}
+	if err := os.Remove(f2); err != nil {
+		t.Fatal(err)
+	}
+	p.reloadAuthDir(dir)
+	if n := len(p.AvailableUIDs()); n != 2 {
+		t.Errorf("在途请求期间账号数=%d want 2（不该剔除在途账号）", n)
+	}
+
+	p.Release("u2")
+	p.reloadAuthDir(dir)
+	if n := len(p.AvailableUIDs()); n != 1 {
+		t.Errorf("在途结束后账号数=%d want 1（删除应恢复）", n)
+	}
+}
+
 // statusByUID 从 List() 取指定账号状态（同包测试辅助）。
 func statusByUID(t *testing.T, p *Pool, uid string) Status {
 	t.Helper()
