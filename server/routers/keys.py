@@ -88,6 +88,30 @@ def _check_group_name(value: object) -> None:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _check_custom_token_allowed(token: str) -> None:
+    """自定义密钥形态的入口闸门（issue #447）。
+
+    两道关：
+      1. **部署级开关** `WB_KEY_CUSTOM_ENABLED`（默认关闭）。默认部署只有 `wbk_`
+         随机串 —— 这是既有安全预期，自定义形态是显式选择加入的能力。
+      2. **唯一性**：撞了已有密钥直接 409。按哈希判（明文不参与比对）。
+
+    形态本身（长度 / 字符集 / 弱口令）的校验在 `keysvc._norm_custom_token`，
+    那里同时被 `create_key` 直接调用 —— 即使绕过本路由，也跳不过校验。
+    """
+    if not config.KEY_CUSTOM_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail='自定义密钥形态未启用：请设置环境变量 WB_KEY_CUSTOM_ENABLED=1 后重启',
+        )
+    try:
+        normalized = keysvc._norm_custom_token(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if keysvc.token_exists(normalized):
+        raise HTTPException(status_code=409, detail='这个密钥已被占用，请换一个')
+
+
 class KeyIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     # 绑定的上游（多上游 / 分组隔离）：null / 0 / 省略 = 默认上游。
@@ -112,6 +136,9 @@ class KeyIn(BaseModel):
     # 自定义分组名（管理员自己起的标签，如「客服组」）；'' = 未分组。
     # 与 upstream_id（账号池分组）是两个维度：这个只用于列表筛选，不影响调用。
     group_name: str = Field(default='', max_length=64)
+    # 自定义密钥形态（issue #447）：填了就原样使用（仍过归一化 + 弱密钥拦截）；
+    # 不填 = 默认 `wbk_` + 随机串。需要一个部署级开关才生效（见 WB_KEY_CUSTOM_ENABLED）。
+    custom_token: str | None = None
 
 
 class KeyPatch(BaseModel):
@@ -204,6 +231,8 @@ def create_key(body: KeyIn, request: Request,
     _check_upstream(body.upstream_id)
     _check_preferred_account(body.preferred_account)
     _check_group_name(body.group_name)
+    if body.custom_token:
+        _check_custom_token_allowed(body.custom_token)
     created = keysvc.create_key(
         name=body.name,
         expires_at=body.expires_at,
@@ -217,6 +246,7 @@ def create_key(body: KeyIn, request: Request,
         upstream_id=body.upstream_id,
         preferred_account=body.preferred_account,
         group_name=body.group_name,
+        custom_token=body.custom_token,
     )
     # 密钥是拿额度用的凭证，发放必须留痕（含来源 IP）
     upstream_name = '默认上游'

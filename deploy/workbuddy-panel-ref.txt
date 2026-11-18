@@ -346,3 +346,56 @@ dce9acc437719c52115efcef8489d545d9ea1d55
 a7983640054705d44ad728b70c870eda5dbced0b
 47cc7e220ec0341c02883c9756aae34b2562a193
 084176e485d0fbbc6f814f3b497a8b144d3d5113
+
+# ---- 2026-11 第七批：v2.11.18 前后 4 个提交（Responses / 统计 / 预警 / 密钥）
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      范围：f32521fd（v2.11.17）→ d780cab，4 个非 merge 提交（d780cab 是打包提交）。
+#      已取（按能力重写，不整段 merge）：
+#        · Responses 透传 parallel_tool_calls a7e9891：server/routers/responses.py
+#          的 to_chat_request 只在客户端给了**布尔值**时透传（没给 / 给了字符串
+#          不补默认值，避免改掉上游自己的默认），to_responses_object 按同一值
+#          回显、未给时才是历史默认 true；两处调用点把 body.get 传下去。新增
+#          server/tests/test_responses_parallel_tool_calls.py；test_namespace_compat.py
+#          的调用点断言改为只锚前五个位置参数，后续再加可选参数不用改断言。
+#          本仓库没有 Trace Tap，to_responses_object 只有两个调用点（上游三个）。
+#        · 统计页实时并发 / RPM 指标条 a895c36：server/routers/stats.py 新增
+#          GET /api/stats/realtime 与 _PEAK_CACHE / _per_account_limit / _peaks /
+#          _series（并发用半开区间重叠扫描、桶边界对齐到 step 的绝对值、峰值
+#          缓存 60 秒；上游 /status 取不到时只把在途与容量标成未知，本地口径的
+#          rpm / 峰值 / 走势照常返回）。前端 web/lib/types.ts、web/lib/api.ts、
+#          web/components/common/layout/RealtimeStatsStrip.tsx（5 秒心跳，与页面
+#          60 秒节奏分开）、stats 页插在累计卡之前、globals.css 两条曲线色变量、
+#          五语种 stats.realtime* 文案；新增 server/tests/test_stats_realtime.py。
+#          本地统计页的时段是「天数 + 自定义区间」，组件按本地算出的天数取数。
+#        · 账号保护预警移到「设置 → 上游」61cfd1a：从仪表盘与账号页页头移除，
+#          挂到设置页 upstream 标签（仅 WorkBuddy）的顶部，与它解释的账号保护
+#          策略同处；AccountRiskWarnings 的折叠默认值改为「没有账号被暂停时
+#          收起」，用户手动选过则按偏好。本仓库没有
+#          docs/account-risk-protection.md 与 dev/verify_account_risk_ui.py，
+#          上游对这两处的改动相应未做。
+#        · d780cab 打包提交里的三项：
+#          - #450 /v1/usage 积分按小数返回：server/routers/gateway.py 的
+#            allowance() 加 integral 开关，token 段仍是整数（避免前端显示
+#            x.0），credits 段按 6 位小数保留；remaining 夹到 0。新增
+#            server/tests/test_usage_credits.py。
+#          - #446 「限时免费」判定抽成 web/lib/model-free.ts（tags 含「免费」或
+#            id 以 -free 结尾，两条取并集；认不出的一律不标免费），
+#            ModelWhitelistInput 改用它；新增 web/lib/model-free.test.mjs。
+#          - #447 自定义密钥形态：新增 WB_KEY_CUSTOM_ENABLED（默认关闭）与
+#            .env.example 说明；server/keysvc.py 增加长度 / 字符集 / 弱口令
+#            归一化（_norm_custom_token，按**整段**比对弱词，子串不误杀）、
+#            token_exists，resolve() 不再要求 wbk_ 前缀但仍做廉价预筛且仍按
+#            哈希 compare_digest；create_key 增加 custom_token 参数；
+#            server/routers/keys.py 的 KeyIn.custom_token 与
+#            _check_custom_token_allowed（开关 403 / 形态 400 / 重名 409）；
+#            密钥页新建表单增加可选字段（编辑不可改）、五语种文案；新增
+#            server/tests/test_custom_key_token.py。
+#      未取：
+#        · #449 启动器自启动修复：本仓库 windows/launcher/src/MainForm.cs 已用
+#          OnHandleCreated + _bootStartPosted 自己修好，无需再改。
+#        · d780cab 里的 CHANGELOG 段落与发版提交：本仓库的发版与更新日志
+#          自己维护。
+a7e98912ad6db2da9f155c8641509cdf2ea3aadb
+a895c3632be8cbdfd8e268eb1992e382df6535d1
+61cfd1a0fc5269567ec8af841c9a9b41fea21930
+d780cabdc0672d21dc3b035c2bf4fa6b6c415e39

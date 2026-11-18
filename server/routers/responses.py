@@ -906,6 +906,19 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
     if choice is not None:
         out['tool_choice'] = choice
 
+    # `parallel_tool_calls` 在 Responses → Chat Completions 里是**同名同语义**的
+    # 顶层字段，但两者缺省不同：Responses 缺省 true，而上游 Chat 侧把「没写」
+    # 当成自己的默认。所以只在客户端**显式给了布尔值**时才转告上游——缺省不写，
+    # 与 `anthropic.py` 对 `disable_parallel_tool_use` 的映射同口径（只有显式
+    # false 才改行为）。
+    #
+    # 漏了这一段的表现：客户端传 `parallel_tool_calls: false`（Claude Code、
+    # Codex 这类客户端在单工具回合里会传）时上游照样并发出多个工具调用，
+    # 客户端按「只该有一个」解析，多出来的那个会被丢掉或直接报参数错
+    # （11148 tool_calls and tool results do not match）。
+    if isinstance(body.get('parallel_tool_calls'), bool):
+        out['parallel_tool_calls'] = body['parallel_tool_calls']
+
     reasoning = body.get('reasoning')
     if isinstance(reasoning, dict) and isinstance(reasoning.get('effort'), str):
         out['reasoning_effort'] = reasoning['effort']
@@ -1126,6 +1139,7 @@ def to_responses_object(
     resp_id: str,
     custom_tool_names: set[str] | None = None,
     bridge: _ToolBridge | None = None,
+    parallel_tool_calls: bool | None = None,
 ) -> dict:
     """Chat Completions 非流式响应 → Responses 响应体。"""
     custom_tool_names = custom_tool_names or set()
@@ -1197,7 +1211,9 @@ def to_responses_object(
         'model': model,
         'output': output,
         'output_text': text if isinstance(text, str) else '',
-        'parallel_tool_calls': True,
+        # 回显客户端给的值；未给时保持历史默认（true），与 OpenAI 的缺省一致。
+        'parallel_tool_calls': (parallel_tool_calls
+                                if isinstance(parallel_tool_calls, bool) else True),
         'error': None,
         'incomplete_details': incomplete,
         'usage': _usage_object(data.get('usage') or {}),
@@ -1827,7 +1843,8 @@ async def _platform_response(*, body: dict, stream: bool, key: dict, ip: str,
                            'upstream_invalid_body')
         try:
             return JSONResponse(to_responses_object(
-                data, model, resp_id, custom_tool_names, bridge))
+                data, model, resp_id, custom_tool_names, bridge,
+                body.get('parallel_tool_calls')))
         except (CustomToolArgumentsError, ToolSearchArgumentsError) as exc:
             return _failed(
                 str(exc), 502, 'api_error',
@@ -1986,7 +2003,8 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
                 # `read_file_2` 这类内部名原样发给客户端，而**同一个请求只要带上
                 # stream 就会还原**——同一个请求换个标志就得到两套工具名，
                 # 客户端按名字回传下一轮时会匹配不上。
-                to_responses_object(data, model, resp_id, custom_tool_names, bridge)
+                to_responses_object(data, model, resp_id, custom_tool_names, bridge,
+                                    body.get('parallel_tool_calls'))
             )
         except (CustomToolArgumentsError, ToolSearchArgumentsError) as exc:
             return _failed(

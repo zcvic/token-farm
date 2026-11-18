@@ -311,6 +311,13 @@
     "creditsExpiryDaily": "最近一天（{time}）共 {amount} 積分到期"
   },
   "stats": {
+    "realtimeConcurrency": "當前併發",
+    "realtimeRpm": "RPM",
+    "realtimeTrend": "近 3 分鐘",
+    "realtimePeak": "峰值 {n}",
+    "realtimeCapacity": "上限 {c}",
+    "realtimeAverage": "3 分鐘均 {v}",
+    "realtimeUnavailable": "上游無法連線",
     "customRange": "自訂",
     "startDate": "開始日期",
     "endDate": "結束日期",
@@ -820,6 +827,9 @@
     "preferredAccountPlaceholder": "帳號 UID（留空 = 不指定）",
     "preferredAccountLoadFailed": "讀不到該分組的帳號清單，可直接填寫帳號 UID；填錯只會在選號時自動回落。",
     "upstreamsFailed": "上游清單沒取到 —— 新建金鑰的「綁定上游」只會顯示預設項，先重試再建立。",
+    "customTokenLabel": "自訂金鑰（選填）",
+    "customTokenPlaceholder": "留空 = 自動產生 wbk_ 開頭的隨機金鑰",
+    "customTokenHint": "從其他閘道遷移時，可直接沿用原本的金鑰（如 sk-xxx），用戶端無需改設定。至少 16 個字元，只能用字母、數字、底線、點與連字號；太容易猜的會被拒絕。需在部署環境變數中設定 WB_KEY_CUSTOM_ENABLED=1 才可用。",
     "group": "分組",
     "groupPlaceholder": "例如：客服組（留空 = 未分組）",
     "groupHint": "自訂標籤，只用於清單篩選與歸類；它不會改變這把金鑰走哪個上游帳號池（那是「上游」那一項）。",
@@ -2213,7 +2223,8 @@
     "账号最短间隔不能大于最长间隔": "帳號最短間隔不能大於最長間隔",
     "秒": "秒",
     "分钟": "分鐘",
-    "请求上限（旧版上游）": "請求上限（舊版上游）"
+    "请求上限（旧版上游）": "請求上限（舊版上游）",
+    "自定义密钥形态未启用：请设置环境变量 WB_KEY_CUSTOM_ENABLED=1 后重启": "自訂金鑰形態未啟用：請設定環境變數 WB_KEY_CUSTOM_ENABLED=1 後重新啟動"
   },
   "redPacket": {
     "title": "紅包",
@@ -2393,6 +2404,7 @@
     "creditsHint": "餘額來自平台權益介面（唯讀查詢）；簽到獎池另外計算",
     "creditsHintTrae": "餘額來自 Trae 權益介面（唯讀查詢）；簽到獎池另外計算",
     "creditsHintQoder": "餘額來自 Qoder 內建閘道的積分快照（唯讀查詢）；簽到積分另外計算",
+    "creditsLastRecorded": "上次登記：{when}",
     "creditsLimit": "總額",
     "creditsUsed": "已用",
     "creditsCheckin": "簽到獎池",

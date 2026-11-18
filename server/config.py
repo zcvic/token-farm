@@ -278,6 +278,13 @@ SECURE_COOKIE = _env('WB_SECURE_COOKIE', 'auto')  # auto | true | false
 # 允许的 CORS 来源（同源部署时留空即可）
 CORS_ORIGINS = [o for o in _env('WB_CORS_ORIGINS', '').split(',') if o]
 
+# 是否允许创建**自定义形态**的密钥（issue #447）：默认关闭。
+#
+# 关闭时只有 `wbk_` + 随机串（猜不到）；打开后可以填 `sk-xxx` 这类从别的网关
+# 迁过来的存量形态，代价是安全性取决于用户填的那串东西。默认关闭是为了让
+# 「没有任何人手动打开」的部署保持原有安全预期 —— 这是显式选择加入的能力。
+KEY_CUSTOM_ENABLED = _env_bool('WB_KEY_CUSTOM_ENABLED', False)
+
 TENCENT_BASE = 'https://copilot.tencent.com'
 TENCENT_BILLING_BASE = 'https://www.codebuddy.cn'  # 国内版 billing 基址
 TENCENT_CHECKIN = 'https://www.codebuddy.cn/v2/billing/meter/daily-checkin'
