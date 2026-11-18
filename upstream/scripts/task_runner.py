@@ -178,6 +178,11 @@ MAPPING = {
     # 小程序侧发射点是灵感页的两个事件（playbook_cta_click + playbook_prompt_send），
     # 与桌面 playbook_prompt 任务同源不同域：这里走 mp 指纹双事件组。
     "Sequential_Tasks_7":     {"kind": "miniplybook", "target": 1, "src": "无(mp 灵感双事件)"},
+    # 关注「腾讯 WorkBuddy」公众号满 24h：进度由服务端计时发放，客户端**没有**可上报
+    # 的动作，只能 accept → 等服务端达标 → claim。判据在 mp 口径下发（成长域小程序
+    # 限定），accept/claim 都要带 X-Client-Platform: miniprogram（issue #243）。
+    "wb_wechat_oa_subscribe_task": {"kind": "claimonly", "target": 1,
+                                     "src": "无(服务端计时 24h)"},
     # 「在专家页搜索并召唤『X』，完成一次对话」类活动任务（判据与 Expert_lighthouse
     # 同源：召唤三连 + 带 has_expert 的六连 + expert_actual_use(mode=LOCAL)）。
     # 专家 id 全部取自任务自身的 jump_url（与专家市场真实条目一一对应），
@@ -1435,6 +1440,8 @@ def process_minichat_task(auth, code, opts, stats, uid8):
     Sequential_Tasks_4（判据 kind=miniautomation，mp automated_task_create_suc）与
     Sequential_Tasks_5（判据 kind=miniglmchat，mini chat + glm-5.2 模型上下文）——
     仅上报事件形状不同，链路（accept/claim/回读）完全一致。
+    kind=claimonly（wb_wechat_oa_subscribe_task）是特例：进度由服务端计时，没有可
+    上报的客户端动作，只走 accept → 回读 → claim，不构造事件。
     spec 由 MAPPING 提供，未映射的 mp 任务保守跳过。
     """
     spec = MAPPING.get(code) or {}
@@ -1480,6 +1487,34 @@ def process_minichat_task(auth, code, opts, stats, uid8):
 
     if not opts.yes:
         print(f"[task_runner] {uid8} {code}: query {ast}({cur}/{target}) -> 可点亮({kind})，dry-run 跳过")
+        stats["pending"] += 1
+        return
+
+    # claimonly：服务端计时类任务（wb_wechat_oa_subscribe_task，关注公众号满 24h）：
+    # 客户端没有可上报的动作，只能 accept → 回读 → 达标就 claim，未达标记 pending
+    # 等下一轮。刻意不走 ids_for/build_event —— 编一个不存在的动作上报会被服务端
+    # 判无效，白留一条脏进度。
+    if kind == "claimonly":
+        if ast == "not_accepted":
+            st, r = tc.do_post(auth, tc.chat_base(auth), tc.PATH_ACCEPT_TASKS,
+                               {"task_codes": [code]}, headers=MP_PLATFORM_HEADER)
+            res = (((r.get("data") or {}).get("results") or [{}])[0].get("status")
+                   if isinstance(r, dict) else r)
+            print(f"[task_runner] {uid8} {code}: accept {st} {res} (claimonly)")
+            time.sleep(opts.gap)
+            if st != 200 or res not in ("accepted", "already_accepted"):
+                stats["fail"] += 1
+                return
+            # accept 之前 progress 可能为空，回读一次拿真实 target/current。
+            t = _mp_task_status(auth, code) or t
+            ast = t.get("accept_status")
+            prog = t.get("progress") or {}
+            cur = prog.get("current") or 0
+            target = prog.get("target") or spec.get("target") or 1
+        if ast == "completed" or cur >= target:
+            claim_one(auth, code, uid8, stats, opts.gap, mp=True)
+            return
+        print(f"[task_runner] {uid8} {code}: {ast}({cur}/{target}) -> 服务端计时未到，pending")
         stats["pending"] += 1
         return
 
@@ -1906,7 +1941,7 @@ def process_account(auth, opts, stats):
     minichat_in_map = [c for c in MAPPING
                       if MAPPING[c].get("kind") in ("minichat", "schoolseason", "miniexpert",
                                                     "miniautomation", "miniglmchat",
-                                                    "miniplybook")]
+                                                    "miniplybook", "claimonly")]
     special = set(school_in_map) | set(minichat_in_map)
     if opts.only_codes:
         codes = [c for c in opts.only_codes if c not in special]
@@ -1916,7 +1951,7 @@ def process_account(auth, opts, stats):
         codes = [c for c in MAPPING
                  if MAPPING[c].get("kind") not in ("school", "minichat", "schoolseason",
                                                    "miniexpert", "miniautomation",
-                                                   "miniglmchat", "miniplybook")]
+                                                   "miniglmchat", "miniplybook", "claimonly")]
         process_school = True
         process_minichat = True
         # 未在映射表但存在于任务列表的（如 Expert_Philanthropy）——只计数展示
@@ -1936,10 +1971,21 @@ def process_account(auth, opts, stats):
     for code in codes:
         t = by_code.get(code)
         if t is None:
-            print(f"[task_runner] {uid8} {code}: query 任务不存在")
-            stats["total"] += 1
-            stats["skip"] += 1
-            continue
+            # 默认列表未命中时回落 mp 口径再查一次：任务中心改版后常规任务也可能只在
+            # mp 列表下发（issue #243 的 Library_read），不回落会把存在的任务判成
+            # 「该账号没有此任务」。命中后仍按默认头继续（只有列表口径需要 mp 头，
+            # 与上游 taskByCode 的回落口径一致）；mp 专属 code 已由 special 挡在上面。
+            try:
+                t = _mp_task_status(auth, code)
+            except Exception as e:
+                print(f"[task_runner] {uid8} {code}: mp 兜底查询失败: {e}")
+                t = None
+            if t is None:
+                print(f"[task_runner] {uid8} {code}: query 任务不存在")
+                stats["total"] += 1
+                stats["skip"] += 1
+                continue
+            print(f"[task_runner] {uid8} {code}: 默认列表无此任务，mp 口径命中")
         process_task(auth, code, t, opts, stats)
 
     # 小程序成长任务段（mp 口径）：已完成/可领状态下 only_claim 模式仍可入账（claim 幂等）；

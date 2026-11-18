@@ -43,6 +43,7 @@ const NAME_KEY: Record<string, string> = {
   Sequential_Tasks_5: 'tasks.taskName_seq5',
   Sequential_Tasks_6: 'tasks.taskName_seq6',
   Sequential_Tasks_7: 'tasks.taskName_seq7',
+  wb_wechat_oa_subscribe_task: 'tasks.taskName_wbWechatOa',
   school_season: 'tasks.taskName_schoolSeason',
   // 专家体验类活动任务（判据与 Expert_lighthouse 同源）
   WorkBuddy_Valorant: 'tasks.taskName_valorant',

@@ -384,6 +384,7 @@ _KIND_GROUP = {
     'school': 'school',
     'minichat': 'mini', 'schoolseason': 'mini', 'miniexpert': 'mini',
     'miniautomation': 'mini', 'miniglmchat': 'mini', 'miniplybook': 'mini',
+    'claimonly': 'mini',
     'expertx': 'expert',
 }
 
