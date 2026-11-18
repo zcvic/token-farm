@@ -155,6 +155,22 @@ git fetch qoder-ref --no-tags
 附录 D.3 的表里并追加进 `deploy/workbuddy-panel-ref.txt` 第六批。排期（D.4）与需确认
 （D.5）两项仍未动，不要当成已同步。
 
+### 已评估：misakano `c4b53cd..34120825`
+
+扫描边界之后上游又推了 67 个提交（12 merge / 55 非 merge，到 2026-11-18 的
+`34120825`），同样逐条判定，写进
+[upstream-sync-misakano.md](upstream-sync-misakano.md) 的附录 E：
+
+- **值得做 3 项**（9 个提交）：工具 schema 出站纠偏 + 11129/11152 登记
+  （E-1）、早到工具结果重排（E-2）、`/v1/responses` 回放补齐（E-3）；
+- 15 个随项（M-P2-7 的 5.11.3 `X-Client-*` 与 mp 撤头一组、测试探针、merge 面）、
+  1 个需确认（本地 Python updater 自查 0 字节临时文件与失败重试）；
+- 42 个不适用：内嵌 Go 面板的实时任务卡、换段、narration / toolonly / rescue、
+  官方头对拍 CI。本地没有这四个模块，不按提交逐个移植。
+
+这 3 项**尚未落地**，按 E.6 的顺序做：E-1（运营代价最高）→ E-2（稳定复现 11148）→
+E-3（长任务回放）。
+
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）
 git format-patch -1 <commit> -o /tmp/sync

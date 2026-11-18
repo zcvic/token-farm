@@ -2707,3 +2707,202 @@ CLI 抬到 2.176.0，GL 仍是 5.9.4 / 2.165.0。本地 `upstream/internal/upstr
 `[A-Za-z0-9_-]{0,64}`（否则 `../` 能带着账号 Bearer 打到同主机别的接口）、同一时刻
 只跑一轮（`TryLock`）、按号随机间隔、客户端断开即停；真写操作还必须显式列出账号，
 「空 = 全部」只给 dry-run。
+
+## 附录 E：`c4b53cd..34120825` 增量评估（2026-11-18 扫）
+
+### E.1 范围与统计
+
+上游在附录 D 的扫描边界之后又推了 **67 个提交**（12 个 merge / 55 个非 merge），
+时间跨度 2026-11-16 晚到 11-18。按与附录 D 相同的六档口径逐条判定：
+
+| 判定 | 提交数 | 归并后 |
+|---|---:|---|
+| 值得做 | 9 | **3 项**（E-1 / E-2 / E-3） |
+| 随项（随未移植的 M-P* 或随上面三项） | 15 | M-P2-7 一组 + 测试/探针 + 7 个 merge |
+| 需确认 | 1 | 本地 updater 自查 |
+| 已覆盖 | 0 | 见 E-3 的「主体已覆盖」说明 |
+| 不适用 | 42 | 内嵌面板 / 换段 / narration / toolonly / rescue / CI |
+
+这批的共同形状：11-17 是一次集中上线（narration 与 toolonly 救援、换段异步、内嵌
+面板实时任务卡、tools schema 规整），11-18 收尾。本地**没有** narration、
+toolonly、换段、内嵌 Go 面板四个模块，那四族整体不适用；真正的落点集中在
+**Go 出站管线**（`upstream/internal/upstream`）与 **Python `/v1/responses` 回放层**
+（`server/routers/responses.py`）。
+
+### E.2 值得做（3 项）
+
+**E-1　工具 schema 出站纠偏 + 11129 / 11152 登记**
+（`615dc753`、`d6301fe9`、`733942a7`；`ae44d739` 的识别部分）
+
+本地现状与参考仓的差距是逐层的：
+
+- `payload.go:384 normalizeToolPatterns` 只做 `\_` → `_`；`payload.go:456
+  normalizeToolEnumTypes` 只给「有 enum 无 type」补 type。参考仓后来加的
+  **nil 键剔除、类型别名（str/int/dict/list…）、required 清污、array items 解包、
+  容器键（properties/$defs）与关键字区分、关键字取值类型纠偏、顶层 `$ref` 展开**
+  本地一概没有。
+- `client.go` 里 `11129` / `11152` **零命中**：Classify 落到通用 4xx 兜底 →
+  `ErrClient` → 喂连败 + 全池轮转 → 末端 503 `no_healthy_account`。客户端声明一个
+  不合规的工具，表现成「所有账号暂时不可用」。
+- `hint.go:112 FrameKind` 只读 `error.message`，不读 `code`：`{"error":{"code":11129}}`
+  这种只有码没有文案的帧判成 `ErrNone`，hint 为空；也没有 `frameRequestCodes` 表。
+
+落点：`payload.go` 增加 `normalizeToolParameters` / `normalizeSchemaTree` /
+`coerceSchemaKeywords`；`client.go` 增加 `isToolSchemaRejected`（直接复用现有的
+`hasBusinessCode`，容忍空白/字符串码/嵌套）；`hint.go` 给 `ErrBadParams` 补
+「问题在 tools」的 hint。
+
+**实施要点**：`615dc753` 是中间态，`d6301fe9` 修了它「把数据关键字当 schema 关键字」
+的误伤（`schemaDataKeys` / `schemaContainerKeys`），`733942a7` 才补上 11152、关键字
+取值类型与顶层 `$ref`。落地时直接取三者的**最终形态**，不要照抄第一个提交。
+成本：单包改动 + 表驱动测试，无配置、无迁移。
+
+**E-2　早到工具结果重排**（`27b7458f` + `e14a3d03`）
+
+OpenAI 兼容协议按**位置**配对：`tool` 结果必须出现在声明它的 `assistant.tool_calls`
+之后。Codex 经 cc-switch 类本地代理转发时，`/v1/responses` 的 `function_call_output`
+会排在 `function_call` 之前。
+
+- 本地 Go 只有 `repackToolResultBlocks` + `cleanupOrphanToolCalls` 两步
+  （`payload.go:76-77`）：早到的 `tool` 被 repack 当普通消息直通，cleanup 又因两侧
+  id 都在判「配对完整」→ 倒置一路带到上游，撞 11148 `tool_call_sequence_broken`。
+- 本地 Python `responses.py` 按 input 原序 append（`:684`），带 call_id 的 output
+  在 `open_call_ids` 里找不到也照样先落 `role=tool`（`:757-766`），assistant 在后，
+  同样 11148。
+
+**必须带 `e14a3d03` 的口径**：不能「同 id 跟最后一次声明走」。上游流里缺 id 时，
+网关自己按轮内下标补 `call_0` / `toolu_0`，同一会话每轮都可能重复；按最后声明归组会
+把顺序本来正确的第一轮结果搬到最后一轮，反而制造 11148。正确做法是正序扫描、
+记每个 id「已声明、未应答」计数：命中未应答声明就原地配对，否则归后面**最近**一次
+声明并预扣一次应答。本地 Python 的 `open_call_ids` 已经是这个语义，只是没用它做
+重排。
+
+落点：Go 新增 `reorderEarlyToolResults` + `declaredToolCallIDs`，管线改为
+reorderEarly → repack → cleanup；Python 在 `convertInputItems` 收尾处补一遍同口径
+重排（或把早到 output 暂存，等声明者落地后再排）。成本：两侧各约百行 + 6 种形状用例。
+
+**E-3　`/v1/responses` 回放补齐**（`0e41952f`、`94a68792`、`fdf05eae`、`f6682159`）
+
+本地 `server/routers/responses.py` 已经有 reasoning 暂存与挂载（`pending_reasoning` /
+`attach_reasoning`）、并行结果图片延迟落盘、组内通知延后（`flush_tool_group`），
+比参考仓 #252 之前的版本完整，所以 `0e41952f` 的**主体已覆盖**。仍缺四项：
+
+1. **Chat 形状的 tool 结果丢 `tool_call_id`**（`94a68792`）：客户端把 chat messages
+   直接塞进 input 时，`{"role":"tool","tool_call_id":…}` 落进默认分支，只保留
+   role/content，配对信息没了。
+2. **Chat 形状 assistant 的 `tool_calls` 与内联 `reasoning_content` 被丢**
+   （`0e41952f` 的一部分）：默认分支只取 content，工具批次与调用前思考都出不了站。
+3. **惰性项会打断工具组**（`fdf05eae` 的本地等价形态）：主循环在
+   `:734-742` 对任何非结果、非 reasoning 的项先 `flush_tool_group()`；托管工具回执
+   （`web_search_call` / `image_generation_call` / `mcp_call` / `computer_call` …）
+   夹在并行结果之间时，图片和通知就被插进 tool 结果中间 → 11148。
+4. **compaction 项被整条丢弃**：本地不解析，所以**不会**像参考仓修之前那样把密文当
+   摘要送上游（这点比上游安全），但也丢掉了上下文交接摘要。要补就按 `f6682159` 的
+   最终口径：只认解出的 JSON 对象、解不出且像密文（纯 base64/token 字符且 ≥32）就
+   丢、纯文本保留并按 32 KiB 封顶。
+
+落点：`convertInputItems` 主循环 + 一个与主循环共用的 `replayInert` 判据。成本：中，
+建议顺着现有的 `pending_tool_images` / `pending_tool_notices` 统筹，不要另起一套。
+
+### E.3 随项（15）
+
+- **M-P2-7 指纹（5 条）**：`a0b9f87e`（文档）、`96265d71`（CN 5.11.3 补
+  `X-Client-*` 三头）、`77ca3fe7`（小程序口径撤掉桌面三头）、`b85d4f25`（对拍夹具）、
+  `c9b059c4`（按取值认口径的测试）。本地 Go 头集只有 `X-Client-IP`，Python 侧只用
+  `X-Client-Platform: web|miniprogram`；照 D-12 的结论，连同 desktop 三元组与按
+  realm 拆版本一起做，**不要单独改数字**。
+- **测试 / 探针（3 条）**：`11c0d3f6`（11129 形态筛选）、`74922344`（null 与数据
+  关键字回归）、`5f56e59a`（回放缺口拆子测试）。落 E-1 / E-3 时直接抄成表驱动用例，
+  不单独立项。
+- **merge 面（7 条）**：`a650bd04`、`392c4025`、`501242b3`（E-2 / E-1）、
+  `929a4a9a`、`0294af8f`、`76af6262`（E-3）、`4ac80c3f`（识别部分随 E-1；首帧
+  统一口径那半本地没有落点）。merge 单独看没有增量，只在这些子提交已判定时才有意义。
+
+### E.4 需确认（1）
+
+- `253864d6`（updater 失败后 30 分钟重试、下载失败不留 0 字节临时文件）：参考仓是
+  Go 自带 updater，本地是 `deploy/update.py` + `server/services/updater.py`，实现
+  不同 → 不适用。但这两条要在本地 updater 上**自查**：是否先写目标文件再校验、
+  失败后是否把半截文件留在原地、是否有退避重试。确认后要么补护栏，要么在部署文档
+  记一句「已具备」。
+
+### E.5 逐项判定表（67）
+
+| 提交 | 日期 | 判定 | 说明 |
+|---|---|---|---|
+| `38dca39c` | 11-16 | 不适用 | 内嵌 Go 面板的实时任务卡 |
+| `06a401ed` | 11-16 | 不适用 | 换段异步 + keepalive（本地无换段） |
+| `27b7458f` | 11-17 | 值得 | E-2；AutoBot 改址部分不适用 |
+| `d3250fe8` | 11-17 | 不适用 | 面板测试夹具 |
+| `43436be2` | 11-17 | 不适用 | 面板启动时机 |
+| `f59964cd` | 11-17 | 不适用 | 面板行渲染 |
+| `c30c358b` | 11-17 | 不适用 | 面板 mp 头（口径结论随 M-P2-7） |
+| `ed6dfd62` | 11-17 | 不适用 | 面板每轮一次请求 |
+| `da8eb977` | 11-17 | 不适用 | 面板 fresh 下限 |
+| `e14a3d03` | 11-17 | 值得 | E-2 的最终口径（跨轮复用 id） |
+| `46efa456` | 11-17 | 不适用 | 面板轮询间隔/缓存 |
+| `9f1764cc` | 11-17 | 不适用 | 换段 Close 回收 |
+| `75b109c7` | 11-17 | 不适用 | 面板后台跑一轮 |
+| `cb8fdd52` | 11-17 | 不适用 | 本地无官方头对拍门禁 |
+| `3117026e` | 11-17 | 不适用 | 面板任务表裁剪 |
+| `a7e2820b` | 11-17 | 不适用 | 首帧否决窗口 + 换段 keepalive |
+| `bc854c02` | 11-17 | 不适用 | 面板列表重建 |
+| `ed7decbc` | 11-17 | 不适用 | 面板后台标签页刷新 |
+| `c22310c6` | 11-17 | 不适用 | 面板 README |
+| `e4492f0c` | 11-17 | 不适用 | 换段失败落决策链 |
+| `183c470b` | 11-17 | 不适用 | narration |
+| `6c508881` | 11-17 | 不适用 | narration |
+| `0e41952f` | 11-17 | 值得 | E-3；reasoning 主体本地已覆盖 |
+| `f1394fea` | 11-17 | 不适用 | toolonly 末句切分 |
+| `bb8a9536` | 11-17 | 不适用 | narration |
+| `224fc567` | 11-17 | 不适用 | toolonly 末句切分 |
+| `89c84fb3` | 11-17 | 不适用 | narration |
+| `8f8876c6` | 11-17 | 不适用 | 面板快照口径 |
+| `d7dd327c` | 11-17 | 不适用 | 面板测试 |
+| `6cd32a7d` | 11-17 | 不适用 | narration |
+| `2159da4e` | 11-17 | 不适用 | 换段保活判据 |
+| `40161992` | 11-17 | 不适用 | narration |
+| `615dc753` | 11-16 | 值得 | E-1 的起点（中间态） |
+| `36296df8` | 11-17 | 不适用 | CI merge |
+| `a650bd04` | 11-17 | 随项 | E-2 merge |
+| `1678fea6` | 11-17 | 不适用 | narration merge |
+| `2827974f` | 11-17 | 不适用 | narration merge |
+| `2e6007c0` | 11-17 | 不适用 | 注释更正 |
+| `9c2a6926` | 11-17 | 不适用 | 换段 merge |
+| `392c4025` | 11-17 | 随项 | E-1 merge |
+| `e0e0e3f6` | 11-17 | 不适用 | 面板 merge |
+| `929a4a9a` | 11-17 | 随项 | E-3 merge |
+| `a0b9f87e` | 11-17 | 随项 | M-P2-7 文档 |
+| `11c0d3f6` | 11-17 | 随项 | E-1 形态探针 |
+| `d6301fe9` | 11-17 | 值得 | E-1 的修正（数据关键字/null） |
+| `96265d71` | 11-17 | 随项 | M-P2-7 CN 三头 |
+| `94a68792` | 11-17 | 值得 | E-3 第 1 项 |
+| `fdf05eae` | 11-17 | 值得 | E-3 第 3 项 |
+| `f6682159` | 11-17 | 值得 | E-3 第 4 项 |
+| `ae44d739` | 11-17 | 随项 | 识别部分随 E-1；首帧帧口径本地无落点 |
+| `5f56e59a` | 11-17 | 随项 | E-3 测试拆分 |
+| `4bf01635` | 11-17 | 不适用 | 注释改口 |
+| `c9b059c4` | 11-17 | 随项 | M-P2-7 测试 |
+| `501242b3` | 11-17 | 随项 | E-1 merge |
+| `74922344` | 11-17 | 随项 | E-1 回归探针 |
+| `b85d4f25` | 11-17 | 随项 | M-P2-7 夹具 |
+| `4ac80c3f` | 11-17 | 随项 | 识别部分随 E-1；帧部分不适用 |
+| `6bc6ff28` | 11-17 | 不适用 | 请求级错误帧探针（本地无该窗口） |
+| `a5890ef0` | 11-17 | 不适用 | 降级闸门探针（参考仓独有） |
+| `77ca3fe7` | 11-17 | 随项 | M-P2-7 mp 撤头 |
+| `0294af8f` | 11-17 | 随项 | E-3 merge |
+| `76af6262` | 11-17 | 随项 | E-3 merge |
+| `f8d83465` | 11-18 | 不适用 | narration |
+| `75653945` | 11-18 | 不适用 | narration |
+| `253864d6` | 11-18 | 需确认 | 本地 updater 自查（见 E.4） |
+| `733942a7` | 11-18 | 值得 | E-1 的最终形态（11152 / 关键字类型 / 顶层 `$ref`） |
+| `34120825` | 11-18 | 不适用 | rescue 诊断（本地无救援链路） |
+
+### E.6 建议顺序
+
+1. **E-1**：现在 11129/11152 会把「工具定义不合规」伪装成全池故障，逐个号记连败，
+   运营代价最高；改动只在一包内。
+2. **E-2**：Codex 经本地代理的形态稳定复现 11148，修完即消失；Go/Python 两侧同口径。
+3. **E-3**：长任务回放一致性与上下文交接，可跟下一次 responses 改动合并做。
+4. **M-P2-7**：`96265d71` / `77ca3fe7` 只在该项里做；单独改版本号会得到混合指纹
+   （见 D-12）。
