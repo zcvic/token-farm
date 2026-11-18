@@ -120,11 +120,12 @@ type Config struct {
 		// 自定义值改写。
 		UserAgent string `json:"user_agent"`
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与白名单
-		// 头组 X-IDE-Version 的取值）。空 = 内置默认（对齐官方 5.5.4 分发包）；
-		// 显式配置（如升级后的桌面包版本）则随配置走。
+		// 头组 X-IDE-Version 的取值）。空 = 内置默认，**按 realm 分档**：国内 5.11.3 /
+		// 国际 5.9.4（两侧分发包不同档）；显式配置则两条链路都随配置走。
 		ClientVersion string `json:"client_version"`
-		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（对齐官方内置 CLI
-		// 2.137.1）；显式配置则随配置走。
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认，按 realm 分档：
+		// 国内 2.176.0 / 国际 2.165.0（随各分发包内置的 @genie/agent-cli）；显式配置
+		// 则随配置走。
 		CliVersion string `json:"cli_version"`
 
 		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底。

@@ -8,13 +8,13 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// globalUAString global realm 默认出站 UA：第二段 platform 品牌为官方国际版
-// `WorkBuddy AI`（intl 项目逆向证据：WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2），
-// 版本段保持现有 clientVersion/cliVersion（本仓库 5.5.4/2.137.1），只切品牌段。
-const globalUAString = "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1"
+// globalUAString global realm 默认出站 UA：第二段品牌为官方国际版的 slug
+// `workbuddy-ai`（Electron userAgentFallback 的 asciiSlug 形态），版本段按 realm
+// 取内置默认（global 5.9.4 / CLI 2.165.0）。
+const globalUAString = "WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0"
 
 // TestChatHeadersGlobalRealm global 账号的 chat 请求头对齐 intl 三件套：
-//  1. UA 含 `WorkBuddy AI/<v>` 平台段（非 CN 的 `WorkBuddy/<v>`）；
+//  1. UA 第二段为 `workbuddy-ai/<v>`（非 CN 的 `WorkBuddy/<v>`）；
 //  2. X-No-Enterprise-Id: 1（个人账号无企业 ID，显式声明）；
 //  3. X-Domain: www.workbuddy.ai（显式声明国际版域）。
 //
@@ -126,8 +126,9 @@ func TestChatHeadersCNNoEnterpriseZeroRegression(t *testing.T) {
 	}
 }
 
-// TestDefaultWorkBuddyUAForGlobal UA 品牌段按 realm 切换的单元级断言：
-// global → 第二段 `WorkBuddy AI`；CN → 第二段 `WorkBuddy`。
+// TestDefaultWorkBuddyUAForGlobal UA 品牌段与版本段按 realm 切换的单元级断言：
+// global → 第二段 `workbuddy-ai` 且 5.9.4/2.165.0；CN → 第二段 `WorkBuddy` 且
+// 5.11.3/2.176.0。
 func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	c := &Client{}
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{}); got != defaultUAString {
@@ -136,9 +137,9 @@ func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != globalUAString {
 		t.Errorf("defaultWorkBuddyUAFor(global) = %q want %q", got, globalUAString)
 	}
-	// version 覆盖仍生效：global 平台段跟随 clientVersion。
+	// version 覆盖仍生效：global 平台段跟随 clientVersion，CLI 段取 global 默认。
 	c2 := &Client{ClientVersion: "6.0.0"}
-	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 WorkBuddy AI/6.0.0 CLI/2.137.1" {
+	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 workbuddy-ai/6.0.0 CLI/2.165.0" {
 		t.Errorf("defaultWorkBuddyUAFor(global, v6) = %q", got)
 	}
 }

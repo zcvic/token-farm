@@ -128,8 +128,27 @@ def realm_of(auth: dict | None) -> Realm:
     return resolve_realm(auth.get('realm'), auth.get('domain'))
 
 
-def client_version() -> str:
-    """出站 UA 的客户端版本段（上游 config upstream.client_version，空则内置默认）。"""
+# 出站客户端版本段按 realm 分档（2026-11 官方分发包复核）：
+#
+#   国内版 WorkBuddy    5.11.3（内置 CLI 2.176.0）
+#   国际版 WorkBuddy AI 5.9.4（内置 CLI 2.165.0）
+#
+# **必须分档**：两侧分发包不同档，全局一个值会把国际号拼成
+# 「5.9.4 + CLI/2.176.0」这种官方不存在的组合。config upstream.client_version /
+# cli_version 可覆盖（空 = 按 realm 取内置默认）。
+CLIENT_VERSION_CN = '5.11.3'
+CLIENT_VERSION_GLOBAL = '5.9.4'
+CLI_VERSION_CN = '2.176.0'
+CLI_VERSION_GLOBAL = '2.165.0'
+
+# 5.11.3 桌面端新增的 X-Client-* 三头里的两段固定值。真机国内版全量样本恒为
+# windows / WorkBuddy；版本段走 client_version()（可被 config 覆盖）。
+CLIENT_IDENTITY_PLATFORM = 'windows'
+CLIENT_IDENTITY_PRODUCT = 'WorkBuddy'
+
+
+def client_version(realm: Realm | None = None) -> str:
+    """出站 UA 的客户端版本段（config upstream.client_version，空则按 realm 取默认）。"""
     try:
         raw = json.loads(config.UPSTREAM_CONFIG.read_text(encoding='utf-8'))
         up = raw.get('upstream') if isinstance(raw, dict) else None
@@ -138,11 +157,11 @@ def client_version() -> str:
             return v.strip()
     except Exception:  # noqa: BLE001
         pass
-    return '5.5.4'
+    return CLIENT_VERSION_GLOBAL if realm == GLOBAL else CLIENT_VERSION_CN
 
 
-def cli_version() -> str:
-    """出站 UA 的 CLI 版本段（上游 config upstream.cli_version，空则内置默认）。"""
+def cli_version(realm: Realm | None = None) -> str:
+    """出站 UA 的 CLI 版本段（config upstream.cli_version，空则按 realm 取默认）。"""
     try:
         raw = json.loads(config.UPSTREAM_CONFIG.read_text(encoding='utf-8'))
         up = raw.get('upstream') if isinstance(raw, dict) else None
@@ -151,32 +170,36 @@ def cli_version() -> str:
             return v.strip()
     except Exception:  # noqa: BLE001
         pass
-    return '2.137.1'
+    return CLI_VERSION_GLOBAL if realm == GLOBAL else CLI_VERSION_CN
 
 
 # ── 登录（设备授权）链路的版本常量 ─────────────────────────────
 #
 # **独立于 `client_version()` / `cli_version()`**，这是刻意的：那两个是「业务链路
-# 出站 UA」的版本段，默认 5.5.4 / 2.137.1，可被 config upstream 覆盖；而登录链的
-# `version` 参数进的是**授权页自己的风控判定**（`console/auth/risk-context`），
-# 真机实测的取值与业务 UA 不是同一个数字。
+# 出站 UA」的版本段，默认按 realm 取（CN 5.11.3 / GL 5.9.4），可被 config upstream
+# 覆盖；而登录链的 `version` 参数进的是**授权页自己的风控判定**
+# （`console/auth/risk-context`），真机实测的取值与业务 UA 不是同一个数字。
 #
 # 2026-11-14 真机抓包（Chrome 地址栏原文，参考仓 misakano 320f5d4d / 0e863d83）：
 #
 #   CN  /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
 #   GL  /login/?platform=workbuddy-ai&state=…&version=5.9.4
 #
+# 2026-11-18 跟进国内分发包升到 5.11.3（package.json / cli/product.json
+# genieVersion，与 cask workbuddy-cn 5.11.3.43806934 一致）：授权页的 version
+# 与桌面端包版本同源，所以 CN 跟着抬到 5.11.3；GL 仍 5.9.4。
+#
 # 两个站点都带 version（与各自桌面端包版本同源），但 loginSessionId **只有 CN**
 # ——官方 `appendHostLoginJourneyParams` 里 `platform !== 'workbuddy'` 直接 return。
 #
 # 为什么不复用 config：这两个值属于「真机指纹」，跟着分发包版本走，不该让部署方
 # 随手改；改错会让授权页按旧客户端渲染并埋点（参考仓记录：落后两个小版本即触发）。
-LOGIN_VERSION_CN = '5.9.3'
+LOGIN_VERSION_CN = '5.11.3'
 LOGIN_VERSION_GLOBAL = '5.9.4'
 
 
 def login_version(realm: Realm) -> str:
-    """登录授权链接里的 `version` 参数值（CN 5.9.3 / Global 5.9.4）。"""
+    """登录授权链接里的 `version` 参数值（CN 5.11.3 / Global 5.9.4）。"""
     return LOGIN_VERSION_GLOBAL if realm == GLOBAL else LOGIN_VERSION_CN
 
 
@@ -237,28 +260,39 @@ def decorate_auth_url(url: str, realm: Realm) -> str:
         (parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
 
 
+def ua_brand_for(realm: Realm) -> str:
+    """出站 UA 的**品牌段**：CN 用驼峰 `WorkBuddy`，国际版用官方 slug `workbuddy-ai`。
+
+    国际分发包走 Electron userAgentFallback 的 asciiSlug 路径（非字母数字换成 `-`
+    并转小写），所以 `WorkBuddy AI` → `workbuddy-ai`；此前的 `WorkBuddy AI`（带空格）
+    与真机不符。品牌段错曾触发上游 403 code 11140 "request illegal"。
+    """
+    return 'workbuddy-ai' if realm == GLOBAL else 'WorkBuddy'
+
+
 def _ua(realm: Realm) -> str:
     """chat 域出站 UA。镜像上游 defaultWorkBuddyUAFor：
-    `WorkBuddy/<ver> <platform>/<ver> CLI/<cli>`，国际版的平台段是 `WorkBuddy AI`。
+    `WorkBuddy/<ver> <brand>/<ver> CLI/<cli>`。版本段按 realm 取（CN 5.11.3 /
+    global 5.9.4），品牌段见 ua_brand_for。
     """
-    ver = client_version()
-    platform = 'WorkBuddy AI' if realm == GLOBAL else 'WorkBuddy'
-    return f'WorkBuddy/{ver} {platform}/{ver} CLI/{cli_version()}'
+    ver = client_version(realm)
+    return f'WorkBuddy/{ver} {ua_brand_for(realm)}/{ver} CLI/{cli_version(realm)}'
 
 
-def billing_ua() -> str:
+def billing_ua(realm: Realm | None = None) -> str:
     """billing 域出站 UA：**单段** `WorkBuddy/<ver>`（不带 CLI 段）。
 
     镜像上游 billingUA：官方客户端在 banner/签到这类白名单接口显式覆写 UA
     为 `WorkBuddy/<pkgVer>`，RestOperations 层的 CLI 扩展段被业务层固化覆盖。
     上游 2026-09-14 起把这条从「仅当配置 client_name 才用」改为**默认生效**
     （原默认是不设 UA，用 Go 客户端自带的默认值——那才是最不像官方客户端的形态）。
+    版本段同样按 realm 取。
 
     显式配置 client_name="SaaS" 时返回空串 = 不覆写 UA（还原旧行为）。
     """
     if attribution_client_name() == 'SaaS':
         return ''
-    return f'WorkBuddy/{client_version()}'
+    return f'WorkBuddy/{client_version(realm)}'
 
 
 def attribution_client_name() -> str:
@@ -274,11 +308,12 @@ def attribution_client_name() -> str:
     return name or 'WorkBuddy'
 
 
-def attribution_headers() -> dict:
+def attribution_headers(realm: Realm = CN) -> dict:
     """chat 路径的用量归属头（镜像上游 injectAttribution）。
 
     默认（含未配置）伪造官方 WorkBuddy 桌面端头组，与官方 banner 白名单
     （application-manifest.js）同形；显式 client_name="SaaS" 还原旧行为。
+    X-IDE-Version 取该 realm 的客户端版本段（CN 5.11.3 / global 5.9.4）。
     """
     name = attribution_client_name()
     if name == 'SaaS':
@@ -287,9 +322,37 @@ def attribution_headers() -> dict:
         'X-Agent-Purpose': 'conversation',
         'X-IDE-Name': name,
         'X-IDE-Type': name,
-        'X-IDE-Version': client_version(),
+        'X-IDE-Version': client_version(realm),
         'X-Product': name,
     }
+
+
+def client_identity_headers(realm: Realm) -> dict:
+    """5.11.3 桌面端新增的 X-Client-* 三头（**只发国内版**）。
+
+    国际版停在 5.9.4，分发包里没有这层出站注入，官方国际客户端从不发这三个头；
+    把国内形态套到国际链路等于给它加一层不存在的指纹。
+    """
+    if realm == GLOBAL:
+        return {}
+    return {
+        'X-Client-Version': client_version(realm),
+        'X-Client-Platform': CLIENT_IDENTITY_PLATFORM,
+        'X-Client-Product': CLIENT_IDENTITY_PRODUCT,
+    }
+
+
+def drop_client_identity_headers(headers: dict) -> dict:
+    """撤掉 X-Client-* 三头，供**小程序口径**的请求使用。
+
+    小程序路径先经 billing_headers（CN 号会打上三头）再覆写
+    X-Client-Platform: miniprogram；不撤就会发出
+    `5.11.3 / miniprogram / WorkBuddy`——桌面端不会说 miniprogram，小程序也不会
+    自报 5.11.3 与 WorkBuddy（真机小程序是 2.4.0 / mp-weixin / workbuddy-mp）。
+    """
+    for key in ('X-Client-Version', 'X-Client-Platform', 'X-Client-Product'):
+        headers.pop(key, None)
+    return headers
 
 
 def device_fingerprint_headers(uid: str | None) -> dict:
@@ -417,6 +480,8 @@ def headers(realm: Realm, token: str | None = None,
     if token:
         h['Authorization'] = f'Bearer {token}'
     h.update(device_fingerprint_headers(uid))
+    # 5.11.3 桌面端身份头（CN 才发）；chat/refresh/探测共用这套通用头。
+    h.update(client_identity_headers(realm))
     return h
 
 
@@ -502,7 +567,7 @@ def billing_headers(realm: Realm, auth: dict | None = None) -> dict:
     h = headers(realm, token or None)
     # billing 域 UA：覆写为单段 WorkBuddy/<ver>；显式 client_name="SaaS" 时
     # **移除**该头（还原旧行为——上游此时不设 UA，交给 HTTP 客户端默认值）
-    _bua = billing_ua()
+    _bua = billing_ua(realm)
     if _bua:
         h['User-Agent'] = _bua
     else:
@@ -528,6 +593,8 @@ def billing_headers(realm: Realm, auth: dict | None = None) -> dict:
     dt = device_token_for(auth)
     if dt:
         h['X-Device-Token'] = dt
+    # 5.11.3 桌面端身份头（CN 才发）：billing 真机同样带。
+    h.update(client_identity_headers(realm))
     return h
 
 

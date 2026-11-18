@@ -106,10 +106,43 @@ class EndpointTest(unittest.TestCase):
         gl = realm.headers('global')
         self.assertEqual(cn['Origin'], 'https://www.codebuddy.cn')
         self.assertEqual(gl['Origin'], 'https://www.workbuddy.ai')
-        # 品牌段不同：国际版是 "WorkBuddy AI"
-        self.assertIn('WorkBuddy/', cn['User-Agent'])
-        self.assertIn('WorkBuddy AI/', gl['User-Agent'])
-        self.assertNotIn('WorkBuddy AI', cn['User-Agent'])
+        # 品牌段不同：国际版是 slug "workbuddy-ai"，国内版是驼峰 "WorkBuddy"
+        self.assertIn('WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0', cn['User-Agent'])
+        self.assertIn('WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0', gl['User-Agent'])
+        self.assertNotIn('workbuddy-ai', cn['User-Agent'])
+
+    def test_client_and_cli_version_split_by_realm(self) -> None:
+        """两侧分发包不同档，版本段必须各取各的。"""
+        self.assertEqual(realm.client_version('cn'), '5.11.3')
+        self.assertEqual(realm.client_version('global'), '5.9.4')
+        self.assertEqual(realm.cli_version('cn'), '2.176.0')
+        self.assertEqual(realm.cli_version('global'), '2.165.0')
+
+    def test_client_identity_headers_cn_only(self) -> None:
+        """5.11.3 的 X-Client-* 三头只发国内版；国际版分发包没有这层注入。"""
+        cn = realm.headers('cn')
+        self.assertEqual(cn.get('X-Client-Version'), '5.11.3')
+        self.assertEqual(cn.get('X-Client-Platform'), 'windows')
+        self.assertEqual(cn.get('X-Client-Product'), 'WorkBuddy')
+        gl = realm.headers('global')
+        for key in ('X-Client-Version', 'X-Client-Platform', 'X-Client-Product'):
+            self.assertNotIn(key, gl, f'国际版不应发 {key}')
+
+    def test_billing_headers_carry_client_identity_cn_only(self) -> None:
+        cn = realm.billing_headers('cn', {'access_token': 't'})
+        self.assertEqual(cn.get('X-Client-Version'), '5.11.3')
+        gl = realm.billing_headers('global', {'access_token': 't'})
+        self.assertNotIn('X-Client-Version', gl)
+
+    def test_drop_client_identity_headers_for_mp(self) -> None:
+        """小程序口径必须撤掉桌面三头，再覆写 X-Client-Platform: miniprogram。"""
+        h = realm.billing_headers('cn', {'access_token': 't'})
+        realm.drop_client_identity_headers(h)
+        self.assertNotIn('X-Client-Version', h)
+        self.assertNotIn('X-Client-Product', h)
+        self.assertNotIn('X-Client-Platform', h)
+        h['X-Client-Platform'] = 'miniprogram'
+        self.assertEqual(h['X-Client-Platform'], 'miniprogram')
 
     # ── 出站风控头对齐上游 2026-09-14 的改动（D1/D5/D6）──
     #
@@ -152,7 +185,9 @@ class EndpointTest(unittest.TestCase):
         static = config.TENCENT_HEADERS
         live = realm.headers('cn')
         for key in ('Accept', 'Accept-Language', 'X-CodeBuddy-Request',
-                    'Content-Type', 'X-Requested-With', 'Origin', 'Referer'):
+                    'Content-Type', 'X-Requested-With', 'Origin', 'Referer',
+                    'User-Agent', 'X-Client-Version', 'X-Client-Platform',
+                    'X-Client-Product'):
             self.assertEqual(static.get(key), live.get(key),
                              f'TENCENT_HEADERS.{key} 与 realm.headers("cn") 不一致')
 
@@ -591,17 +626,17 @@ class LoginAuthUrlTest(unittest.TestCase):
 
     2026-11-14 真机抓到的两条链接（state / nonce 脱敏）：
 
-        CN  /login?platform=workbuddy&state=…&version=5.9.3&loginSessionId=<uuid>
+        CN  /login?platform=workbuddy&state=…&version=5.11.3&loginSessionId=<uuid>
         GL  /login/?platform=workbuddy-ai&state=…&version=5.9.4
 
     两个要点：
-      1. **两边都带 version**，取值与各自桌面端包版本同源（CN 5.9.3 / GL 5.9.4）；
+      1. **两边都带 version**，取值与各自桌面端包版本同源（CN 5.11.3 / GL 5.9.4）；
       2. `loginSessionId` **只有 CN 带** —— 官方 `appendHostLoginJourneyParams` 里
          `platform !== 'workbuddy'` 直接 return，硬塞给国际版等于发一个官方不认识的字段。
     """
 
     def test_version_is_per_realm(self) -> None:
-        self.assertEqual(realm.login_version('cn'), '5.9.3')
+        self.assertEqual(realm.login_version('cn'), '5.11.3')
         self.assertEqual(realm.login_version('global'), '5.9.4')
 
     def test_platform_follows_real_client_not_cli(self) -> None:
@@ -620,7 +655,7 @@ class LoginAuthUrlTest(unittest.TestCase):
         url = realm.decorate_auth_url(
             'https://www.workbuddy.cn/login?platform=workbuddy&state=abc', 'cn')
         q = self._query(url)
-        self.assertEqual(q['version'], '5.9.3')
+        self.assertEqual(q['version'], '5.11.3')
         self.assertEqual(len(q['loginSessionId']), 36)
         self.assertEqual(q['state'], 'abc', '原有参数不能被弄丢')
         self.assertEqual(q['platform'], 'workbuddy')
@@ -708,7 +743,7 @@ class StartLoginRequestTest(unittest.TestCase):
         out, _ = self._run('cn')
         import urllib.parse
         q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(out['authUrl']).query))
-        self.assertEqual(q['version'], '5.9.3')
+        self.assertEqual(q['version'], '5.11.3')
         self.assertIn('loginSessionId', q)
         self.assertEqual(q['state'], 'st-1')
 

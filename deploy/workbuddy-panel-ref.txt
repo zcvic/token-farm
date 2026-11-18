@@ -468,3 +468,29 @@ e14a3d03face0961fc9a7a98449e7fc859e52b3c
 fdf05eaeb63059823a6f17c4127c3028b4dc8bdf
 f668215979ef80d407d0e3a57197d110db93833e
 
+
+# ---- 2026-11 第九批：misakano 34120825 附录 D-12 / M-P2-7 指纹组落地 ----
+#       D-12 版本段（2fa6876e）：CN 三元组抬到 5.11.3 / CLI 2.176.0，GL 保持
+#       5.9.4 / 2.165.0；Go 与 Python 两侧都按 realm 分档，config 仍可覆盖。
+#       Python 登录授权 version 也从 5.9.3 跟到 5.11.3；task_runner /
+#       school_open_day 的 DESKTOP_UA 与 desktop 三元组（commit ecace0f7… /
+#       releaseDate 1794502169764）同步。
+#       M-P2-7 X-Client-*（96265d71 / a0b9f87e）：CN 才发
+#       X-Client-Version / Platform / Product（5.11.3 / windows / WorkBuddy），
+#       注入在 CommonHeaders + BillingHeaders；国际版一律不发。
+#       UA 品牌段按 realm 各归各（global 用 slug workbuddy-ai），新增 rpcUAFor
+#       与 chat 三段式分族（B-20 的 UA 分族部分）。
+#       小程序撤头（77ca3fe7）：dropClientIdentityHeaders /
+#       drop_client_identity_headers 供先经 billing 头再覆写
+#       X-Client-Platform: miniprogram 的路径使用。
+#       未取：b85d4f25 的官方头对拍夹具（本地没有 headorder/parity 门禁）、
+#       c9b059c4 的 panel 侧按取值测试（本地 Go 没有小程序路径，等价语义落在
+#       drop 测试里）；billing UA 改 axios/1.16.1、v3 探测两段式 UA
+#       （B-18/B-20）与头集/头顺序（B-21/B-22）仍按原判定留待独立批次。
+2fa6876e5ce17e22e7cd4dc707ab8d369f115e7d
+a0b9f87e65b705ea2d22a93678219fb15858c255
+96265d718bc63722c9eb885caea46900ca2522b3
+77ca3fe7ef42dab6a2ddd0098f305c7f3b35fea6
+b85d4f255a13340e250550ef4632dc6cb3169c7f
+c9b059c457bdccd691b3d1046912941614150411
+

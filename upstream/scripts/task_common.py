@@ -46,7 +46,13 @@ PATH_STREAK         = "/activity/growth/streak"
 PATH_REPORT         = "/v2/report"
 PATH_CHAT           = "/v2/chat/completions"
 
-CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2"
+# 桌面端分发包版本段（2026-11 复核）：CN 5.11.3 包自带 CLI 2.176.0。
+# 脚本里凡是需要「客户端版本」或「CLI 版本」的地方都取这两个常量，不要再从 UA
+# 字符串里切——UA 形态一变（三段式），`split("/")[-1]` 就会悄悄从客户端版本变成
+# CLI 版本。
+CLIENT_VERSION = "5.11.3"
+CLI_VERSION = "2.176.0"
+CLIENT_UA = f"WorkBuddy/{CLIENT_VERSION} WorkBuddy/{CLIENT_VERSION} CLI/{CLI_VERSION}"
 
 
 def load_auth(uid_or_file: str) -> dict:

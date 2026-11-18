@@ -1384,7 +1384,7 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
     # 用量归属头：默认伪造官方桌面端指纹（X-Agent-Purpose + X-IDE-* 四头），
     # 与上游 2026-09-14 起的 injectAttribution 默认值一致——此前只有
     # X-Product=SaaS，在官网用量归因里是显眼的「网关特征」。
-    headers.update(attribution_headers())
+    headers.update(attribution_headers(realm))
     # 设备风控头：上游 chat 域同样注入（ChatHeaders → injectDeviceToken）。
     # 三级回退 auth 每号 > config 全局 > 文件；取不到就不发（与上游一致）。
     _dt = device_token_for(auth)

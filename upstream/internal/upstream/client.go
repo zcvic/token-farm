@@ -943,12 +943,13 @@ type Client struct {
 	ClientName string
 
 	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + B 段的
-	// X-IDE-Version）。空 = 内置默认 defaultClientVersion（对齐官方 5.5.4 分发包）。
-	// config upstream.client_version 覆盖。
+	// X-IDE-Version）。空 = 内置默认，**按 realm 分档**：CN 5.11.3 / GL 5.9.4
+	// （defaultClientVersionCN/Global）。config upstream.client_version 覆盖。
 	ClientVersion string
 
-	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认 defaultCliVersion
-	// （对齐官方内置 CLI 2.137.1）。config upstream.cli_version 覆盖。
+	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认，按 realm 分档：
+	// CN 2.176.0 / GL 2.165.0（各分发包内置 @genie/agent-cli）。
+	// config upstream.cli_version 覆盖。
 	CliVersion string
 
 	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。

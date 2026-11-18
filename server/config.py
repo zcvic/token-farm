@@ -303,9 +303,14 @@ TENCENT_HEADERS = {
     'Accept-Language': 'zh-CN',
     'X-Requested-With': 'XMLHttpRequest',
     'X-CodeBuddy-Request': '1',
-    'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2',
+    # 与 realm.headers('cn') 同源（CN 分发包 5.11.3 / CLI 2.176.0，见 realm.py）。
+    'User-Agent': 'WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0',
     'Origin': 'https://www.codebuddy.cn',
     'Referer': 'https://www.codebuddy.cn/',
+    # 5.11.3 桌面端 X-Client-* 三头（CN 才发；GL 不发）。
+    'X-Client-Version': '5.11.3',
+    'X-Client-Platform': 'windows',
+    'X-Client-Product': 'WorkBuddy',
 }
 
 

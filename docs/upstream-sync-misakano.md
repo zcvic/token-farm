@@ -2031,8 +2031,8 @@ MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
 
 | 项 | 本地现状 | 参考实现 | 判定 | 建议动作 | 成本/风险 |
 |---|---|---|---|---|---|
-| B-19 客户端版本 / CLI 版本 | `headers.go:21` 默认 `5.5.4`，CLI `2.137.1`，不分 realm | `headers.go:33-38`：CN `5.9.3`、global `5.9.4`、CLI `2.165.0` | **分叉（版本明显偏旧）** | 先只改版本常量并按 realm 分档；这是低风险、收益明确的一步 | 低；版本段与真实分发包一致即可 |
-| B-20 UA 品牌段 | `defaultWorkBuddyUAFor` 对 global 用 `WorkBuddy AI`（带空格）；billing UA 用 `WorkBuddy/<ver>` | `defaultWorkBuddyUAFor` 首段恒 `WorkBuddy`，第二段 global 用 slug `workbuddy-ai`；billing UA 用 `axios/1.16.1`；另有 `rpcUAFor` / `v3ProbeUA` 分族 | **分叉** | 按路径分组对齐：chat 用 `WorkBuddy/<ver> <brand>/<ver> CLI/<ver>`，global 品牌段改 `workbuddy-ai`；billing 改 `axios/1.16.1`；不要全局一个 UA 打天下 | 中；品牌段错曾触发 11140，需真实抓包复核 |
+| B-19 客户端版本 / CLI 版本 | ~~`headers.go` 默认 `5.5.4` / `2.137.1`，不分 realm~~ **已对齐（2026-11-18）**：`defaultClientVersionCN/Global` = `5.11.3` / `5.9.4`，`defaultCliVersionCN/Global` = `2.176.0` / `2.165.0`，按 `a.IsGlobal()` 取值，config 仍可覆盖；Python `realm.py` 同口径，登录授权 `version` 也跟到 5.11.3 | `headers.go:33-38`（5.11.3 分发包口径）：CN `5.11.3` / CLI `2.176.0`、global `5.9.4` / CLI `2.165.0` | **已覆盖（D-12）** | — | — |
+| B-20 UA 品牌段 | `defaultWorkBuddyUAFor` / `rpcUAFor` 已按 realm 取品牌段（global slug `workbuddy-ai`）；billing UA 仍为 `WorkBuddy/<ver>`；v3 探测仍走 `CommonHeaders` | `defaultWorkBuddyUAFor` 首段恒 `WorkBuddy`，第二段 global 用 slug `workbuddy-ai`；billing UA 用 `axios/1.16.1`；另有 `rpcUAFor` / `v3ProbeUA` 分族 | **部分覆盖** | 品牌段与 RPC/chat 分族已落地；billing UA 改 `axios/1.16.1` 与 `v3ProbeUA` 两段式未取（前者要连同 billing 全部头组复核，后者属 B-18「弱化」项），待独立批次 | 中；品牌段错曾触发 11140，需真实抓包复核 |
 | B-21 出站头集合 | 本地有 Origin/Referer、Accept-Language、X-Requested-With、X-CodeBuddy-Request、X-Machine-ID、X-Session-ID 全路径发送；缺 `b3`/`baggage`/`traceparent`/`X-Agent-Intent`/`X-Agent-Runtime`/`X-Agent-Type`/`X-Id-Source`/`X-Userinfo`/`X-Private-Data`/`X-Stainless-*`/`Accept-Encoding`/`Connection`/`acp-connection-id` | `headers.go`（`8f7366f2`、`d9b92b2d`、`bde6da11`、`ee1c80d8`、`8ecf115a`、`847deb10`、`5677928d`）：RPC 链不发 Origin/Referer/Accept-Language/XRW；`X-CodeBuddy-Request` 只 chat 带；`X-Machine-ID`/`X-Session-ID` 从头发移除、设备标识改放 report body；`Accept-Encoding` 四段声明并自行解压；身份头按账号形态条件发送；chat 补 b3/baggage/traceparent 与 SDK 的 `X-Stainless-*` | **分叉 / 缺口（高风险高收益）** | 不要零散改。先建「官方黄金头集」回归（按 chat/report/refresh/billing/v3 分组），再逐组对齐；先改版本/UA，再改增删头，最后动头顺序/TLS。每一步都用真实抓包验证 | 中到高；头改错会直接影响所有出站请求 |
 | B-22 头顺序 / 大小写 / TLS 指纹 | 无 | `headcase.go`、`headorder.go`、`headorder_conn.go`、`tlsfingerprint.go` | **缺失（M-P2-7）** | 先不做；除非有封号证据。HTTP/2 头顺序受库控制，改造成本高 | 高 |
 | B-23 sanitize / thinking / tool_pairing 的双向分叉 | 本地有额外特征（`workspace base`、`Tokens prefixed with @` 等）、Kimi enum 补 type、tool result repack / orphan cleanup | 参考仓有 `DeepSeek Harness` 身份特征、`sanitize_brand_scope`、reasoning backfill、DSML、`$ref` 等 | **双向分叉，不是单向缺失** | 逐函数 diff，保留本地已有特征，只补参考新增；不要整文件覆盖。优先补 `sanitize_brand_scope` 与 reasoning backfill（若本地没有） | 中；整段覆盖会丢本地特征 |
@@ -2321,15 +2321,16 @@ B-1～B-24 同样是按旧基线整理的。`7a48d72e` 之后又筛出 18 项协
 
 | 项 | 真机口径 | 本地落点 |
 |---|---|---|
-| `version` | CN `5.9.3` / GL `5.9.4` | `LOGIN_VERSION_CN` / `LOGIN_VERSION_GLOBAL`、`login_version()` |
+| `version` | CN `5.11.3` / GL `5.9.4` | `LOGIN_VERSION_CN` / `LOGIN_VERSION_GLOBAL`、`login_version()` |
 | `loginSessionId` | **只 CN**（官方 `platform!=='workbuddy'` 直接 return） | `login_session_id()`，GL 返回空串 |
 | `?platform=` | CN `workbuddy` / GL `workbuddy-ai` | `login_platform()` |
 
 三处有意取舍：
 
-1. **不复用 `client_version()`**。那个是业务 UA 的版本段（默认 `5.5.4`，可被
-   `upstream.client_version` 覆盖），而登录 `version` 进的是授权页自己的风控判定，
-   真机取值与业务 UA 不是同一个数字。两者解耦，各自有自己的出处。
+1. **不复用 `client_version()`**。那个是业务 UA 的版本段（按 realm 默认 CN `5.11.3` /
+   GL `5.9.4`，可被 `upstream.client_version` 覆盖），而登录 `version` 进的是授权页自己
+   的风控判定，真机取值与业务 UA 不是同一个数字（两端恰好都跟着各自分发包版本走）。
+   两者解耦，各自有自己的出处。
 2. **不覆盖服务端已给的参数**。上游若自己带上 `version`，以它为准——错值比缺值更
    容易被判异常。
 3. **`?platform=` 一并改**。参考仓那处改动在更早的 `96b816da`（已记录在
@@ -2452,7 +2453,7 @@ HEAD，并对着本地代码**逐项**判过一遍——下面 54 行每一行�
 | `1166967d` | 回填用例改用相对日期 | 不适用 | 参考仓 Go 测试 |
 | `74456c87` | 模型规则 review 补充（读锁/README/400） | **值得·排期** | 随 `8519ea26`（D-8） |
 | `d2708ca6` | `/v1/search` 多卡片占位链接互不相同 | 不适用 | 本地纯透传 |
-| `2fa6876e` | 指纹版本跟 5.11.3 分发包 | **需确认** | 本地单版本默认 `5.5.4` / `2.137.1`，无 `desktop.go`、无按 realm 拆分（D-10） |
+| `2fa6876e` | 指纹版本跟 5.11.3 分发包 | **已落地（D-12）** | 版本常量按 realm 分档 + desktop 三元组 + Python 登录 version 一起改 |
 | `e069e65c` | 官方头对拍门禁按形态比版本号 | 不适用 | 参考仓 CI |
 | `eca5f30b` | 积分语义分离：`credits` 可用 / `credits_raw` 快照 | **需确认** | 本地 `balance_realm` 明确「全池相加、不分停用」（D-11） |
 | `452643bb` | logstore 用例改相对日期 | 不适用 | 参考仓 Go 测试 |
@@ -2633,16 +2634,33 @@ miniprogram` 口径下发，于是本地把它判成「该账号没有此任务�
 
 建议采用，但作为独立批次做（会改变用户可见数字，必须带迁移说明），不要混进小修。
 
-**D-12　指纹版本（`2fa6876e`）**
+**D-12　指纹版本（`2fa6876e`）——已落地（2026-11-18）**
 
 参考仓把 CN 三元组抬到 5.11.3（`ideVersion 5.11.3` / 新 commit / 新 releaseDate）、
-CLI 抬到 2.176.0，GL 仍是 5.9.4 / 2.165.0。本地 `upstream/internal/upstream/headers.go`
-只有**单一**默认 `5.5.4` / `2.137.1`，没有 `desktop.go` 的 `/v2/report` 三元组，也没有
-按 realm 拆版本的能力。
+CLI 抬到 2.176.0，GL 仍是 5.9.4 / 2.165.0。本地原先只有**单一**默认 `5.5.4` /
+`2.137.1`，也没有按 realm 拆版本的能力。
 
-只把数字改成 5.11.3 会得到「CN 的头 + 旧的 report 三元组」这种混合指纹，比不改更
-可疑。归 **M-P2-7（指纹层整体按 realm 拆分）** 做：先补 desktop 三元组，再按 realm
-分别取客户端版本 / CLI 版本 / UA 品牌段，最后才谈数字。本批不动。
+按原判断连同 M-P2-7 一起做，本批落点：
+
+- Go `headers.go`：`defaultClientVersionCN/Global` = `5.11.3` / `5.9.4`，
+  `defaultCliVersionCN/Global` = `2.176.0` / `2.165.0`，
+  `clientVersion(a)` / `cliVersion(a)` / `defaultCliVersionFor(a)` 按
+  `a.IsGlobal()` 取值；`billingUA(a)`、`injectAttribution(req, a)` 同步收 auth 参数
+  （X-IDE-Version 也按 realm）。config `upstream.client_version` / `cli_version`
+  仍可全局覆盖。
+- Python `realm.py`：`CLIENT_VERSION_CN/GLOBAL`、`CLI_VERSION_CN/GLOBAL`，
+  `client_version(realm)` / `cli_version(realm)`、`_ua`、`billing_ua`、
+  `attribution_headers(realm)` 全部按 realm；登录授权链接的 `LOGIN_VERSION_CN`
+  也从 5.9.3 跟到 5.11.3（与分发包同源）。
+- 独立脚本：`task_runner.py` / `school_open_day_2026.py` 的 `DESKTOP_UA` 改
+  `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，`desktop_fingerprint` 三元组改
+  `ideVersion/extVersion 5.11.3`、commit `ecace0f7028166695994300182295329b8b95449`、
+  releaseDate `1794502169764`；`task_common.CLIENT_UA` 同步。
+- 新增 `upstream/internal/upstream/client_identity_test.go` 与
+  `test_realm.py` 的版本/身份头用例；`useragent_test.go`、`attribution_test.go`、
+  `headers_global_test.go` 的旧期望值同步。
+
+global 品牌段改用 slug `workbuddy-ai`（旧证据里的 `WorkBuddy AI` 不再适用，见 B-20）。
 
 ### D.6 随既有 M-P* 项一并采纳（7 项）
 
@@ -2806,11 +2824,17 @@ reorderEarly → repack → cleanup；Python 在 `convertInputItems` 收尾处�
 
 ### E.3 随项（15）
 
-- **M-P2-7 指纹（5 条）**：`a0b9f87e`（文档）、`96265d71`（CN 5.11.3 补
-  `X-Client-*` 三头）、`77ca3fe7`（小程序口径撤掉桌面三头）、`b85d4f25`（对拍夹具）、
-  `c9b059c4`（按取值认口径的测试）。本地 Go 头集只有 `X-Client-IP`，Python 侧只用
-  `X-Client-Platform: web|miniprogram`；照 D-12 的结论，连同 desktop 三元组与按
-  realm 拆版本一起做，**不要单独改数字**。
+- **M-P2-7 指纹（5 条）——已落地（2026-11-18）**：`a0b9f87e`（文档）、
+  `96265d71`（CN 5.11.3 补 `X-Client-*` 三头）、`77ca3fe7`（小程序口径撤掉桌面三头）、
+  `b85d4f25`（对拍夹具）、`c9b059c4`（按取值认口径的测试）。本地实现：
+  Go `injectClientIdentityHeaders`（CN 发 `X-Client-Version` /
+  `X-Client-Platform: windows` / `X-Client-Product: WorkBuddy`，global 不发）接在
+  `CommonHeaders` 与 `BillingHeaders`；`dropClientIdentityHeaders` 供小程序口径撤头；
+  Python `client_identity_headers(realm)` / `drop_client_identity_headers(headers)`
+  同语义，`task_runner._desktop_headers` 与 `school_open_day` 的 desktop 头上补齐。
+  连同 D-12 的 desktop 三元组与按 realm 拆版本一起做，没有单独改数字。
+  未取：`b85d4f25` 的官方头对拍夹具（本地没有 headorder/parity 门禁）、
+  `c9b059c4` 的 panel 侧按取值测试（本地 Go 无小程序路径，等价语义落在 drop 测试里）。
 - **测试 / 探针（3 条）**：`11c0d3f6`（11129 形态筛选）、`74922344`（null 与数据
   关键字回归）、`5f56e59a`（回放缺口拆子测试）。落 E-1 / E-3 时直接抄成表驱动用例，
   不单独立项。
@@ -2915,4 +2939,4 @@ reorderEarly → repack → cleanup；Python 在 `convertInputItems` 收尾处�
 2. **E-2**：Codex 经本地代理的形态稳定复现 11148，修完即消失；Go/Python 两侧同口径。
 3. **E-3**：长任务回放一致性与上下文交接，可跟下一次 responses 改动合并做。
 4. **M-P2-7**：`96265d71` / `77ca3fe7` 只在该项里做；单独改版本号会得到混合指纹
-   （见 D-12）。
+   （见 D-12）。**已于 2026-11-18 与 D-12 一起落地**（E-1…E-3 与指纹组均已提交）。

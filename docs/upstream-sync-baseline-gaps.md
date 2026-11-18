@@ -1261,18 +1261,20 @@ L1419 另有一处点名调用判 hidden；Go `handler.go` 与 `internal/server`
 
 **本地现状**：`upstream/cmd/login/main.go:41`
 `clientUA = "CLI/2.63.2 CodeBuddy/2.63.2"`，比业务链路的
-`defaultClientVersion = "5.5.4"` / `defaultCliVersion = "2.137.1"`
-（`headers.go:21`）还要旧。参考仓登录链路是 `CLI/2.176.0`，桌面端
-`5.9.3`（CN）/ `5.9.4`（GL），内置 CLI `2.165.0`。
+`defaultClientVersionCN/Global = "5.11.3" / "5.9.4"` /
+`defaultCliVersionCN/Global = "2.176.0" / "2.165.0"`
+（`headers.go`）还要旧。参考仓登录链路是 `CLI/2.176.0`，桌面端
+`5.11.3`（CN）/ `5.9.4`（GL），内置 CLI `2.176.0`（CN）/ `2.165.0`（GL）。
 
 **建议**：业务链路的版本对齐 M-B-19 已列；本文只补一点——**登录链路是单独
 一份常量**，改业务链路时容易漏掉它。版本串确实会进风控判定（参考仓记录：落后
 两个小版本时登录页按旧客户端渲染并埋点）。
 
-**落地状态（2026-11-14，部分）**：**Python 登录链已对齐**。参考仓
+**落地状态（2026-11-14，部分；2026-11-18 跟进版本）**：**Python 登录链已对齐**。参考仓
 `320f5d4d` / `0e863d83` 的真机实测结论搬进了 `server/services/realm.py`：
-`LOGIN_VERSION_CN = '5.9.3'` / `LOGIN_VERSION_GLOBAL = '5.9.4'`（独立于业务 UA 的
-`client_version()`，默认 `5.5.4`）、`login_session_id()`（只 CN 给 uuid，GL 空串）、
+`LOGIN_VERSION_CN = '5.11.3'` / `LOGIN_VERSION_GLOBAL = '5.9.4'`（独立于业务 UA 的
+`client_version()`，后者按 realm 默认 `5.11.3` / `5.9.4`）、`login_session_id()`
+（只 CN 给 uuid，GL 空串）、
 `login_platform()`（CN `workbuddy` / GL `workbuddy-ai`，不再是 `CLI`），
 `decorate_auth_url()` 给 `start_login` 返回的链接补参数且不覆盖服务端已有值。
 **Go 侧 `cmd/login` 仍未动**：它还停在 `platform=CLI` + `CodeBuddy/2.63.2` UA +

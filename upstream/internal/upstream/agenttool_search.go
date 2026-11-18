@@ -110,7 +110,7 @@ func (c *Client) AgentToolSearch(ctx context.Context, a *auth.Auth, req AgentToo
 
 	// 官方指纹头组（与 chat/billing 同管线，见 headers.go 注释）。
 	c.CommonHeaders(httpReq, a)
-	c.injectAttribution(httpReq)
+	c.injectAttribution(httpReq, a)
 	if at := a.AccessTokenValue(); at != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+at)
 	} else {

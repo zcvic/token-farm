@@ -64,7 +64,7 @@ ACTIVITY_ID = "school_open_day_2026"
 # 小程序由微信注入 UA；桌面上报用桌面 UA
 MP_UA = ("Mozilla/5.0 (Linux; Android 14; MicroMessenger/8.0.49 WeChat/0.8.0 "
          "MiniProgramEnv/android; wkbrowser xweb)")
-DESKTOP_UA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+DESKTOP_UA = tc.CLIENT_UA
 
 # 任务分类表（task_code -> 处理方式）。mode 语义：
 #   manual  人工环节（学生认证/验证码/审核），--run 一律跳过
@@ -438,11 +438,11 @@ def desktop_fingerprint(auth):
         "timezone": "Asia/Shanghai", "reportDelay": 2000,
         "userId": auth["uid"], "username": auth.get("nick", ""),
         "userNickname": auth.get("nick", ""),
-        "product": "SaaS", "releaseDate": 1789036585355,
-        "commit": "5f9692923c93033111c51ad7b003eb80204a9b75",
-        "ideName": "WorkBuddy", "ideType": "WorkBuddy", "ideVersion": "5.5.6",
+        "product": "SaaS", "releaseDate": 1794502169764,
+        "commit": "ecace0f7028166695994300182295329b8b95449",
+        "ideName": "WorkBuddy", "ideType": "WorkBuddy", "ideVersion": tc.CLIENT_VERSION,
         "machineId": derive_id(auth, "machine"), "sessionId": derive_id(auth, "session"),
-        "extName": "workbuddy-desktop", "extVersion": "5.5.6",
+        "extName": "workbuddy-desktop", "extVersion": tc.CLIENT_VERSION,
         "os": "win32", "arch": "x64", "osVersion": "10.0.26220",
         "cpuCores": 20, "memorySize": 24,
         "timestamp": now, "presentAt": now,
@@ -540,7 +540,12 @@ def make_report_events(auth, kind):
             m["activityId"] = ACTIVITY_ID
             events.append(m)
         # 桌面上报走 copilot 域；发 codebuddy.cn 域不点亮桌面任务
-        return events, COPILOT, {"X-Product": "SaaS", "User-Agent": DESKTOP_UA}
+        return events, COPILOT, {
+            "X-Product": "SaaS", "User-Agent": DESKTOP_UA,
+            # 5.11.3 桌面端新增的 X-Client-* 三头（国内版恒同现）。
+            "X-Client-Version": tc.CLIENT_VERSION, "X-Client-Platform": "windows",
+            "X-Client-Product": "WorkBuddy",
+        }
     raise ValueError(f"未知 report_kind: {kind}")
 
 
