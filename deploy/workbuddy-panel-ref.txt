@@ -494,3 +494,30 @@ a0b9f87e65b705ea2d22a93678219fb15858c255
 b85d4f255a13340e250550ef4632dc6cb3169c7f
 c9b059c457bdccd691b3d1046912941614150411
 
+
+# ---- 2026-11 第十批：一档 4 项（M-P1-10 / M-P1-13 / B-4 / B-16）----
+#      M-P1-10 输出预算下限（2b9b7736）：显式 max_tokens 低于档位下限时抬到
+#      下限（low/minimal 4096、medium 6144、high 8192、xhigh 12288、max 16384），
+#      目录 maxOutputTokens 更小时以目录封顶；没给额度、探活级（小于 16）、显式关
+#      思考、档位未知都不动。调用点放在 normalizeReasoningEffort 之后，按实际
+#      生效档位算。
+#      未取：参考仓同提交里的面板展示与 ChatTiming 无关部分（本地无该 UI）。
+#      M-P1-13 签到回执四态（8125831d）：Go 新增 checkin_receipt.go
+#      （checked/already/pending/failed，判定顺序 pending 到 failed 到 already 到
+#      checked），report.go/client.go 拆出 *Raw 版本取原始 body（平铺成功回执、
+#      >=400 失败回执都只有原始 body 能救），scheduler.checkinOne 改走回执，
+#      checked 才显示回执里的积分；Python checkin_all 补 already/pending 标记、
+#      dailyplan 把「稍后重试」与真失败分开报。
+#      未取：参考仓 internal/panel 的 app.js / panel.go 与 node 前端测试（本地面板
+#      是 Python + Next.js，等价口径落在 checkin_all 与 dailyplan）。
+#      B-4 usage 缓存命中别名归一（782a6414）：按 prompt_tokens_details 到扁平别名
+#      到 input_tokens_details 取第一个正值，回写全部别名；真 miss 不造字段，
+#      Responses 形状的嵌套字段只在原本就有时回填。聚合与逐帧两条路径都接。
+#      B-16 上游调用分段耗时（75576b8b）：ChatTiming{Prep,Do} 可选 nil 出参，
+#      流水行追加 prep/do，仅本跳真测量过时输出。未取：同提交的 continue.go
+#      续写段与「requested/actual effort」两列——本地没有 continue 模块，
+#      effort 降级结果当前不返回，留到 B-15 档位策略层一起做。
+2b9b77363227ff1ab26640b6a477e3c69e60097c
+8125831de3f1d1a42c39c20bef0619a4d0ae0e2b
+782a641473573cc07d6784b19f738f45eb4b3ef0
+75576b8b57aaba5d782eb6db52a7aa70cd20bae4

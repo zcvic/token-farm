@@ -217,17 +217,25 @@ git am -3 -p1 --directory=upstream /tmp/sync/0001-*.patch
 
 ### 一档：下一批可做（不改流量分布、不动 transport）
 
-| 项 | 一句话 | 本地落点 | 来源 |
-|---|---|---|---|
-| **M-P1-9** | 正文里内联的 `<think:…>` 拆回 thinking 块；只在 content **以** `<think:` 开头时启用 | Python `server/platforms/anthropic.py` | `771c887f` |
-| **M-P1-10** | 输出预算下限：显式 `max_tokens` 低于档位下限时抬到下限，再以目录 `maxOutputTokens` 封顶 | Go `internal/upstream/output_budget.go` + `payload.go` | `2b9b7736` |
-| **M-P1-13** | 签到回执四态 `checked` / `already` / `pending` / `failed`；`failed` 压过 `already`，积分未知不显示数字 | Go `DailyCheckin` 回执 + `scheduler`；Python `dailyplan.py` | `8125831d` |
-| **B-2** | 会话轮级 body 字段 `conversationRequestId` / `startsNewUserRequest` / `agent`，只写当前轮 | Go `PrepareBody*` 之后 | `56057810` |
-| **B-4** | usage 缓存命中别名归一（五种写法取最大正值回写，保留已有嵌套形态） | Go `sse.go` / 非流式组装 | `782a6414` |
-| **B-16** | prep / do 分段耗时，并把「请求档位 / 实际生效档位」入日志（纯观测） | Go `internal/server/logging.go` | `75576b8b` |
-| **B-11** | 昵称手动同步（`GET /console/account`，只取 nickname / uid，手机号不解析不落日志） | Python | `04005ba2` |
-| **M-P2-13** | 模型目录热重载补两条护栏（读失败保留上一份好值、`mtime` 守卫） | Go `cmd/server` | — |
-| **D-9** | 默认任务列表 miss 时按 mp 口径再查一次；`wb_wechat_oa_subscribe_task` 做 claim-only | Python `upstream/scripts/task_runner.py` | `0a2a55fb` |
+| 项 | 一句话 | 本地落点 | 来源 | 状态 |
+|---|---|---|---|---|
+| **M-P1-9** | 正文里内联的 `<think:…>` 拆回 thinking 块；只在 content **以** `<think:` 开头时启用 | Python `server/platforms/anthropic.py` | `771c887f` | 待做 |
+| **M-P1-10** | 输出预算下限：显式 `max_tokens` 低于档位下限时抬到下限，再以目录 `maxOutputTokens` 封顶 | Go `internal/upstream/output_budget.go` + `payload.go` | `2b9b7736` | ✅ `b8431873` |
+| **M-P1-13** | 签到回执四态 `checked` / `already` / `pending` / `failed`；`failed` 压过 `already`，积分未知不显示数字 | Go `CheckinReceipt` + `scheduler`；Python `checkin_all` / `dailyplan.py` | `8125831d` | ✅ `c0d616aa` |
+| **B-2** | 会话轮级 body 字段 `conversationRequestId` / `startsNewUserRequest` / `agent`，只写当前轮 | Go `PrepareBody*` 之后 | `56057810` | 待做 |
+| **B-4** | usage 缓存命中别名归一（五种写法取最大正值回写，保留已有嵌套形态） | Go `sse.go` / 非流式组装 | `782a6414` | ✅ `e612cd5b` |
+| **B-16** | prep / do 分段耗时，并把「请求档位 / 实际生效档位」入日志（纯观测） | Go `internal/server/logging.go` | `75576b8b` | ✅ `3353cd8f`（档位字段仍待做，见下） |
+| **B-11** | 昵称手动同步（`GET /console/account`，只取 nickname / uid，手机号不解析不落日志） | Python | `04005ba2` | 待做 |
+| **M-P2-13** | 模型目录热重载补两条护栏（读失败保留上一份好值、`mtime` 守卫） | Go `cmd/server` | — | 待做 |
+| **D-9** | 默认任务列表 miss 时按 mp 口径再查一次；`wb_wechat_oa_subscribe_task` 做 claim-only | Python `upstream/scripts/task_runner.py` | `0a2a55fb` | 待做 |
+
+> **一档进度（2026-11-18 第一批 4 项已落地）**：M-P1-10 / M-P1-13 / B-4 / B-16，
+> 每项一个提交，来源号追加进 `deploy/workbuddy-panel-ref.txt` 第十批。四项都
+> 不改流量分布、不动 transport，回归面只有各自的单测。
+>
+> B-16 本次只落 **prep/do 分段耗时**；同一提交里的「请求档位 / 实际生效档位」
+> 一列本地还没有对应的解析产物（`normalizeReasoningEffort` 只回写 body、不返回
+> 降级结果，要加返回值或旁路），留到 B-15 档位策略层一起做，不在本批硬塞。
 
 > B-3（Kimi `$ref` 展开）原列在这一档，E-1 落地时已随 `schema_normalize.go` 的顶层
 > `$ref` 内联展开一起覆盖，从待办里移除，判定已回填到附录 B.1。

@@ -64,6 +64,12 @@
 > 6020/6021 网关内等一轮（`b957e32b`）因依赖本地没有的 headkeepalive 而暂缓。
 > 这一批同样不改流量分布、不引入依赖。
 
+> **2026-11 一档第一批**（M-P1-10 / M-P1-13 / B-4 / B-16）：**四项全部落地**，
+> 每项一个提交并登记来源——M-P1-10 → `b8431873`、M-P1-13 → `c0d616aa`、
+> B-4 → `e612cd5b`、B-16 → `3353cd8f`。四项都不改流量分布、不引入依赖、
+> 不动 transport；逐项取舍见各条目末尾的「落地状态」。B-16 只落了 prep/do
+> 分段耗时，「请求档位 / 实际生效档位」两列随 B-15 一起做。
+
 > **剩余待办**（2026-11-18，参考仓 `34120825`）：附录 A–E 的判定都已完成，两份清单里
 > **还没做**的项已合并到 [upstream-sync.md](upstream-sync.md) 的「剩余待办总览」，按
 > 「下一批 / 需灰度 / 中风险 / 要排期」分档。本文各条目仍是判据、落点与取舍的详细出处，
@@ -890,6 +896,17 @@ medium 6144、high 8192、xhigh 12288、max 16384）。**抬的是上限不是�
   `effort=max` 不给额度时正文 11706、think 37110，说明模型不会写满上限；
   但仍建议只在「客户端显式给了额度且额度 < 下限」时抬，不要给所有请求抬。
 
+**落地状态（2026-11-18，`b8431873`）**
+
+新增 `internal/upstream/output_budget.go`：档位下限表（low/minimal 4096、
+medium 6144、high 8192、xhigh 12288、max 16384），`applyMinOutputBudget` 挂在
+`PrepareBodyOptWithEffortsAndDefault` 的 `normalizeReasoningEffort` **之后**——
+按实际生效档位算；档位被目录降级时不会按客户端最初要的那一档抬额。目录
+`maxOutputTokens` 更小时以目录封顶；没给额度、探活级（<16）、显式
+`thinking.type=disabled`、档位未知、额度已不低于下限五种情形一律不动。
+第 4 条「抬额日志」没有做：每请求一行会把流水刷满，运维侧用 B-16 的 prep/do
+与 tok 数已经能归因。续写段继承下限仍等 M-P1-3。
+
 ### P1-11　上游断流补截断终态
 
 **能力**
@@ -1075,6 +1092,26 @@ code 分支判定、只看 `errors`，前端再拿一个布尔拼死字符串。
 - 风险：判定顺序不能错——`failed` 必须先于 `already`，否则「签到失败，已签到
   天数不足 7 天」会被误判成功。这是本项的核心，不是细节；
 - 与 M-P0-2（分钟级补签）有交集：补签结果也要写进同一份回执。
+
+**落地状态（2026-11-18，`c0d616aa`）**
+
+- Go：新增 `internal/upstream/checkin_receipt.go`，四态判定顺序
+  `pending → failed → already → checked`；already 复用 `isAlreadyCheckinMsg`
+  （失败硬词已在内），不再另写一份判据。`scheduler.CheckinStatus` 保持原样，
+  `checkinOne` 内部做映射：checked→OK（日志带回执积分）、already→Already
+  （日志写「本次未发积分」）、pending→Fail（交回退避/补签）、failed→Fail。
+- `DailyCheckin` 没有改成返回回执，而是**保留二元签名**（幂等拒绝仍是 error，
+  `IsAlreadyCheckin` / `cmd/signin` 的 ALREADY 状态不受影响），需要四态的调用方
+  走新的 `CheckinReceipt`。比参考仓的「改签名」少动 4 个调用点。
+- 原始 body：`report.go` / `client.go` 拆出 `billingJSONRaw` /
+  `billingMeterJSONRaw` / `doJSONRaw`——成功回执是平铺的、失败回执 ≥400 不解
+  信封，只有原始 body 能取到 credit 与 msg。
+- Python：`checkin_all` 逐条结果补 `already` / `pending` 标记（上游 10001 不再
+  算进 `succeeded`），`dailyplan.py` 把「稍后重试」与真失败分开报数。
+- 补的一条本地口径：`code=0` 但文案命中失败硬词时合成 `*Error`——Python 侧早已
+  这样处理，Go 若继续静默记成功，两端会对同一回执给出相反结论。
+- 未取：参考仓 `internal/panel` 的 app.js / panel.go 与 node 前端测试（本地面板
+  是 Python + Next.js，等价口径落在 `checkin_all` / `dailyplan`）。
 
 ### P1-14　清洗上游注入的身份指令
 
@@ -1670,9 +1707,9 @@ transport（`upstream/transport.go`），Python 侧有
 | 7 | **M-P1-8** | 空 text 段补位 + reasoning 镜像，两个纯函数 | 低 | ✅ 已同步 |
 | 8 | **M-P1-14** | 清洗注入的身份指令，两条正则 | 低 | ✅ 已同步 |
 | 9 | **M-P1-15** | `/v1/models` 透出 promo 三字段 | 低 | ✅ 已同步 |
-| 10 | **M-P1-13** | 签到回执四态（要改 `DailyCheckin` 签名） | 中低 | 待做 |
+| 10 | **M-P1-13** | 签到回执四态（要改 `DailyCheckin` 签名） | 中低 | ✅ 已同步（`c0d616aa`） |
 | 11 | **M-P1-12** | 11134 归供应商过载，依赖 `failKeepBinding` | 低 | ✅ 已同步 |
-| 12 | **M-P1-10** | 输出预算下限 | 低 | 待做 |
+| 12 | **M-P1-10** | 输出预算下限 | 低 | ✅ 已同步（`b8431873`） |
 | 13 | **M-P1-9** | `<think:...>` 拆回 thinking（落点在 Python） | 低 | 待做 |
 | 14 | **M-P1-7** | 首帧前 SSE 注释帧（并发正确性） | 中低 | 待做 |
 | 15 | **M-P0-4** | `$wbEncrypted` 解密 + 回写保持加密（Go + Python） | 中 | 待做 |
@@ -2006,7 +2043,7 @@ MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
 | B-1 DSML 工具调用还原 | 无。`tool_pairing.go` 只修已结构化的 `tool_calls` / `tool` 消息；`sanitize.go` 只剥指纹 | `upstream/dsml.go`（`e0ee6b9a`）：识别正文里的全角竖线 DSML 标记，流式与非流式都还原成标准 `tool_calls`；严格判定（工具名在名单）与弱判定（名单为空但块完整闭合、工具名形态合法）两级；本回合已有结构化 `tool_calls` 时不覆盖 | **缺失** | 在 `sse.go` 与非流式响应组装处加一层 `repairDSML`；只处理完整闭合块，块内不夹带正文；工具参数被截断不修；必须有开关与日志 | 中高；误判正文会破坏正常输出，严格判定优先 |
 | B-2 会话轮级 body 字段 | 只在头里写 `X-Conversation-ID` / `X-Conversation-Request-ID`；消息体没有 `conversationRequestId`、`startsNewUserRequest`、`agent` | `upstream/conv_fields.go`（`56057810`，issue #51）：只给当前轮最后一个 user 消息写 `conversationRequestId` + `startsNewUserRequest`，并补 `agent:"cli"`；历史消息不伪造 | **缺失** | 在 `PrepareBody*` 之后注入；客户端已带则不覆盖；只写当前轮，不补历史 | 低 |
 | B-3 Kimi 工具 `$ref` 展开 | ~~不展开 `$ref` / `$defs`~~ **已覆盖（E-1）**：`schema_normalize.go` 对**顶层** `$ref`（`#/$defs/…`）做内联展开（`inlineKimiSchema`，带深度/环保护），展不开就删键退化成无参工具；嵌套 `$ref` 实测上游 200，不动 | `upstream/kimi_tools.go`（`854e74cd`）：仅 CN 且模型名 `kimi*` 时，把 tools schema 里的 `$ref` 内联展开；不裁剪任何工具；解析失败原样返回 | **已覆盖** | 无需动作。E-1 的落地把范围放宽到全 realm 的顶层 `$ref`（上游对顶层 `$ref` 是整单 400 11129，与模型无关），比只对 CN Kimi 更严；`kimi*` 专属裁剪没有落点 | — |
-| B-4 usage 缓存命中别名 | `sse.go:287` 只补 `total_tokens`，不统一缓存命中字段 | `upstream/usage.go`（`782a6414`）：取 `prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens` / `cache_read_input_tokens` / `cached_tokens` / `input_tokens_details.cached_tokens` 中的最大正值，统一写回别名；流式与非流式都调用 | **缺失** | 加 `normalizeUsageCacheAliases`，在响应离开网关前调用；只在下游已有 `input_tokens_details` 时保留该嵌套形态 | 低 |
+| B-4 usage 缓存命中别名 | ~~`sse.go:287` 只补 `total_tokens`，不统一缓存命中字段~~ **已覆盖（`e612cd5b`）**：新增 `usage_alias.go`，按 `prompt_tokens_details.cached_tokens` → `prompt_cache_hit_tokens` → `cache_read_input_tokens` → `cached_tokens` → `input_tokens_details.cached_tokens` 取第一个正值回写全部别名；真 miss 不新增字段，`input_tokens_details` 只在原本就有时回填；聚合与逐帧两条路径都接 | `upstream/usage.go`（`782a6414`）：取五种写法中的最大正值，统一写回别名；流式与非流式都调用 | **已覆盖** | — | 低 |
 | B-5 401 三态求证 | `handler.go:884` refresh 失败且 `ErrSessionDead` 才 `NoteSessionDead`；其余 401 没有统一求证；余额刷新失败只记日志（`scheduler.go:587`） | `upstream/verify.go`（`21a6e456`、`f6bd0539`）+ `scheduler/balance_401.go`：`VerifyAlive` / `VerifyDead` / `VerifyInconclusive`，refresh 做权威求证；alive 不罚、dead 计 session dead、inconclusive 不罚 | **部分覆盖** | 把 401 求证收敛到一个 `VerifySessionByRefresh`；chat 401 与余额探测共用；refresh 成功必须保存轮换后的新 token；inconclusive 不写池状态 | 中；轮换 token 必须落盘，否则会把号弄坏 |
 | B-6 活跃上报的 body 形态 | `report.go:93` 发 `billingBase`，事件只含 20 多个字段；scheduler 用 `wb2api-<ms>` / `wb2api-<ms>-rN` 作 conversation/request ID，每号发 `ActivityReportCount`（默认 5）条 | `report.go:252` `ReportChatActivityModel` 发 `chatBase`，用 `session.NewConversationID()` 官方 UUID，body 带设备/包指纹；每号每天 1 条；企业号（`SupportsPersonalGrowth()==false`）直接跳过 | **分叉** | 先做同号 A/B：两通道各发 1 条，回读 streak 与任务进度；确认后再切。切换时一并改 UUID、UA、头和指纹；企业号加跳过；条数是否降为 1 也按实测决定 | 中到高；本地注释称 billingBase 200，但 200 ≠ 计分 |
 
@@ -2028,7 +2065,7 @@ MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
 |---|---|---|---|---|---|
 | B-14 模型 picker 裁剪 | `global_models.go` 已有 v3-config-merge；`client.go:1787` 已按 `agents[cli].models` 过滤企业端点；但没有 `ModelRateLimitCap.lines[].paidId` 合并、没有速度预设/auto 过滤，也没有多 UA 探测 | `upstream/clientpick.go`（`c5ac20fc`）：以默认 agent 的 `models` 为菜单源；`paidId` 并到 `freeId` 行不单列；`fast-model` / `balanced-model` / `deep-model` 预设保留；`auto` / `auto-chat` 不画成菜单行；没有 agents 时不裁剪 | **部分覆盖** | 在 `/v1/models` 输出前套 picker；只在 agents 存在时裁剪；不臆造目录里没有的 id；多 UA 探测（`v3ProbeUA` / `v3ProbeUALite`）只在目录明显不全时再加 | 低到中；列表变短需在文档里解释 |
 | B-15 思考档位策略 | `effort_catalog.go` 有静态兜底表；`payload.go` 会把不支持的 effort 改到最近档；`thinking.go` 负责 DeepSeek 思维注入；没有网关策略层 | `upstream/effort_policy.go`（`1792ef1f`、`24b8f398`）：`Enabled` / `ClientPriority` / `OverrideScope=level\|all`；`default_effort=max` 取模型最高支持档；面板可配置 | **部分覆盖（缺策略层）** | 加 config 与 `SetEffortPolicy`；复用现有 catalog；默认关闭，保持现状；补客户端优先/网关优先/level/all 的测试矩阵。策略层落地时一并做 `/v1/models` 的声明改写（`can_disable_thinking` + `off` 档位 + 改写默认档），见 `upstream-sync-baseline-gaps.md` 的 **G-P1-17** | 中；会改写用户意图，默认必须保守 |
-| B-16 分段耗时观测 | `server/logging.go` 只有 TTFB（首 data 帧），把选号、准备、建连、上游首字节混在一起 | `upstream/timing.go`（`75576b8b`）：`Prep`（本地准备）/ `Do`（上游往返）分段；记录客户端请求档位与实际生效档位；纯观测，不参与判定 | **缺失（观测）** | 在上游调用处埋点，日志增加 prep/do/requested_effort/effort；不影响路由与重试 | 低 |
+| B-16 分段耗时观测 | ~~`server/logging.go` 只有 TTFB（首 data 帧），把选号、准备、建连、上游首字节混在一起~~ **已覆盖（`3353cd8f`）**：新增 `upstream/timing.go`（`ChatTiming{Prep,Do}`，`ChatStreamContext` 的可选 nil 出参），流水行追加 ` prep=…ms do=…ms`，只在本跳真测量过时输出；非流式/未走到上游的旧行格式不变 | `upstream/timing.go`（`75576b8b`）：`Prep`（本地准备）/ `Do`（上游往返）分段；记录客户端请求档位与实际生效档位；纯观测，不参与判定 | **部分覆盖（档位列未取）** | prep/do 已落；`requested_effort` / `effort` 两列留到 B-15 档位策略层（`normalizeReasoningEffort` 当前只回写 body、不返回降级结果，要先改返回值或旁路） | 低 |
 | B-17 模型忙闲观测 / `/v2/chat/busy` | 无上游客户端；本地对外也没有 `/v2/chat/busy` 路由（主清单 M-P1-4 建议本地按池状态算） | `upstream/modelbusy.go`（`2737aed3`）：`POST /v2/chat/busy`，单次最多 50 个模型，`busy_level=idle\|normal\|busy\|congested\|unavailable\|unknown`；unknown 不当不可用；不参与选号 | **缺失（观测/兼容）** | 二选一：做本地池状态版 `/v2/chat/busy`（M-P1-4），或只做面板观测。不要拿它当选号依据 | 低到中 |
 | B-18 模型目录 UA 探测 | 本地 v3 探测用默认 UA | `headers.go` `v3ProbeUA` / `v3ProbeUALite` / `rpcUAFor` / `uaBrandFor`：按路径分 UA 族，v3 用 IDE UA 拿更全目录 | **弱化** | 只有在确认目录缺模型时再加；不要把所有路径的 UA 混成一个 | 低到中 |
 
