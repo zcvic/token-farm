@@ -65,6 +65,64 @@ def read_account_file(filename: str, auth_dir: Path | None = None) -> dict:
     return json.loads(_safe_file(filename, auth_dir).read_text(encoding='utf-8'))
 
 
+def account_auth_dict(raw: dict, directory: Path | None = None) -> dict:
+    """把授权文件内容整理成探测 / 查询积分 / 拉资料所需的扁平字段。
+
+    device_token 是**每号**的设备风控 token（auth 文件顶层 device_token 键，
+    与 workbuddy2api 的解析位置一致）；缺省留空，由 realm.device_token_for
+    回退到上游 config 的全局值或文件。
+
+    `nickname` / `proxy_session` 只为**旧版线路地址里的 `{account}` 会话模板**带上
+    （`config.route_session_name` 要拿它算会话名）：会话名决定住宅代理的出口 IP，
+    不带就等于每次按 uid 现算，界面显示的会话名与真实出口对不上。
+
+    放在服务层（而不是各个路由各抄一份）：手动刷新积分后的昵称同步也要用它，
+    两条路径必须按同一口径解释凭证文件。
+    """
+    acct = raw.get('account') or {}
+    auth = raw.get('auth') or {}
+    return {
+        '_risk_auth_dir': str(directory or config.AUTH_DIR),
+        'access_token': auth.get('accessToken', ''),
+        'uid': acct.get('uid', ''),
+        'nickname': str(acct.get('nickname') or ''),
+        'enterprise_id': acct.get('enterpriseId', ''),
+        'domain': auth.get('domain', ''),
+        'realm': auth.get('realm'),
+        'device_token': str(raw.get('device_token') or ''),
+        'proxy': str(raw.get('proxy') or ''),
+        'proxy_session': str(raw.get('proxy_session') or ''),
+    }
+
+
+def set_account_nickname(filename: str, nickname: str,
+                         auth_dir: Path | None = None) -> bool:
+    """把账号文件里的昵称改成 nickname；未变化不写盘，返回是否写过。
+
+    只动 `account.nickname`，其余字段（token、设备指纹、线路、权重…）原样保留。
+    与 token 刷新共用 file_lock + _原子替换：上游热加载按 mtime+size 轮询，直接
+    截断重写会造出「长度为 0 的窗口」，账号会被短暂判成已删除（见
+    `tencent._atomic_write_json` 的说明）。
+    """
+    from .tencent import _atomic_write_json
+
+    path = _safe_file(filename, auth_dir)
+    if path.is_symlink():
+        raise ValueError('账号文件不能是符号链接')
+    with file_lock(path):
+        raw = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(raw, dict):
+            raise ValueError('账号文件格式异常')
+        acct = raw.get('account')
+        if not isinstance(acct, dict):
+            raw['account'] = acct = {}
+        if str(acct.get('nickname') or '') == nickname:
+            return False
+        acct['nickname'] = nickname
+        _atomic_write_json(path, raw)
+    return True
+
+
 def set_account_proxy(filename: str, proxy: str, auth_dir: Path | None = None) -> dict:
     """只更新线路，保留凭据及其他字段；写入复用账号文件的原子替换。"""
     from .tencent import _atomic_write_json

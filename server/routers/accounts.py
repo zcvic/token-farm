@@ -17,8 +17,8 @@ from fastapi.responses import StreamingResponse
 from .. import config, db, security, upstreamsvc
 from ..iputil import client_ip
 from ..services import (
-    accountorder, credits as creditsvc, dailyplan, modelcatalog, reload, renew,
-    tasklog, taskrun, tencent, wb2api,
+    accountorder, credits as creditsvc, dailyplan, modelcatalog, profilesync, reload,
+    renew, tasklog, taskrun, tencent, wb2api,
 )
 from ..services.realm import realm_of, supports_checkin
 from ..services import taskpacing
@@ -1274,30 +1274,12 @@ def _save_and_finish(result: dict, realm_of_result: str, region_msg: str,
 
 
 def _auth_dict(raw: dict, directory: Path | None = None) -> dict:
-    """把授权文件内容整理成探测 / 查询积分所需的字段（含版本，供端点分派）。
+    """把授权文件内容整理成探测 / 查询积分所需的字段（见 wb2api.account_auth_dict）。
 
-    device_token 是**每号**的设备风控 token（auth 文件顶层 device_token 键，
-    与 workbuddy2api 的解析位置一致）；缺省留空，由 realm.device_token_for
-    回退到上游 config 的全局值或文件。
-
-    `nickname` / `proxy_session` 只为**旧版线路地址里的 `{account}` 会话模板**带上
-    （`config.route_session_name` 要拿它算会话名）：会话名决定住宅代理的出口 IP，
-    不带就等于每次按 uid 现算，界面显示的会话名与真实出口对不上。
+    保留这个薄包装是为了不改动既有调用点与测试的 patch 目标；两条路径（路由与
+    昵称同步）共用同一份字段口径。
     """
-    acct = raw.get('account') or {}
-    auth = raw.get('auth') or {}
-    return {
-        '_risk_auth_dir': str(directory or config.AUTH_DIR),
-        'access_token': auth.get('accessToken', ''),
-        'uid': acct.get('uid', ''),
-        'nickname': str(acct.get('nickname') or ''),
-        'enterprise_id': acct.get('enterpriseId', ''),
-        'domain': auth.get('domain', ''),
-        'realm': auth.get('realm'),
-        'device_token': str(raw.get('device_token') or ''),
-        'proxy': str(raw.get('proxy') or ''),
-        'proxy_session': str(raw.get('proxy_session') or ''),
-    }
+    return wb2api.account_auth_dict(raw, directory)
 
 
 def _load(filename: str, auth_dir: Path | None = None) -> dict:
@@ -1515,6 +1497,9 @@ async def refresh_all_credits(
     `force=true`（显式点「刷新积分」）仍然只有管理员能调：它会**强制**绕过
     缓存、对所有账号发起一次真实查询，属于「主动触发外部调用」的动作，
     不该由只读账号驱动。
+
+    手动刷新（force=true）还会顺带拉一次账号资料（GET /console/account）同步
+    昵称——上游改名后不必重新扫码登录；单号失败静默跳过（见 services/profilesync）。
     """
     if force and str(user.get('role') or '') != 'admin':
         raise HTTPException(status_code=403, detail='刷新积分需要管理员权限')
@@ -1545,6 +1530,12 @@ async def refresh_all_credits(
         return acc['uid'], value if ok else None, message, cached, age, expiries
 
     results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
+
+    # 手动刷新顺带追平昵称（issue #94 同步）：上游改名后不必重新扫码登录。
+    # 只在 force=true（按钮）触发——后台定时 / 页面加载不调资料接口；单号失败
+    # 静默跳过，不影响下面的余额结果。
+    if force and accounts:
+        await profilesync.sync_nicknames(accounts, base_dir)
 
     credits_map: dict[str, int | float | None] = {}
     meta: dict[str, dict] = {}

@@ -38,6 +38,7 @@ from .realm import (
     realm_of,
     resolve_realm,
     supports_checkin,
+    web_base,
 )
 
 from .errtext import err_text
@@ -956,6 +957,81 @@ async def fetch_credits(auth: dict) -> tuple[bool, int | float | None, str, list
     except Exception as exc:  # noqa: BLE001
         return False, None, f'查询异常: {err_text(exc)}', []
 
+
+
+PROFILE_PATH = '/console/account'
+
+
+async def fetch_account_profile(auth: dict) -> str:
+    """拉取账号最新昵称（GET {web_base}/console/account）。
+
+    上游改名后，本地凭证文件里的 `account.nickname` 不会自己更新——以前只能等
+    用户重新扫码登录。这里给面板**手动刷新**路径补一条只读查询，把显示名追平。
+
+    ## 隐私边界（重要）
+
+    这个响应里带手机号（`phoneNumber`）等个人敏感字段。本函数**只解析 uid 与
+    nickname**：其余字段连变量都不落，不写日志、不回显、不透传给调用方。
+    uid 只做一致性核对——响应 uid 与凭证不符时报错（防串号，宁可不同步）。
+
+    失败（网络 / 业务码 / uid 不一致）一律抛异常，由调用方静默跳过：资料同步
+    是「顺手更新显示名」，不该影响余额刷新结果。
+
+    ## 响应形态
+
+    实测两种都出现过：信封 `{code:0,msg:…,data:{uid,nickname}}`，以及**顶层平铺**
+    的 `{uid,nickname}`（后者没有 code 字段，只看 data 会得到空对象）。这里统一
+    归一到同一个 dict 再读字段。
+
+    空昵称按**失败**返回：调用方拿到空串什么也做不了（`set_account_nickname` 对
+    空串直接判未变化），整批都拿不到昵称时会表现为「什么都没发生」，宁可计成失败。
+    """
+    token = str(auth.get('access_token') or '')
+    if not token:
+        raise RuntimeError('无有效 accessToken')
+    realm = realm_of(auth)
+    base = web_base(realm)
+    headers = _hdr(realm, token, str(auth.get('uid') or '') or None)
+    # 与官方 Web 页面同形态（上游 FetchAccountProfile 同口径）：Bearer + web 平台头。
+    # 其余风控头保留（本面板直连腾讯的请求都带），但 Web 接口不是 JSON POST，
+    # Content-Type 去掉更贴近真实页面。
+    headers.pop('Content-Type', None)
+    headers['Accept'] = 'application/json, text/plain, */*'
+    headers['x-client-platform'] = 'web'
+    headers['Origin'] = base
+    headers['Referer'] = f'{base}/profile/account-settings'
+
+    async with _account_http_client(auth) as client:
+        resp = await client.get(f'{base}{PROFILE_PATH}', headers=headers)
+    try:
+        env = resp.json()
+    except Exception:  # noqa: BLE001
+        env = None
+    if not isinstance(env, dict):
+        # 只报状态：body 里可能有手机号。
+        raise RuntimeError(f'账号资料接口失败（HTTP {resp.status_code}，响应不是对象）')
+    code = 0
+    body = env
+    if 'code' in env:
+        try:
+            code = int(env.get('code') or 0)
+        except (TypeError, ValueError):
+            code = -1
+        data = env.get('data')
+        if isinstance(data, dict):
+            body = data
+        # 信封里没有 data 时回落到顶层平铺（参考仓 d78131ba 的判形态口径）。
+    if resp.status_code != 200 or code != 0:
+        # 只报状态/业务码：body 里可能有手机号。
+        raise RuntimeError(f'账号资料接口失败（HTTP {resp.status_code}, code={code}）')
+    got_uid = str(body.get('uid') or '')
+    want_uid = str(auth.get('uid') or '')
+    if got_uid and want_uid and got_uid != want_uid:
+        raise RuntimeError('账号资料 uid 与凭证不一致，已丢弃（防串号）')
+    nickname = str(body.get('nickname') or '').strip()
+    if not nickname:
+        raise RuntimeError('账号资料里没有昵称')
+    return nickname
 
 
 def _enterprise_cycle_expiry(data: dict) -> int | None:

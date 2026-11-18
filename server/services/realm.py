@@ -409,6 +409,24 @@ def billing_base(realm: Realm) -> str:
     return config.TENCENT_BILLING_BASE
 
 
+# 官网（Web 成长中心）域：账号资料 / 任务领奖这类接口只在此域提供，
+# CLI 的 copilot.tencent.com 同名路径返回 400。**与 chat/billing 域不同**——
+# 国内版官网是 workbuddy.cn（不是 codebuddy.cn），国际版是 workbuddy.ai。
+WEB_BASE_CN = 'https://www.workbuddy.cn'
+
+
+def web_base(realm: Realm) -> str:
+    """该 realm 的官网基址（/console/account 等 Web 接口用）。
+
+    config.json 的 `global.web_base` 可覆盖国际版（与 chat_base / billing_base
+    同口径：自建/镜像部署改了域名时也能跟上）。
+    """
+    if realm == GLOBAL:
+        base = _read_global_config().get('web_base') or ''
+        return base or DEFAULT_GLOBAL_BASE
+    return WEB_BASE_CN
+
+
 def chat_paths(realm: Realm) -> list[str]:
     """聊天补全的候选路径，按尝试顺序：**/v2 优先，/console 兜底**。
 

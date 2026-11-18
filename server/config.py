@@ -116,6 +116,10 @@ REFRESH_CONCURRENCY = max(1, _env_int('WB_REFRESH_CONCURRENCY', 3))
 # 「测活失败」先报到用户面前（真凶是这批批量请求）。8 与页面节奏匹配：缓存
 # 命中时不发请求，冷启动也够快。
 CREDITS_CONCURRENCY = max(1, _env_int('WB_CREDITS_CONCURRENCY', 8))
+# 「刷新积分后同步昵称」的并发上限：资料接口（GET /console/account）只在
+# **手动**刷新时触达，单号一次 GET、开销小；但它是账号级请求，仍按保守的 3 并发
+# 走，失败静默跳过（同步昵称只是顺手更新显示名，不该影响余额结果）。
+PROFILE_CONCURRENCY = max(1, _env_int('WB_PROFILE_CONCURRENCY', 3))
 TRUST_PROXY = _env('WB_TRUST_PROXY', '1') == '1'
 # 可信反向代理跳数：用于从 X-Forwarded-For 右侧取真实客户端 IP。
 # 前面直接是 1Panel/OpenResty 时保持 1；若还挂了 CDN 则设为 CDN+反代的层数。
