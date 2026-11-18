@@ -187,6 +187,33 @@ class RunTaskTest(unittest.TestCase):
         self.assertEqual(seen, [None, 7], '两个分组都要签到（issue #274）')
         self.assertIn('组B', msg, '多分组时结果里要能看出各组情况')
 
+    def test_checkin_separates_pending_from_failed(self) -> None:
+        """「稍后重试」（上游瞬时拒绝）与真失败分开报，且不算整轮失败。"""
+        async def fake(upstream_id=None, user=None):
+            return {'total': 2, 'succeeded': 1, 'already': 0,
+                    'results': [{'pending': False}, {'pending': True}]}
+        one_group = self._groups()[:1]
+        with mock.patch.object(dailyplan, '_task_groups', lambda: one_group), \
+             mock.patch.object(accounts_router, 'checkin_all', fake):
+            ok, msg = asyncio.run(dailyplan.run_task('checkin'))
+        self.assertTrue(ok, '可重试的瞬时失败不该让整轮计划报失败')
+        self.assertIn('1/2', msg)
+        self.assertIn('1 个稍后重试', msg)
+        self.assertNotIn('个失败', msg,
+                         '瞬时拒绝被报成了失败，用户会以为当天丢签')
+
+    def test_checkin_reports_real_failures(self) -> None:
+        """真失败仍要让整轮返回 False，并在文案里报数。"""
+        async def fake(upstream_id=None, user=None):
+            return {'total': 2, 'succeeded': 1, 'already': 0,
+                    'results': [{'pending': False}, {'pending': False}]}
+        one_group = self._groups()[:1]
+        with mock.patch.object(dailyplan, '_task_groups', lambda: one_group), \
+             mock.patch.object(accounts_router, 'checkin_all', fake):
+            ok, msg = asyncio.run(dailyplan.run_task('checkin'))
+        self.assertFalse(ok)
+        self.assertIn('1 个失败', msg)
+
     def test_claim_and_full_dispatch_to_taskrun(self) -> None:
         calls: list = []
 

@@ -1654,8 +1654,15 @@ async def checkin_all(upstream_id: int | None = Query(None),
                 'proxy': str(raw.get('proxy') or ''),
             }, realm_of(auth))
         ok = code in (0, 10001)
+        # 10001 是「今天已签过」的幂等拒绝：ok=True 只表示「不是失败」，但如果把它
+        # 算进 succeeded，界面就会报「本次新签了 N 个」而上游一个积分都没发
+        # （同类项目在生产 1288 条签到记录里翻出 250 条这种误报）。这里用与
+        # tencent.checkin 同一份判据单独标出来，聚合层据此归到 already。
+        # -3 是「上游瞬时拒绝，可退避重试」：不算成功，也不该和真失败混在一起。
+        already = tencent.is_already_checkin_message(code, message)
         db.add_checkin_log(uid, nickname, 'manual-batch', ok, code, message)
-        return {'nickname': nickname, 'ok': ok, 'code': code, 'message': message}
+        return {'nickname': nickname, 'ok': ok, 'code': code, 'message': message,
+                'already': already, 'pending': code == -3}
 
     results = await taskpacing.run_accounts(
         'checkin', accounts, one,
@@ -1666,8 +1673,12 @@ async def checkin_all(upstream_id: int | None = Query(None),
     # 两类账号都不进 `total` 分母，各自单独报数：
     #   · skipped：国际版没有签到体系，既不会成功也不是失败。算进 total 会显示成
     #     「5/6 成功」，用户以为漏签了一个号、反复去点——而它永远是「已跳过」。
-    #   · already：今日已签到，本次压根没打上游。算进 total 会把「无需重复」说成
-    #     「刚签成功」，用户会以为这次点击真的又签了一次。
+    #   · already：今日已签到（本机记录命中而跳过，或上游对重复签到回了 10001 幂等
+    #     拒绝）。算进 total 会把「无需重复」说成「刚签成功」，用户会以为这次点击
+    #     真的又签了一次（实际一个积分都没发）。
+    # 于是 total 的含义收敛成「本次真正发起并需要结果的账号数」，
+    # succeeded 自然就是「这次真签上了几个」。`results[].pending`（上游瞬时拒绝，
+    # code -3）仍在 total 里，它是「可重试的未完成」而不是成功。
     # 于是 total 的含义收敛成「本次真正发起并需要结果的账号数」，
     # succeeded 自然就是「这次真签上了几个」。
     applicable = [r for r in results if not r.get('skipped')]

@@ -24,20 +24,27 @@ const reportPath = "/v2/report"
 // 与 travel.go 的 growthJSON 对称（growth 域走 chatBase + BillingHeaders；billing 域走 billingBase）。
 // report/checkin 等 billing 端点共用：请求头统一 BillingHeaders，信封与错误语义同 doJSON。
 func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.RawMessage, error) {
+	_, data, err := c.billingJSONRaw(a, method, path, body)
+	return data, err
+}
+
+// billingJSONRaw 同 billingJSON，但连原始 body 一起交回（见 doJSONRaw）。
+// 签到回执必须走这条：成功回执是平铺的，失败回执在 ≥400 分支不解信封。
+func (c *Client) billingJSONRaw(a *auth.Auth, method, path string, body any) ([]byte, json.RawMessage, error) {
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		rdr = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequest(method, c.billingBase(a)+path, rdr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	c.BillingHeaders(req, a)
-	return c.doJSON(a, req)
+	return c.doJSONRaw(a, req)
 }
 
 // chatRequestEvent 客户端 chat_request_send 事件完整形状（与 probe_active.py chat_event 对齐）。

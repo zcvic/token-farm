@@ -87,8 +87,10 @@ class CheckinAllScopeTest(unittest.TestCase):
         config.AUTH_DIR, config.DB_PATH, config.USERS_FILE = self._orig
         self._tmp.cleanup()
 
-    def _run(self, accounts: list, realm_by_uid: dict) -> dict:
+    def _run(self, accounts: list, realm_by_uid: dict,
+             checkin_result: tuple = (0, 'ok')) -> dict:
         """跑一次批量签到，出站请求全部换成本地桩。"""
+        from server.routers import accounts as accounts_router
         from server.services import realm, tencent, wb2api
 
         uid_by_file = {a['file']: a['uid'] for a in accounts}
@@ -97,7 +99,7 @@ class CheckinAllScopeTest(unittest.TestCase):
             uid = uid_by_file[f]
             return _raw(uid, realm_by_uid[uid])
 
-        checkin = mock.AsyncMock(return_value=(0, 'ok'))
+        checkin = mock.AsyncMock(return_value=checkin_result)
         # 逃生门（global.enabled）的默认值取决于运行环境的 config.json，
         # 显式打开才能确定性地走到「国际版」分支
         with mock.patch.object(realm, '_read_global_config',
@@ -106,7 +108,8 @@ class CheckinAllScopeTest(unittest.TestCase):
              mock.patch.object(realm, 'invalidate'), \
              mock.patch.object(wb2api, 'list_auth_accounts', return_value=accounts), \
              mock.patch.object(wb2api, 'read_account_file', side_effect=_read), \
-             mock.patch.object(tencent, 'checkin', checkin):
+             mock.patch.object(tencent, 'checkin', checkin), \
+             mock.patch.object(accounts_router, '_CHECKIN_RETRY_DELAYS', ()):
             r = self.c.post('/api/accounts/checkin-all')
         self.assertEqual(r.status_code, 200, r.text)
         out = r.json()
@@ -161,6 +164,29 @@ class CheckinAllScopeTest(unittest.TestCase):
         self.assertEqual(out['total'], 2)
         self.assertEqual(out['succeeded'], 2)
         self.assertEqual(out['skipped'], 0)
+
+    def test_upstream_already_not_counted_as_new_checkin(self) -> None:
+        """上游对重复签到回 10001 幂等拒绝：归 already，不能算进「本次成功」。"""
+        accounts = [_acc('workbuddy-a.json', CN_UID, '甲')]
+        out = self._run(accounts, {CN_UID: 'cn'}, checkin_result=(10001, '今日已签到'))
+
+        self.assertEqual(out['total'], 0, '幂等拒绝不是本次新签，不该占分母')
+        self.assertEqual(out['succeeded'], 0, '幂等拒绝被算成了新签到（面板会报 +积分）')
+        self.assertEqual(out['already'], 1)
+        self.assertTrue(out['results'][0]['already'])
+        self.assertFalse(out['results'][0].get('pending') or False)
+
+    def test_pending_flagged_but_not_succeeded(self) -> None:
+        """上游瞬时拒绝（-3）：进 total 但不算成功，并单独标 pending 供重试/文案。"""
+        accounts = [_acc('workbuddy-a.json', CN_UID, '甲')]
+        out = self._run(accounts, {CN_UID: 'cn'},
+                        checkin_result=(-3, '签到失败，请稍后重试'))
+
+        self.assertEqual(out['total'], 1)
+        self.assertEqual(out['succeeded'], 0)
+        self.assertEqual(out['already'], 0)
+        self.assertTrue(out['results'][0]['pending'],
+                        '瞬时拒绝没有 pending 标记，界面只能把它报成失败')
 
 
 if __name__ == '__main__':

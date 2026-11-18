@@ -1196,18 +1196,32 @@ func (c *Client) checkinMeterPaths(a *auth.Auth) []string {
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
 func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
+	_, data, err := c.doJSONRaw(a, req)
+	return data, err
+}
+
+// doJSONRaw 同 doJSON，但额外返回**未截断**的原始 body（≤1MB）。
+//
+// 为什么需要：有的 billing 回执是**平铺**的（没有 {code,msg,data} 信封，例如
+// daily-checkin 成功时的 {"credit":100,"streak_days":44}），只交 env.Data 会拿到
+// 空；失败回执（HTTP 400 + {"code":10001,"msg":"…"}）走到 ≥400 分支时根本不解信封，
+// code/msg 也只剩原始 body 可读。两者都只能靠 raw 还原（见 checkin_receipt.go）。
+//
+// 错误分支同样把 raw 交出去：调用方要按文案分类时，*Error.Msg 已被截断到 200 字，
+// 不保证包住关键短语。
+func (c *Client) doJSONRaw(a *auth.Auth, req *http.Request) (raw []byte, data json.RawMessage, err error) {
 	client, cerr := c.clientFor(a, false)
 	if cerr != nil {
-		return nil, cerr
+		return nil, nil, cerr
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return nil, nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
@@ -1215,20 +1229,20 @@ func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error
 		if resp.StatusCode == http.StatusTooManyRequests {
 			retryAfter = refreshRetryAfter(resp.Header, raw)
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), RetryAfter: retryAfter}
+		return raw, nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), RetryAfter: retryAfter}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
+		return raw, nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
 	}
 	if env.Code != 0 {
 		kind := Classify(resp.StatusCode, env.Msg)
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
+		return raw, nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
 	}
-	return env.Data, nil
+	return raw, env.Data, nil
 }
 
 // refreshIOTimeout 单次 refresh 网络调用的总时长上限。
@@ -2085,20 +2099,27 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 // billingMeterJSON 按 realm 候选路径发 billing/meter 域请求，ErrNotFound 时换下一候选路径
 // （global：/billing/meter/* → /v2/billing/meter/*；cn：单路径 /v2/billing/meter/* 现状）。
 func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
+	_, data, err := c.billingMeterJSONRaw(a, paths, method, body)
+	return data, err
+}
+
+// billingMeterJSONRaw 同 billingMeterJSON，但连原始 body 一起交回（见 doJSONRaw）。
+// 路径回落用的也是同一个判据：只有 ErrNotFound 才换下一个候选。
+func (c *Client) billingMeterJSONRaw(a *auth.Auth, paths []string, method string, body any) (raw []byte, data json.RawMessage, err error) {
 	var lastErr error
 	for i, p := range paths {
-		data, err := c.billingJSON(a, method, p, body)
+		raw, data, err = c.billingJSONRaw(a, method, p, body)
 		if err != nil {
 			lastErr = err
 			var ue *Error
 			if i < len(paths)-1 && errors.As(err, &ue) && ue.Kind == ErrNotFound {
 				continue // /billing/meter/* 404 → 换 /v2/billing/meter/*
 			}
-			return nil, err
+			return raw, nil, err
 		}
-		return data, nil
+		return raw, data, nil
 	}
-	return nil, lastErr
+	return nil, nil, lastErr
 }
 
 // UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。
@@ -2318,8 +2339,13 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 }
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
+//
+// 本函数是历史包装，只保留「成功 / 失败」二元结论：上游对重复签到回 code!=0，
+// 所以幂等拒绝仍以 error 形态返回（IsAlreadyCheckin 可判别），与改动前逐字一致。
+// 需要「本次真签 / 早就签过 / 处理中 / 失败」四态的调用方走 CheckinReceipt
+// （见 checkin_receipt.go）。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
+	_, err := c.CheckinReceipt(a)
 	return err
 }
 

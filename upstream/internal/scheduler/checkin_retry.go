@@ -15,6 +15,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand"
 	"time"
@@ -43,28 +44,47 @@ func lateRetryWait(round int, prev time.Duration, delays []time.Duration) time.D
 
 // checkinOne 对单个 CN 账号执行一次签到（不含余额查询、不含 token 预刷新）。
 //
-// 「今天已签到」是幂等成功（上游对重复签到返回 code!=0），归 CheckinAlready 且
-// err 为 nil；真失败才带 err，供调用方判断可否重试。两种「今天确实已签」的形态
-// （签到成功 / 幂等拒绝）都落 NoteCheckinDone——延后补签据此跳过已签账号。
+// 判定走 CheckinReceipt 的四态（checked / already / pending / failed）：
+//   - checked：本次真签上，落 NoteCheckinDone，日志带上回执里的真实积分；
+//   - already：今天已签过（上游幂等拒绝），同样落 NoteCheckinDone，但日志明确
+//     「本次没发积分」——旧代码把这两种都打成「签到成功」，面板据此显示 +100，
+//     实际一个积分都没发；
+//   - pending：上游说还在处理 / 稍后重试，可重试（交回上层退避与补签队列）；
+//   - failed：终态失败，带 err 让调用方决定是否重试。
 //
 // 抽出来是为了让「排程主批」与「延后补签」共用同一份判据——两处各写一遍必然漂移，
 // 而漂移的表现就是补签把幂等拒绝当成失败（白打写调用），或者把真失败当成已签
 // （当天积分静默丢失）。
 func (s *Scheduler) checkinOne(a *auth.Auth, uid string) (CheckinStatus, error) {
 	label := logfmt.Label(uid, a.Nickname)
-	if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
-		if upstream.IsAlreadyCheckin(err) {
-			s.cfg.Pool.NoteCheckinDone(uid)
-			log.Printf("checkin %s: 今天已签到（幂等）", label)
-			return CheckinAlready, nil
-		}
+	rec, err := s.cfg.Upstream.CheckinReceipt(a)
+	switch rec.State {
+	case upstream.CheckinChecked:
+		// 成功也落一行：此前静默，排查「签到到底跑没跑」时无迹可循（幂等行只在重复
+		// 触发时出现，正常成功反而没有日志）。
+		s.cfg.Pool.NoteCheckinDone(uid)
+		log.Printf("checkin %s: 签到成功%s", label, checkinCreditNote(rec))
+		return CheckinOK, nil
+	case upstream.CheckinAlready:
+		s.cfg.Pool.NoteCheckinDone(uid)
+		log.Printf("checkin %s: 今天已签到（幂等，本次未发积分）", label)
+		return CheckinAlready, nil
+	case upstream.CheckinPending:
+		// 上游明确「还在处理」：文案与 failed 区分开，但状态仍是可重试的失败，
+		// checkinRetryable 按 HTTP 状态 / code 10001 决定要不要等。
+		log.Printf("checkin %s: 上游处理中，稍后重试: %v", label, err)
 		return CheckinFail, err
 	}
-	// 成功也落一行：此前静默，排查「签到到底跑没跑」时无迹可循（幂等行只在重复
-	// 触发时出现，正常成功反而没有日志）。
-	s.cfg.Pool.NoteCheckinDone(uid)
-	log.Printf("checkin %s: 签到成功", label)
-	return CheckinOK, nil
+	return CheckinFail, err
+}
+
+// checkinCreditNote 回执里的积分说明：只有上游真带回 credit 才显示数字。
+// 没带回时不能补 0（会被读成「发了 0 分」），更不能硬编码 100。
+func checkinCreditNote(rec upstream.CheckinReceipt) string {
+	if rec.CreditKnown {
+		return fmt.Sprintf("（+%d 积分）", rec.Credit)
+	}
+	return ""
 }
 
 // checkinWithRetry 执行签到，遇到上游瞬时失败（HTTP 5xx / code 10001）按

@@ -263,7 +263,7 @@ async def run_task(task: str) -> tuple[bool, str]:
         # import accounts 会成环。同理这里的 `user` 只是路由的函数签名要求，
         # 函数体不用它（依赖注入由框架负责，后台任务直接给个管理员身份）。
         from ..routers import accounts as accounts_router  # noqa: PLC0415
-        total = ok_n = already = failed = 0
+        total = ok_n = already = pending = 0
         per_group: list[str] = []
         for g in groups:
             out = await accounts_router.checkin_all(upstream_id=g.get('id'),
@@ -272,10 +272,22 @@ async def run_task(task: str) -> tuple[bool, str]:
             total += t
             ok_n += s
             already += out.get('already', 0)
-            failed += max(0, t - s)
+            # 「稍后重试」（上游瞬时拒绝）在 total 里但不算成功：与真失败分开报，
+            # 否则一次限流抖动会让整轮计划显示「N 个失败」，而补签链路其实还会再试。
+            pending += sum(1 for r in (out.get('results') or []) if r.get('pending'))
             if len(groups) > 1:
                 per_group.append(f"{g['name']} {s}/{t}")
-        message = f'签到 {ok_n}/{total} 成功' + (f'（{already} 个今日已签）' if already else '')
+        failed = max(0, total - ok_n - pending)
+        extras = []
+        if already:
+            extras.append(f'{already} 个今日已签')
+        if pending:
+            extras.append(f'{pending} 个稍后重试')
+        if failed:
+            extras.append(f'{failed} 个失败')
+        message = f'签到 {ok_n}/{total} 成功'
+        if extras:
+            message += '（' + '，'.join(extras) + '）'
         if per_group:
             message += '（' + '；'.join(per_group) + '）'
         return failed == 0, message
