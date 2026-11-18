@@ -423,3 +423,21 @@ d780cabdc0672d21dc3b035c2bf4fa6b6c415e39
 d6301fe9fdf8886e167e4f5e84ebebeea12dc63d
 733942a75011cb2dd66caa97281b1ad67fa95c90
 ae44d739f6f9fc9a0b37aea5667c69a0c6dd3814
+
+# ---- 2026-11 第八批：misakano 34120825 附录 E 落地 ----
+#      E-2 早到工具结果重排（27b7458f + e14a3d03，取后者的配对口径）：
+#        · Go：upstream/internal/upstream/tool_pairing.go 新增
+#          reorderEarlyToolResults / declaredToolCallIDs；payload.go 管线改为
+#          reorderEarly -> repack -> cleanup。归属按每个 id「已声明、未应答」
+#          计数正序扫描：命中未应答声明原地不动，否则归后面**最近**一次声明并
+#          预扣一次应答（不跟最后一次声明走，跨轮复用 call_0 才不会被误挪）。
+#          早到结果补在声明之后**连续 tool 结果之后**，同批相对顺序不变；
+#          孤儿结果不动，仍由 cleanupOrphanToolCalls 删。
+#        · Python：server/routers/responses.py 新增
+#          _reorder_early_tool_results / _declared_tool_call_ids，
+#          convertInputItems 收尾统一重排（与 Go 同口径）。
+#        · 新增 upstream/internal/upstream/tool_reorder_test.go、
+#          server/tests/test_responses_early_tool_results.py。
+#      未取：27b7458f 的 AutoBot 换址部分（本地无该运行时）。
+27b7458f7251942066f912c5677a0f9bc0c3ebdd
+e14a3d03face0961fc9a7a98449e7fc859e52b3c

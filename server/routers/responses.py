@@ -881,6 +881,12 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
                     attach_reasoning(prev, take_reasoning())
                     break
 
+        # 早到的工具结果收尾重排（见 _reorder_early_tool_results）：Codex 经
+        # cc-switch 类本地代理转发时，function_call_output 会排在 function_call
+        # 之前；上面的循环按原始顺序落消息，于是 role=tool 出现在声明它的
+        # assistant 之前，上游判 11148 tool_call_sequence_broken 顶死整条会话。
+        _reorder_early_tool_results(messages)
+
     _inject_structured_output(messages, body)
     out['messages'] = messages
 
@@ -964,6 +970,85 @@ def _split_tool_output(output: object) -> tuple[str, list[dict]]:
             text = '[图片]'   # 上游要求 tool content 非空
         return text, images
     return _tool_output_text(output), []
+
+
+def _declared_tool_call_ids(msg: dict) -> list[str]:
+    """一条 chat 消息自己声明了哪些 tool_call id（assistant 以外返回空）。"""
+    if msg.get('role') != 'assistant':
+        return []
+    ids: list[str] = []
+    for call in msg.get('tool_calls') or []:
+        if isinstance(call, dict):
+            cid = call.get('id')
+            if isinstance(cid, str) and cid:
+                ids.append(cid)
+    return ids
+
+
+def _reorder_early_tool_results(messages: list[dict]) -> None:
+    """把「早于其 tool_call」出现的 role=tool 结果移到声明之后（原地重排）。
+
+    与 Go 侧 upstream/tool_pairing.go 的 reorderEarlyToolResults 同口径：
+
+    归属判定按「已声明、未应答」计数，不能「同 id 跟最后一次声明走」——网关
+    在客户端没给 id 时按轮内下标补 call_0 / toolu_0，同一会话每轮都可能有
+    一个 call_0；跟最后一次声明会把顺序本来正确的第一轮结果搬到最后一轮
+    之后，反而制造 11148。
+
+    - 结果命中未应答的声明 → 正常配对，原地不动；
+    - 否则后面有同 id 的声明就是早到结果，归**最近**那一次，并预先记作该次
+      已应答（之后同 id 的结果不会再被它吸走）；
+    - 前后都找不到声明者的孤儿结果不动（由既有降级逻辑处理）；
+    - 本来顺序就对的请求零改动（不重建列表）。
+    """
+    if len(messages) < 2:
+        return
+    decls: dict[str, list[int]] = {}
+    for i, msg in enumerate(messages):
+        for cid in _declared_tool_call_ids(msg):
+            decls.setdefault(cid, []).append(i)
+    if not decls:
+        return
+
+    open_counts: dict[str, int] = {}
+    grouped: dict[int, list[dict]] = {}
+    early: set[int] = set()
+    for i, msg in enumerate(messages):
+        for cid in _declared_tool_call_ids(msg):
+            open_counts[cid] = open_counts.get(cid, 0) + 1
+        if msg.get('role') != 'tool':
+            continue
+        cid = msg.get('tool_call_id')
+        if not isinstance(cid, str):
+            continue
+        if open_counts.get(cid, 0) > 0:
+            open_counts[cid] -= 1
+            continue
+        for j in decls.get(cid, ()):
+            if j > i:
+                early.add(i)
+                grouped.setdefault(j, []).append(msg)
+                open_counts[cid] = open_counts.get(cid, 0) - 1
+                break
+    if not early:
+        return
+
+    out: list[dict] = []
+    pending: list[dict] = []
+    for i, msg in enumerate(messages):
+        if i in early:
+            continue  # 早到的结果不在此处落地
+        # 结果区结束（来了一条非 tool 消息）：先把上一批待补的结果补上，
+        # 保证「assistant 之后、连续 tool 结果之后」才是早到结果的位置。
+        if pending and msg.get('role') != 'tool':
+            out.extend(pending)
+            pending = []
+        out.append(msg)
+        if i in grouped:
+            pending = grouped[i]
+    if pending:
+        out.extend(pending)
+    messages[:] = out
 
 
 def _images_as_user_messages(images: list[dict]) -> list[dict]:
