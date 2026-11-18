@@ -93,6 +93,11 @@ type Scheduler struct {
 	retryMu      sync.Mutex
 	retryPending map[string]bool
 
+	// useMu/lastUse 同一账号最近一次被哪类任务批次开始处理（见 accountGate）。
+	// 只服务跨任务间隔，不参与选号 / 冷却 / 权重。
+	useMu   sync.Mutex
+	lastUse map[string]accountUse
+
 	// makeupPerRound 每轮连登管家最多用几张补签卡（0 = 不限，补到卡用光）。
 	// atomic 读写，面板保存配置后可热改（schedule.makeup_cards_per_round）。
 	//
@@ -420,6 +425,59 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
+// accountTaskGap 同一账号被**不同任务批次**处理时的最小开始间隔。
+//
+// 为什么需要：签到与猫猫旅行的默认时点相同（都是 9 / 21 点）。当
+// schedule.account_delay_max_seconds=0（默认）时，runBatch 把同刻的多类任务
+// **并行**派发；两个遍历都按 UID 排序取号，且首个账号都零延迟，于是排第一的
+// 账号会在同一秒被「签到 + 查余额」和「旅行 buddy-info/status/quota/open」两串
+// 请求同时打中，上游回 429 `{"error_msg":"Too Many Requests"}`——任务记录里
+// 就是一条「余额查询 · upstream soft_rate」。
+//
+// 本闸门只约束**跨批次**：同一批次内部仍由各自的 accountGap 控节奏，不同账号
+// 之间也仍然并行（不把整批任务串行化）。测试可置 0（与 travelAccountDelay 同口径）。
+var accountTaskGap = 3 * time.Second
+
+// checkinBalanceDelay 签到调用与随后余额查询之间的间隔。
+//
+// checkinAll 在 daily-checkin 返回后**立即**发 get-user-resource：同账号两次
+// billing 请求贴在同一秒里，上游对余额接口的限流更紧时第二次就 429。余额查询是
+// 只读的、失败只丢一次刷新（fail_resource），所以这里宁慢一秒。
+var checkinBalanceDelay = 1 * time.Second
+
+// accountUse 账号最近一次处理的预约（taskKind + 开始时刻），供 accountGate 用。
+type accountUse struct {
+	kind taskKind
+	at   time.Time
+}
+
+// accountGate 预约账号 uid 在 kind 这一批里的开始时刻：与上一次**其它批次**的
+// 处理至少隔 accountTaskGap；同一批次内直接放行。返回 false 表示 ctx 已取消。
+//
+// 写入的是**预约时刻**而不是「刚处理完的时刻」：多个并发批次因此会按顺序排队
+// （第二批复用「上一批 + gap」，第三批再顺延），不会同时醒在同一秒。
+func (s *Scheduler) accountGate(ctx context.Context, uid string, kind taskKind) bool {
+	if accountTaskGap <= 0 {
+		return ctx.Err() == nil
+	}
+	s.useMu.Lock()
+	if s.lastUse == nil {
+		s.lastUse = make(map[string]accountUse)
+	}
+	now := time.Now()
+	prev, seen := s.lastUse[uid]
+	next := now
+	if seen && prev.kind != kind && prev.at.Add(accountTaskGap).After(now) {
+		next = prev.at.Add(accountTaskGap)
+	}
+	s.lastUse[uid] = accountUse{kind: kind, at: next}
+	s.useMu.Unlock()
+	if wait := time.Until(next); wait > 0 {
+		return sleepCtx(ctx, wait)
+	}
+	return ctx.Err() == nil
+}
+
 // runBatch 并行派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。
 // 供 Run 主循环与测试使用；ctx 取消时由各任务内部的 sleepCtx 快速收尾。
 func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
@@ -620,12 +678,18 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			if !pace() {
 				return out, ctx.Err()
 			}
+			if !s.accountGate(ctx, st.UID, taskCheckin) {
+				return out, ctx.Err()
+			}
 			// 签到按状态门控（见 checkinGlobal）。
 			s.checkinGlobal(a)
 			// **只读**余额必须刷新：否则 pool 里的 credits 恒 0，weightOf 的
 			// 「余额 / 快过期」两个因子对 global 完全失效，选号退化成纯轮询（issue #228）。
 			// UserResourceDetailed 只调 billing/meter 只读接口，不碰签到，
 			// 风控语义与 D4 门控一致。
+			if !sleepCtx(ctx, checkinBalanceDelay) {
+				return out, ctx.Err()
+			}
 			if remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow); err != nil {
 				log.Printf("user-resource(global) %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			} else {
@@ -640,6 +704,9 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			return out, ctx.Err()
 		}
 		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+		if !s.accountGate(ctx, st.UID, taskCheckin) {
 			return out, ctx.Err()
 		}
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
@@ -680,6 +747,12 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			}
 		} else {
 			oc.Status = cs
+		}
+		// 签到与余额查询之间留出间隔：两次 billing 请求贴在同一秒时，第二次
+		// （get-user-resource）容易被上游 soft_rate 429。只读查询失败只丢一次刷新，
+		// 慢这一点比每天一条 429 划算。取消时放弃本号（与 pace 同口径）。
+		if !sleepCtx(ctx, checkinBalanceDelay) {
+			return out, ctx.Err()
 		}
 		// 分桶查余额：快过期窗口内的积分单独标记，pool 优先消耗（issue:积分过期）。
 		// ExpiringSoonWindow<=0 时退化为纯总量（与引入前一致）。
@@ -771,6 +844,9 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 			}
 		}
 		first = false
+		if !s.accountGate(ctx, st.UID, taskActivity) {
+			return // ctx 取消：剩余账号下轮再报
+		}
 		// N 条共用同一 conversationId（同会话），requestId 各自独立（每条一个）。
 		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
 		ok := 0
@@ -928,6 +1004,9 @@ func (s *Scheduler) runKeepalive(ctx context.Context, selective bool) {
 			return
 		}
 		if ctx.Err() != nil {
+			return
+		}
+		if !s.accountGate(ctx, st.UID, taskKeepalive) {
 			return
 		}
 		first = false

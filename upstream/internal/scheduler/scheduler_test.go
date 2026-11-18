@@ -26,6 +26,8 @@ func TestMain(m *testing.M) {
 	checkinAccountDelay = 0
 	checkinRetryDelays = nil
 	checkinLateRetryDelays = nil
+	checkinBalanceDelay = 0
+	accountTaskGap = 0
 	os.Exit(m.Run())
 }
 

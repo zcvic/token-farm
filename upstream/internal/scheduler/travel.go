@@ -92,6 +92,9 @@ func (s *Scheduler) runTravel(ctx context.Context) {
 			}
 		}
 		first = false
+		if !s.accountGate(ctx, st.UID, taskTravel) {
+			return // ctx 取消：剩余账号下轮再巡
+		}
 		s.travelOne(a)
 	}
 }
