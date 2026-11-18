@@ -16,7 +16,7 @@ from unittest import mock
 from server import config, db
 from server.platforms.base import PlatformError
 from server.platforms.trae import catalog, client, store
-from server.platforms.trae.adapter import TraeAdapter
+from server.platforms.trae.adapter import TraeAdapter, _credit_expiries
 
 
 class _Base(unittest.TestCase):
@@ -37,6 +37,62 @@ class _Base(unittest.TestCase):
             db._conn.close()
         db._conn = None
         config.DB_PATH = self._orig_db
+
+
+class CreditExpiryTest(unittest.TestCase):
+    """权益包明细：金额必须是**剩余**，用满 / 过期的包不能留在列表里。
+
+    账号页的积分倒计时直接画这一份；如果这里把包的上限当成剩余，或者把
+    已经作废的包也列出来，用户按明细算出来的总额就会大于余额。
+    """
+
+    NOW = 1_800_000_000
+
+    @staticmethod
+    def _pack(limit, used, expire, label=''):
+        pack = {
+            'display_desc': label,
+            'entitlement_base_info': {
+                'quota': {'credits_limit': limit},
+                'end_time': expire,
+            },
+            'usage': {'credits_amount': used},
+        }
+        return pack
+
+    def test_uses_remaining_not_limit(self) -> None:
+        ent = {'user_entitlement_pack_list': [
+            self._pack(4000, 1500, self.NOW + 86400, '新用户包'),
+            self._pack(500, 0, self.NOW + 7 * 86400, '每月登录'),
+        ]}
+        got = _credit_expiries(ent, now=self.NOW)
+        self.assertEqual([(e['amount'], e['expire_at']) for e in got], [
+            (2500, self.NOW + 86400),
+            (500, self.NOW + 7 * 86400),
+        ])
+
+    def test_drops_consumed_and_expired(self) -> None:
+        ent = {'user_entitlement_pack_list': [
+            self._pack(100, 100, self.NOW + 86400),   # 已用满
+            self._pack(100, 0, self.NOW - 1),         # 已过期
+            self._pack(100, 40, self.NOW + 60),       # 唯一可用
+        ]}
+        got = _credit_expiries(ent, now=self.NOW)
+        self.assertEqual([e['amount'] for e in got], [60])
+
+    def test_skips_pack_without_expiry(self) -> None:
+        ent = {'user_entitlement_pack_list': [
+            self._pack(100, 0, 0),                    # 不知道什么时候到期
+        ]}
+        self.assertEqual(_credit_expiries(ent, now=self.NOW), [])
+
+    def test_sorted_by_expiry(self) -> None:
+        ent = {'user_entitlement_pack_list': [
+            self._pack(10, 0, self.NOW + 300),
+            self._pack(10, 0, self.NOW + 100),
+        ]}
+        self.assertEqual([e['expire_at'] for e in _credit_expiries(ent, now=self.NOW)],
+                         [self.NOW + 100, self.NOW + 300])
 
 
 class RealmCapabilityTest(_Base):

@@ -2404,7 +2404,7 @@ export interface Combo {
  * 界面显示「—」并把原因放进 title。
  */
 export interface PlatformCreditsExpiry {
-  /** 这一包积分的数量 */
+  /** 这一包**当前剩余**的积分（已扣掉该包自己的消耗，不是包的上限） */
   amount: number;
   /** 到期时刻（epoch 秒） */
   expire_at: number;

@@ -28,6 +28,7 @@ import {
 
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {LoadError} from '@/components/common/states/LoadError';
 import {SkeletonBar} from '@/components/common/states/SkeletonBar';
 import {Button} from '@/components/ui/button';
@@ -66,6 +67,7 @@ import {useAsyncAll} from '@/lib/use-async-data';
 import {useNow} from '@/lib/use-now';
 import {fmtDateTime, fmtRemain} from '@/lib/format';
 import {paginate} from '@/lib/account-list';
+import {platformCreditExpiries, platformCreditPacks} from '@/lib/platform-credits';
 import {
   PLATFORM_GROUPS,
   platformAvailabilityOf,
@@ -134,28 +136,6 @@ function creditTitle(entry: PlatformCredits | undefined, hint: string,
 function creditNum(value: number | null | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
-}
-
-/** epoch 秒 → `MM-DD`（表格里只放得下这么多）。 */
-function expiryDay(seconds: number | null | undefined): string {
-  if (!seconds || !Number.isFinite(seconds)) return '';
-  const date = new Date(seconds * 1000);
-  if (Number.isNaN(date.getTime())) return '';
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${month}-${day}`;
-}
-
-/** 权益包清单 → 悬浮提示里的多行文本（每个包的金额、到期、来源）。 */
-function expiryDetail(entry: PlatformCredits | undefined): string {
-  const packs = entry?.expires ?? [];
-  if (!packs.length) return '';
-  return packs
-    .map((pack) => {
-      const when = fmtDateTime(pack.expire_at * 1000);
-      return `${pack.amount} · ${when}${pack.label ? ` · ${pack.label}` : ''}`;
-    })
-    .join('\n');
 }
 
 /**
@@ -433,6 +413,8 @@ export function PlatformAccountsPanel({
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState('');
   const usageCredit = usageFor ? credits[usageFor.uid] : undefined;
+  /** 用量弹窗里的到期明细：与列表同一口径（丢掉用满 / 已过期的包）。 */
+  const usageExpiries = platformCreditPacks(usageCredit, now);
 
   /** 批量 / 单账号操作进行中标记（按 uid 或 'all'），用于禁用按钮。 */
   const [busy, setBusy] = useState('');
@@ -1119,6 +1101,9 @@ export function PlatformAccountsPanel({
                   const rowBusy = busy === a.uid;
                   const expired = isExpired(a.expiredAt);
                   const group = platformAvailabilityOf(a, now);
+                  // 积分到期明细：后端已经筛过一遍，这里按**当前时刻**再筛一次
+                  // —— 页面停留期间包会到期 / 被用满，列表不会每分钟重新请求。
+                  const creditExpiries = platformCreditExpiries(credits[a.uid], now);
                   return (
                     <TableRow key={a.uid} className="border-b border-border/40">
                       <TableCell className="pl-4">
@@ -1224,16 +1209,11 @@ export function PlatformAccountsPanel({
                                   </span>
                                 )}
                             </span>
-                            {!!credits[a.uid]?.next_expire_at && (
-                              <span
-                                className="text-[10px] text-muted-foreground"
-                                title={expiryDetail(credits[a.uid])}
-                              >
-                                {t('platforms.creditsExpireAt', {
-                                  date: expiryDay(credits[a.uid]?.next_expire_at),
-                                })}
-                              </span>
-                            )}
+                            {/* 到期倒计时与 WorkBuddy 账号页**同一个组件**：
+                                「多少分 · 还有几天到期」，悬停给出逐包明细与合计。
+                                只画最近一笔（单元格放不下多行），但金额必须带上 ——
+                                只写日期会被读成「余额整体那天到期」。 */}
+                            <CreditCountdown expiries={creditExpiries} />
                           </div>
                         </TableCell>
                       )}
@@ -1603,14 +1583,14 @@ export function PlatformAccountsPanel({
                             : ''}
                         </span>
                       </div>
-                      {!!usageCredit?.expires?.length && (
+                      {usageExpiries.length > 0 && (
                         <div className="mt-2 border-t border-border/60 pt-2">
                           <div className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground">
                             <CalendarClock className="h-3.5 w-3.5" />
                             {t('platforms.creditsExpiry')}
                           </div>
                           <ul className="space-y-0.5">
-                            {usageCredit.expires.map((pack, i) => (
+                            {usageExpiries.map((pack, i) => (
                               <li
                                 key={i}
                                 className="flex items-center justify-between gap-2 text-[11px]"

@@ -25,7 +25,7 @@ SAMPLE = {
     'user_entitlement_pack_list': [{
         'display_desc': 'Free plan',
         'entitlement_base_info': {
-            'end_time': 1796083199,
+            'end_time': 4102444800,
             'quota': {
                 'basic_usage_limit': 10,
                 'bonus_usage_limit': 5,
@@ -49,7 +49,7 @@ class DollarUsageTest(unittest.TestCase):
         assert usage is not None
         self.assertEqual(usage['limit'], 15.0)
         self.assertEqual(usage['used'], 3.75)
-        self.assertEqual(usage['end_at'], 1796083199)
+        self.assertEqual(usage['end_at'], 4102444800)
         self.assertEqual(usage['label'], 'Free plan')
 
     def test_accepts_pack_level_quota(self) -> None:
@@ -68,6 +68,39 @@ class DollarUsageTest(unittest.TestCase):
                         {'user_entitlement_pack_list': []},
                         {'user_entitlement_pack_list': [{'usage': {}}]}):
             self.assertIsNone(_dollar_usage(payload), payload)
+
+    def test_per_pack_remaining_skips_consumed_and_expired(self) -> None:
+        payload = {'user_entitlement_pack_list': [
+            {
+                'display_desc': 'A',
+                'entitlement_base_info': {
+                    'end_time': 2000,
+                    'quota': {'basic_usage_limit': 10, 'bonus_usage_limit': 5},
+                },
+                'usage': {'basic_usage_amount': 2.5, 'bonus_usage_amount': 1.25},
+            },
+            {   # 已用满
+                'entitlement_base_info': {
+                    'end_time': 2000,
+                    'quota': {'basic_usage_limit': 4},
+                },
+                'usage': {'basic_usage_amount': 4},
+            },
+            {   # 已过期
+                'entitlement_base_info': {
+                    'end_time': 500,
+                    'quota': {'basic_usage_limit': 2},
+                },
+                'usage': {},
+            },
+        ]}
+        usage = _dollar_usage(payload, now=1000)
+        assert usage is not None
+        self.assertEqual(usage['limit'], 19.0, '已过期的包整个不计入总额')
+        self.assertEqual(usage['used'], 7.75)
+        self.assertEqual(usage['expires'], [{
+            'amount': 11.25, 'expire_at': 2000, 'label': 'A',
+        }])
 
 
 class HostSelectionTest(unittest.TestCase):
@@ -169,7 +202,8 @@ class _Base(unittest.TestCase):
         self.assertEqual(got['remain'], 11.25)
         self.assertEqual(got['credits'], 11.25)
         self.assertEqual(got['source'], 'entitlement')
-        self.assertEqual(got['expires'][0]['expire_at'], 1796083199)
+        self.assertEqual(got['expires'][0]['expire_at'], 4102444800)
+        self.assertEqual(got['expires'][0]['amount'], 11.25, '明细是剩余额度，不是包的上限')
         fetch.assert_awaited_once()
 
     def test_intl_credits_keep_two_decimals(self) -> None:

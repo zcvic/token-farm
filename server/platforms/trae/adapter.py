@@ -125,18 +125,26 @@ def _is_model_unknown(exc: PlatformError) -> bool:
     return '4023' in text or 'model is unknown' in text.lower()
 
 
-def _credit_expiries(ent_usage: object) -> list[dict]:
+def _credit_expiries(ent_usage: object, *, now: float | None = None) -> list[dict]:
     """把权益包拆成 `[{amount, expire_at, label}]`，按到期时间升序。
 
     积分是**分批过期**的（实测：4000 的新用户包到 11-30，500 的每月登录包
     到下月初），`usage_summary` 只给合计。只显示一个总额会让用户以为全部
     积分同时作废，所以逐包给出金额与到期时刻。
+
+    `amount` 是这一包的**剩余**，不是额度上限：
+      · 额度在上游是 `quota.credits_limit`（总量），已用在
+        `usage.credits_amount`（与 `client.fetch_consumed` 同口径，累计消耗）；
+      · **已用满（剩余 <= 0）或到期时刻已过**的包不进列表 —— 它们已经不可用，
+        列出来会让「逐包合计」大于余额，用户按明细去花就会对不上账；
+      · 取不到额度 / 到期时刻的包也跳过（宁可不显示，也不给一个假到期日）。
     """
     if not isinstance(ent_usage, dict):
         return []
     packs = ent_usage.get('user_entitlement_pack_list')
     if not isinstance(packs, list):
         return []
+    cutoff = time.time() if now is None else float(now)
     out: list[dict] = []
     for pack in packs:
         if not isinstance(pack, dict):
@@ -146,13 +154,23 @@ def _credit_expiries(ent_usage: object) -> list[dict]:
         quota = pack.get('quota')
         if not isinstance(quota, dict):
             quota = base.get('quota') if isinstance(base.get('quota'), dict) else {}
-        amount = _num(quota.get('credits_limit'))
+        limit = _num(quota.get('credits_limit'))
+        if limit <= 0:
+            continue
+        usage = pack.get('usage')
+        usage = usage if isinstance(usage, dict) else {}
+        used = _num(usage.get('credits_amount'))
+        if used <= 0:
+            # 少数响应只给「已消耗」的另一种字段名；取不到就按 0 处理，
+            # 与改动前一致（那时根本不扣减）。
+            used = _num(usage.get('consumed_amount'))
+        amount = max(0.0, limit - used)
         if amount <= 0:
             continue
         expire = (_num(pack.get('expire_time'))
                   or _num(base.get('end_time'))
                   or _num(pack.get('yearly_expire_time')))
-        if expire <= 0:
+        if expire <= 0 or expire <= cutoff:
             continue
         extra = base.get('package_extra')
         extra = extra if isinstance(extra, dict) else {}
@@ -166,7 +184,7 @@ def _credit_expiries(ent_usage: object) -> list[dict]:
     return out
 
 
-def _dollar_usage(payload: object) -> dict | None:
+def _dollar_usage(payload: object, *, now: float | None = None) -> dict | None:
     """把国际版 `user_current_entitlement_list` 的权益包读成美元额度。
 
     实测（2026-11-01，Free plan）：
@@ -174,12 +192,22 @@ def _dollar_usage(payload: object) -> dict | None:
         `bonus_usage_limit` 另算；
       · 已用在 `usage.basic_usage_amount` / `bonus_usage_amount`（美元）；
       · 到期时间 `entitlement_base_info.end_time`（epoch 秒）。
-    没有权益包时返回 None——调用方据此区分「取不到」和「额度为 0」。
+
+    **多包一起算**：以前只取第一个包，界面于是只看到一个到期日；现在把每个
+    包的剩余 / 到期都列出来，并丢掉已用满或已过期的包（理由同
+    `_credit_expiries`）。没有权益包时返回 None——调用方据此区分「取不到」
+    和「额度为 0」。
     """
     packs = payload.get('user_entitlement_pack_list') \
         if isinstance(payload, dict) else None
     if not isinstance(packs, list):
         return None
+    cutoff = time.time() if now is None else float(now)
+    limit = used = 0.0
+    found = False
+    end_at: int | None = None
+    label = ''
+    expires: list[dict] = []
     for pack in packs:
         if not isinstance(pack, dict):
             continue
@@ -190,21 +218,44 @@ def _dollar_usage(payload: object) -> dict | None:
             quota = pack.get('quota')
         if not isinstance(quota, dict):
             continue
+        found = True
         usage = pack.get('usage')
         usage = usage if isinstance(usage, dict) else {}
-        limit = _num(quota.get('basic_usage_limit')) \
+        pack_limit = _num(quota.get('basic_usage_limit')) \
             + _num(quota.get('bonus_usage_limit'))
-        used = _num(usage.get('basic_usage_amount')) \
+        pack_used = _num(usage.get('basic_usage_amount')) \
             + _num(usage.get('bonus_usage_amount'))
         end = _num(base.get('end_time')) or _num(pack.get('expire_time'))
-        return {
-            'limit': round(limit, 4),
-            'used': round(used, 4),
-            'end_at': int(end) if end > 0 else None,
-            'label': str(pack.get('display_desc')
-                         or base.get('product_name') or ''),
-        }
-    return None
+        # 已过期的包**整包**不算：它没用完的额度已经作废，再把它的 limit
+        # 加进总额会让「余额」比实际可花的钱多。没有到期时刻的包照常计入
+        # （上游没给，不能自行判断过期）。
+        if end > 0 and end <= cutoff:
+            continue
+        pack_label = str(pack.get('display_desc')
+                         or base.get('product_name') or '')
+        limit += pack_limit
+        used += pack_used
+        if not label:
+            label = pack_label
+        if end > 0 and (end_at is None or end < end_at):
+            end_at = int(end)
+        remain = max(0.0, pack_limit - pack_used)
+        if remain > 0 and end > 0:
+            expires.append({
+                'amount': round(remain, 2),
+                'expire_at': int(end),
+                'label': pack_label,
+            })
+    if not found:
+        return None
+    expires.sort(key=lambda item: item['expire_at'])
+    return {
+        'limit': round(limit, 4),
+        'used': round(used, 4),
+        'end_at': end_at,
+        'label': label,
+        'expires': expires,
+    }
 
 
 def _normalize_realm_value(value: object) -> str:
@@ -555,12 +606,9 @@ class TraeAdapter(PlatformAdapter):
                     limit = usage['limit']
                     used = usage['used']
                     has_quota = True
-                    if usage['end_at']:
-                        expires = [{
-                            'amount': round(max(0.0, limit - used), 2),
-                            'expire_at': usage['end_at'],
-                            'label': usage['label'],
-                        }]
+                    # 逐包明细（已扣减该包已用量、已去掉用满 / 过期的包），
+                    # 与国内版同一个展示口径。
+                    expires = usage.get('expires') or []
             except PlatformError as exc:
                 failures.append(exc)
         else:
