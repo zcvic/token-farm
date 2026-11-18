@@ -1073,7 +1073,9 @@ func (c *Client) chatBase(a *auth.Auth) string {
 // 显式传 realm 使 effort 降级按域取桶：CN 探测信息不得作用到 global 请求（C-2）。
 // conversationID 为网关解析出的会话标识（用于 prompt_cache_key 注入的会话段；
 // body 里自带 conversation_id 时以 body 为准）。uid8 来自账号 UID，是跨账号硬隔离段。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
+// convReqID 为本次出站的 X-Conversation-Request-ID，用于给当前轮 user 消息补
+// body 侧轮级字段（见 conv_fields.go）；空串不写。
+func (c *Client) prepareBody(body []byte, realm, uid, conversationID, convReqID string) []byte {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
@@ -1085,6 +1087,9 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
+	// 头体一致：把本轮 X-Conversation-Request-ID 也写进 body 的当前轮 user 消息。
+	// 放在最后——前面的 body 改写不保证保留未知字段，补在它们之后才不会被丢掉。
+	body = injectConversationFields(body, convReqID)
 	return body
 }
 
@@ -1439,7 +1444,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// ensureConsoleSystem 在 prepareBody 后统一套用全局脚本：首条消息非 system 时前置
 	// 兜底 system（防 console 域上游 code 11-128；#119 后 global 出站固定 /v2，
 	// 该兜底保留——上游对 /v2 是否需要 system 无实测反证，删了无回滚路径）。
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID, meta.ConversationRequestID)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
