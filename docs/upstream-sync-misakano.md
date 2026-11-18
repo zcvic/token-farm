@@ -64,6 +64,11 @@
 > 6020/6021 网关内等一轮（`b957e32b`）因依赖本地没有的 headkeepalive 而暂缓。
 > 这一批同样不改流量分布、不引入依赖。
 
+> **剩余待办**（2026-11-18，参考仓 `34120825`）：附录 A–E 的判定都已完成，两份清单里
+> **还没做**的项已合并到 [upstream-sync.md](upstream-sync.md) 的「剩余待办总览」，按
+> 「下一批 / 需灰度 / 中风险 / 要排期」分档。本文各条目仍是判据、落点与取舍的详细出处，
+> 总览只做索引。
+
 ## 先看两套运行时的差异
 
 本项目是 **Python 面板 + Go 上游网关** 双运行时；参考仓是**单二进制 Go 程序，
@@ -2000,7 +2005,7 @@ MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
 |---|---|---|---|---|---|
 | B-1 DSML 工具调用还原 | 无。`tool_pairing.go` 只修已结构化的 `tool_calls` / `tool` 消息；`sanitize.go` 只剥指纹 | `upstream/dsml.go`（`e0ee6b9a`）：识别正文里的全角竖线 DSML 标记，流式与非流式都还原成标准 `tool_calls`；严格判定（工具名在名单）与弱判定（名单为空但块完整闭合、工具名形态合法）两级；本回合已有结构化 `tool_calls` 时不覆盖 | **缺失** | 在 `sse.go` 与非流式响应组装处加一层 `repairDSML`；只处理完整闭合块，块内不夹带正文；工具参数被截断不修；必须有开关与日志 | 中高；误判正文会破坏正常输出，严格判定优先 |
 | B-2 会话轮级 body 字段 | 只在头里写 `X-Conversation-ID` / `X-Conversation-Request-ID`；消息体没有 `conversationRequestId`、`startsNewUserRequest`、`agent` | `upstream/conv_fields.go`（`56057810`，issue #51）：只给当前轮最后一个 user 消息写 `conversationRequestId` + `startsNewUserRequest`，并补 `agent:"cli"`；历史消息不伪造 | **缺失** | 在 `PrepareBody*` 之后注入；客户端已带则不覆盖；只写当前轮，不补历史 | 低 |
-| B-3 Kimi 工具 `$ref` 展开 | `payload.go:437` 只做 `normalizeToolEnumTypes`（补 enum 的 type），不展开 `$ref` / `$defs` | `upstream/kimi_tools.go`（`854e74cd`）：仅 CN 且模型名 `kimi*` 时，把 tools schema 里的 `$ref` 内联展开；不裁剪任何工具；解析失败原样返回 | **缺失** | 在 enum 归一之后加 `expandToolRefs`；限制递归深度/环；只对 CN Kimi；失败保留原字节 | 低 |
+| B-3 Kimi 工具 `$ref` 展开 | ~~不展开 `$ref` / `$defs`~~ **已覆盖（E-1）**：`schema_normalize.go` 对**顶层** `$ref`（`#/$defs/…`）做内联展开（`inlineKimiSchema`，带深度/环保护），展不开就删键退化成无参工具；嵌套 `$ref` 实测上游 200，不动 | `upstream/kimi_tools.go`（`854e74cd`）：仅 CN 且模型名 `kimi*` 时，把 tools schema 里的 `$ref` 内联展开；不裁剪任何工具；解析失败原样返回 | **已覆盖** | 无需动作。E-1 的落地把范围放宽到全 realm 的顶层 `$ref`（上游对顶层 `$ref` 是整单 400 11129，与模型无关），比只对 CN Kimi 更严；`kimi*` 专属裁剪没有落点 | — |
 | B-4 usage 缓存命中别名 | `sse.go:287` 只补 `total_tokens`，不统一缓存命中字段 | `upstream/usage.go`（`782a6414`）：取 `prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens` / `cache_read_input_tokens` / `cached_tokens` / `input_tokens_details.cached_tokens` 中的最大正值，统一写回别名；流式与非流式都调用 | **缺失** | 加 `normalizeUsageCacheAliases`，在响应离开网关前调用；只在下游已有 `input_tokens_details` 时保留该嵌套形态 | 低 |
 | B-5 401 三态求证 | `handler.go:884` refresh 失败且 `ErrSessionDead` 才 `NoteSessionDead`；其余 401 没有统一求证；余额刷新失败只记日志（`scheduler.go:587`） | `upstream/verify.go`（`21a6e456`、`f6bd0539`）+ `scheduler/balance_401.go`：`VerifyAlive` / `VerifyDead` / `VerifyInconclusive`，refresh 做权威求证；alive 不罚、dead 计 session dead、inconclusive 不罚 | **部分覆盖** | 把 401 求证收敛到一个 `VerifySessionByRefresh`；chat 401 与余额探测共用；refresh 成功必须保存轮换后的新 token；inconclusive 不写池状态 | 中；轮换 token 必须落盘，否则会把号弄坏 |
 | B-6 活跃上报的 body 形态 | `report.go:93` 发 `billingBase`，事件只含 20 多个字段；scheduler 用 `wb2api-<ms>` / `wb2api-<ms>-rN` 作 conversation/request ID，每号发 `ActivityReportCount`（默认 5）条 | `report.go:252` `ReportChatActivityModel` 发 `chatBase`，用 `session.NewConversationID()` 官方 UUID，body 带设备/包指纹；每号每天 1 条；企业号（`SupportsPersonalGrowth()==false`）直接跳过 | **分叉** | 先做同号 A/B：两通道各发 1 条，回读 streak 与任务进度；确认后再切。切换时一并改 UUID、UA、头和指纹；企业号加跳过；条数是否降为 1 也按实测决定 | 中到高；本地注释称 billingBase 200，但 200 ≠ 计分 |

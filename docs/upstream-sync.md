@@ -207,6 +207,86 @@ git am -3 -p1 --directory=upstream /tmp/sync/0001-*.patch
   MCP / Embeddings 等），先判断与本项目是否兼容；不兼容就只移植其中协议无关的
   部分，不要为了「同步完整」把两套运行时耦在一起。
 
+## 剩余待办总览（2026-11-18 整理）
+
+基线：参考仓 `34120825`（附录 A–E 已逐提交评完）。这一节把两份清单里**还没做**的
+项合到一张表，按「改动面 / 要不要灰度」分档；明细仍以
+[upstream-sync-misakano.md](upstream-sync-misakano.md)（`M-` 项、附录 A–E）与
+[upstream-sync-baseline-gaps.md](upstream-sync-baseline-gaps.md)（`G-` 项）的条目为准，
+这里只做索引，不重复展开每项的判据。
+
+### 一档：下一批可做（不改流量分布、不动 transport）
+
+| 项 | 一句话 | 本地落点 | 来源 |
+|---|---|---|---|
+| **M-P1-9** | 正文里内联的 `<think:…>` 拆回 thinking 块；只在 content **以** `<think:` 开头时启用 | Python `server/platforms/anthropic.py` | `771c887f` |
+| **M-P1-10** | 输出预算下限：显式 `max_tokens` 低于档位下限时抬到下限，再以目录 `maxOutputTokens` 封顶 | Go `internal/upstream/output_budget.go` + `payload.go` | `2b9b7736` |
+| **M-P1-13** | 签到回执四态 `checked` / `already` / `pending` / `failed`；`failed` 压过 `already`，积分未知不显示数字 | Go `DailyCheckin` 回执 + `scheduler`；Python `dailyplan.py` | `8125831d` |
+| **B-2** | 会话轮级 body 字段 `conversationRequestId` / `startsNewUserRequest` / `agent`，只写当前轮 | Go `PrepareBody*` 之后 | `56057810` |
+| **B-4** | usage 缓存命中别名归一（五种写法取最大正值回写，保留已有嵌套形态） | Go `sse.go` / 非流式组装 | `782a6414` |
+| **B-16** | prep / do 分段耗时，并把「请求档位 / 实际生效档位」入日志（纯观测） | Go `internal/server/logging.go` | `75576b8b` |
+| **B-11** | 昵称手动同步（`GET /console/account`，只取 nickname / uid，手机号不解析不落日志） | Python | `04005ba2` |
+| **M-P2-13** | 模型目录热重载补两条护栏（读失败保留上一份好值、`mtime` 守卫） | Go `cmd/server` | — |
+| **D-9** | 默认任务列表 miss 时按 mp 口径再查一次；`wb_wechat_oa_subscribe_task` 做 claim-only | Python `upstream/scripts/task_runner.py` | `0a2a55fb` |
+
+> B-3（Kimi `$ref` 展开）原列在这一档，E-1 落地时已随 `schema_normalize.go` 的顶层
+> `$ref` 内联展开一起覆盖，从待办里移除，判定已回填到附录 B.1。
+
+### 二档：需要灰度（改选号 / 粘性 / 风控）
+
+| 项 | 一句话 | 灰度要点 |
+|---|---|---|
+| **M-P0-1** | 11140 命中即停手 + 同一 15 分钟窗口 ≥2 个不同号被限就全池暂停（默认 1800s，`0` 只留停手） | 阈值误判会误伤整池；必须带附录 D.6 的三条修正（`d3edea90` / `de24d38f` / `7dcae8ed`）一起落，否则退避只涨不清 |
+| **M-P1-5** | 只发 `user_id` 的客户端按「system + 首条 user」内容哈希派生粘性键 | 存量绑定会全量失效一次，前缀缓存短期 miss 上升；建议先只对「既无 `conversation_id` 也无 `prompt_cache_key`」的请求生效，并掺入 `d700ec56` 的 caller id 盐 |
+| **G-P1-5 → G-P1-7 → G-P1-6 → G-P1-8** | `reserve_credits` → `model_fallback`（6004 降级）→ `account_priority` / `account_share` → `balance_window` | 一步一发，每步都能在面板上验证；`model_fallback` 依赖额度预留，`balance_window` 最后做 |
+
+### 三档：中风险（账号健康与协议层）
+
+- **M-P1-7** 等上游首帧期间补 SSE 注释帧（`headkeepalive`）：注释帧与真实写共用
+  一把锁，另加「响应头已提交」的四条 `writeOpenAIError*` 分支——写坏锁会产出交错帧，
+  比干等更糟。
+- **M-P0-4** `$wbEncrypted` auth 解密 + 回写保持加密（Go 与 Python 两侧，保留桌面端
+  字段与 JSON 数字类型）。
+- **M-P1-1** 导入覆盖前先验活：有界并发 + 总时限，轮换后的新凭据必须落盘。
+- **B-5** 401 三态求证（`VerifyAlive` / `VerifyDead` / `VerifyInconclusive`），chat 401
+  与余额探测共用一条 `VerifySessionByRefresh`。
+- **B-7** global 余额三件套（summary / paid / free）：本地 global 余额可能恒 0；
+  字段可能是字符串小数，解析要宽容，明细失败只降级到期批次。
+- **M-P2-10** 免费号事前避让 `exclusive` 模型（与 D-8 同一层，选号门只改一遍）。
+- **M-P2-12** 日志落盘 / 劣化告警 / 选号策略，三件分开做。
+- **B-6** 活跃上报 body 形态（本地走 `billingBase` + 自造 ID，参考仓走 `chatBase` +
+  官方 UUID）：先同号 A/B 各发一条，回读 streak 与任务进度再切。
+
+### 四档：要排期（新功能 / 面板 UI / 用户可见口径）
+
+- **D-8 模型规则 deny / allow**（`8519ea26` + `74456c87`，含 D-10）：命名规则挂多号、
+  deny 优先、`model_not_allowed` 400；要动规则表、账号挂载、选号闸门与 Next.js 页面。
+- **D-11 积分语义**（`eca5f30b` + `f5d08c04`）：`credits` 改「当前可用量」+ `credits_raw`
+  冻结快照。会改变用户看到的总额，必须独立发版并带迁移说明。
+- **M-P1-3 + M-P2-17 续写 / 救援链**：本地没有 continue / toolonly / narration 三个
+  模块，成本最高，按是否真需要自动续写再定。
+- **B-1 DSML 工具调用还原**；**B-21 官方黄金头集**（先建 chat / report / refresh /
+  billing / v3 的分组回归夹具，再逐组对齐）；**B-14** picker 裁剪；**B-15** 思考档位
+  策略层（含 G-P1-17 的 `can_disable_thinking` + `off` 档）；**B-17** `/v2/chat/busy`
+  （本地池状态版，或只做面板观测，二选一）。
+- 纯追加、随时可做：**G-P1-1** `/v1/capacity`、**G-P1-9** models.dev 形状、
+  **G-P1-14** `dump_dir`、**G-P1-2** Go `/metrics`、**G-P1-10** `/admin/tasks/{name}/run`、
+  **G-P1-11** 模型锁视图 + 套餐分类、**G-P1-4** `budget`、**G-P2-1** admin 审计、
+  **G-P2-4** `cmd/login` 版本三件套。
+
+### 已判定不做
+
+| 项 | 理由 |
+|---|---|
+| B-22 头顺序 / 大小写 / TLS 指纹、uTLS | 没有封号对比数据，改造成本高；HTTP/2 头顺序还受库控制 |
+| A-9、A-14（Go 内嵌持久作业 + 分钟级 sweep） | 本地是 Python + Next.js，另开一套运行时只为一个任务中心 |
+| A-15～A-18（补跑标记 / 外观单点 / spread / humanize） | 只解决时间相关性，不是防封；参考仓也没给出对比数据 |
+| M-P2-11 / M-P2-16 / M-P2-18 / M-P2-19 | 活动已结束 / 与 M-B-11 合并再说 / 无 profiling 需求 / 参考仓自己已 revert |
+| G-P2-2 `livecfg`、G-P2-3 `httpauth`、G-P2-5 `probe`、G-P2-6 `updater`、G-P2-7 Go 观测 | 各自的收益在本地已被 `docker restart` 0.45s、现有常量时间比较、容器部署与 Python 观测覆盖 |
+| G-P1-13 Go `models.aliases`、G-P2-8 目录指纹 | 前者 Python `modelmap.py` 已覆盖；后者写进 Python watchdog，不在 Go 加 goroutine |
+| Go 侧 `/v1/responses`、`/v1/messages`、媒体、search / fetch / MCP、Embeddings | 外部协议入口在 Python 面板侧，Go 只做 chat 主链路 |
+| 10105 网页活跃自救、G-M2-6 表格居中、Windows README | 已单独判定过，与目标无关或需整体视觉评估 |
+
 ## 三步发版（与上游相关的最小检查）
 
 ```bash
