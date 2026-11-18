@@ -243,6 +243,41 @@ var badParamsRule = errorRule{kind: ErrBadParams, mode: matchExact, patterns: []
 	`"code":11101`,
 }}
 
+// badParamsMarkers11129 11129「invalid function call parameters」（displayMsg
+// 「工具定义不合规」）的文案形态，已小写化，与 strings.ToLower(body) 比对；中文
+// 原文无大小写，同样可比。业务码 11129 不在这里：走 hasBusinessCode（见
+// isToolSchemaRejected），容忍空白、字符串形态与嵌套。
+var badParamsMarkers11129 = []string{
+	"invalid function call parameters",
+	"invalid_function_parameters",
+	"invalid_function_call_parameters",
+	"工具定义不合规",
+}
+
+// isToolSchemaRejected 判定「工具定义被上游整体拒收」：11129（schema 形态不合规）
+// 与 11152（工具名不合规或重名，displayMsg「工具名称不规范」）都属同一类——错在
+// 客户端声明的 tools，换任何账号都是同一处拒绝。业务码精确命中（容忍空白/字符串
+// 形态/嵌套），或文案命中（首帧 error 帧里 message 可能是英文原文、下划线形态或
+// 中文 displayMsg）。lower 须为 strings.ToLower(body)。
+//
+// 不登记时落 Classify 通用 4xx 兜底 → ErrClient → 喂连败 + 轮转全池 + 末端 503
+// no_healthy_account，把一个确定性请求错误伪装成账号故障（2026-11-18 真机实测：
+// 11152 触发集是工具名含点/冒号/斜杠/空格/CJK 或两个同名工具）。
+func isToolSchemaRejected(body, lower string) bool {
+	return hasBusinessCode(body, "11129") || hasBusinessCode(body, "11152") ||
+		containsAnyMarker(lower, badParamsMarkers11129)
+}
+
+// containsAnyMarker 任一短语命中即真（文案判定统一走这里，避免各处各写一遍循环）。
+func containsAnyMarker(lower string, markers []string) bool {
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // invalidImageRule 图片请求格式/数据无效（HTTP 400）的**文案**形态。这类错误由
 // 请求内容决定，不是账号问题：换账号不会改变同一 body 的解析结果。上游常见形态包括
 // `Parse message failed: invalid image_url content`、invalid_image_data、
@@ -815,7 +850,9 @@ func Classify(status int, body string) ErrKind {
 		if contentBlockedRule.hit(body, lower) {
 			return ErrContentBlocked
 		}
-		if badParamsRule.hit(body, lower) {
+		// 11129 / 11152：错在客户端声明的 tools（schema 形态或工具名），换账号
+		// 必然复现，必须与 11101 同归 ErrBadParams——不能落 ErrClient 轮转全池。
+		if badParamsRule.hit(body, lower) || isToolSchemaRejected(body, lower) {
 			return ErrBadParams
 		}
 		return ErrClient

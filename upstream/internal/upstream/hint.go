@@ -11,6 +11,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -68,6 +69,14 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "account credits exhausted at upstream; CN accounts recover via the next daily check-in, global accounts need a top-up"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
+	case ErrBadParams:
+		// 11129/11152：整颗工具定义被拒（schema 形态或工具名），换号重试必然复现。
+		// 上游原文只说「工具定义不合规」，客户端看不出该改哪儿，这里点名是 tools。
+		// 11101 请求体畸形与工具无关，不给这个指向（否则客户端会去翻自己的 schema）。
+		if isToolSchemaRejected(msg, strings.ToLower(msg)) {
+			return "the request's tool definitions were rejected by upstream (schema shape or tool name); fix or drop the offending tool — retrying as-is fails the same way"
+		}
+		return ""
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
@@ -106,19 +115,48 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 	}
 }
 
+// frameRequestCodes 首帧 error 帧里按 error.code 直接定类的请求级错误。
+// 帧里的 code 在 error.code 上、不在 message 里：只拿 message 去 Classify 会把
+// 「只有码没有已知文案」的帧判成普通 4xx（11129/11152 的 message 不保证带文案，
+// 11151 在 Classify 里只认结构化 code）。11101 不在内：它与图片文案共用 code，
+// 须交给 Classify 的文案优先序。
+var frameRequestCodes = []struct {
+	code string
+	kind ErrKind
+}{
+	{"11115", ErrPromptTooLong},
+	{"11129", ErrBadParams},
+	{"11135", ErrImageInvalid},
+	{"11148", ErrToolCallMismatch},
+	{"11151", ErrEmptyMessage},
+	{"11152", ErrBadParams},
+}
+
 // FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
-// （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
-// Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
+// （IsModelRateLimit 对帧 JSON 直接命中）优先；请求级错误按 error.code 定类，
+// 判不出再取 error.message 走 Classify（请求级 400 口径）。判不出 → ErrNone。
 func FrameKind(payload string) ErrKind {
 	if IsModelRateLimit(payload) {
 		return ErrSoftRate
 	}
 	var f struct {
 		Error struct {
+			Code    any    `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal([]byte(payload), &f) != nil || f.Error.Message == "" {
+	if json.Unmarshal([]byte(payload), &f) != nil {
+		return ErrNone
+	}
+	if f.Error.Code != nil {
+		code := strings.TrimSpace(fmt.Sprint(f.Error.Code))
+		for _, c := range frameRequestCodes {
+			if code == c.code {
+				return c.kind
+			}
+		}
+	}
+	if f.Error.Message == "" {
 		return ErrNone
 	}
 	return Classify(http.StatusBadRequest, f.Error.Message)

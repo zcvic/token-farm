@@ -7,7 +7,6 @@ package upstream
 import (
 	"encoding/json"
 	"log"
-	"math"
 	"strings"
 )
 
@@ -61,10 +60,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		obj["stream_options"] = map[string]any{"include_usage": true}
 	}
 	normalizeToolChoice(obj)
+	// 工具参数 schema 的完整出站规整：pattern 转义、类型别名、nil 键、required、
+	// items、关键字取值类型、顶层 $ref、enum 补 type（见 schema_normalize.go）。
 	normalizeToolPatterns(obj)
-	// Kimi 系模型对「只有 enum、没有 type」的工具属性做严格校验（上游 11133）：
-	// 在出站前补 type，属于「让请求通过」的安全网，与 normalizeToolPatterns 同口径。
-	normalizeToolEnumTypes(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
 	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
@@ -370,177 +368,30 @@ func normalizeToolChoice(obj map[string]any) {
 	}
 }
 
-// normalizeToolPatterns 归一化工具声明里 pattern 的非标准转义 `\_`（→ `_`）。
+// normalizeToolPatterns 出站前规整 tools / functions 的参数 schema。
 //
-// 为什么需要：Codex 一类客户端会把正则里的下划线转义成 `\_`（如 `^agent\_run\_`），
-// 而上游那侧的 regexp 是 RE2 —— `\_` 属于**非法转义**，编译 pattern 时直接报错
-// （实案 code=11129）。症状是「聊天照常、工具调用一律失败」，且只在带这类 schema
-// 的工具上出现，自己很难归因（issue #112）。去掉转义后语义不变：`\_` 与 `_`
-// 在正则里都是下划线字面量。
-//
-// 只处理这一种转义：其余转义（`\d`、`\.`、`\`…）是合法且语义敏感的，动了会改
-// 用户 schema 的意思。声明形态两种都覆盖 —— 现行的 tools[].function.parameters
-// 与旧式 functions[].parameters（normalizeToolChoice 也是两种都认）。
+// 上游对 tools[].function.parameters 做严格 JSON Schema 校验：非标 pattern 转义
+// （`\_`）、nil 键、类型别名、重复 required、字符串形态的关键字取值、顶层 $ref 等
+// 都会整单 400 code=11129（displayMsg「工具定义不合规」）。schema 级拒绝换账号
+// 无用，只能在发送前修——见 schema_normalize.go。
 func normalizeToolPatterns(obj map[string]any) {
 	for _, key := range [...]string{"tools", "functions"} {
-		rawList, ok := obj[key].([]any)
-		if !ok {
-			continue
-		}
-		for _, raw := range rawList {
-			item, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			// 现行形态把 parameters 包在 function 里；旧式形态直接挂在条目上。
-			if fn, ok := item["function"].(map[string]any); ok {
-				unescapePatternLiteralEscapes(fn["parameters"])
-			}
-			unescapePatternLiteralEscapes(item["parameters"])
-		}
-	}
-}
-
-// unescapePatternLiteralEscapes 递归改写 schema 树里 pattern 值与 patternProperties
-// 键中的 `\_` → `_`（patternProperties 的键也是正则；map 键不可原地改，命中时重建该层）。
-func unescapePatternLiteralEscapes(node any) {
-	switch n := node.(type) {
-	case map[string]any:
-		if p, ok := n["pattern"].(string); ok && strings.Contains(p, `\_`) {
-			n["pattern"] = strings.ReplaceAll(p, `\_`, `_`)
-		}
-		if props, ok := n["patternProperties"].(map[string]any); ok {
-			rebuilt := false
-			fixed := make(map[string]any, len(props))
-			for k, v := range props {
-				if strings.Contains(k, `\_`) {
-					k = strings.ReplaceAll(k, `\_`, `_`)
-					rebuilt = true
-				}
-				fixed[k] = v
-			}
-			if rebuilt {
-				n["patternProperties"] = fixed
-			}
-		}
-		for _, v := range n {
-			unescapePatternLiteralEscapes(v)
-		}
-	case []any:
-		for _, v := range n {
-			unescapePatternLiteralEscapes(v)
-		}
-	}
-}
-
-// normalizeToolEnumTypes 给「只有 enum、没有 type」的工具属性补上推断出的 type。
-//
-// 背景（现场实测 2026-10-24）：Kimi 系模型（k3.1-pro / k3-1 / k2.5）对
-// tools[].function.parameters 做严格 schema 校验 —— 属性只写 {"enum":[...]} 而不写
-// "type" 时整单 400：
-//
-//	{"code":11133,"msg":"Invalid request parameters",
-//	 "extError":{"code":"400001","message":"the request parameters were rejected by the model provider"}}
-//
-// 同一份 schema 在 DeepSeek / GLM / MiniMax 上照常 200，所以这是「按模型严格程度
-// 而异」的请求侧问题：不补 type，Kimi 用户等于该模型全废（每条请求都撞同一个 400）。
-//
-// 推断规则（只增补、不改 enum 取值，语义不变）：
-//   - 全部字符串 → string
-//   - 全部整数 → integer；整数与小数混合 → number
-//   - 全部布尔 → boolean
-//   - 混合标量/含 null → 不改写（无法无损推断），交由上游原样报错
-//
-// 作用域仅 tools/functions 的 parameters（与 normalizeToolPatterns 同口径），
-// 不动 response_format 等其它位置的 schema。
-func normalizeToolEnumTypes(obj map[string]any) {
-	for _, key := range []string{"tools", "functions"} {
 		list, ok := obj[key].([]any)
 		if !ok {
 			continue
 		}
-		for _, item := range list {
-			m, ok := item.(map[string]any)
+		for _, raw := range list {
+			tool, ok := raw.(map[string]any)
 			if !ok {
 				continue
 			}
-			// 现行形态把 parameters 包在 function 里；旧式形态直接挂在条目上。
-			if fn, ok := m["function"].(map[string]any); ok {
-				inferEnumTypes(fn["parameters"])
+			// OpenAI 形态 tools[].function.parameters；裸 tools[].parameters 兼容。
+			if fn, ok := tool["function"].(map[string]any); ok {
+				fn["parameters"] = normalizeToolParameters(fn["parameters"])
 			}
-			inferEnumTypes(m["parameters"])
-		}
-	}
-}
-
-// inferEnumTypes 递归处理 schema 树：补 type 并按常见关键字下钻。
-func inferEnumTypes(node any) {
-	switch n := node.(type) {
-	case map[string]any:
-		if enum, ok := n["enum"].([]any); ok {
-			if _, hasType := n["type"]; !hasType {
-				if t := enumScalarType(enum); t != "" {
-					n["type"] = t
-				}
+			if _, ok := tool["parameters"]; ok {
+				tool["parameters"] = normalizeToolParameters(tool["parameters"])
 			}
 		}
-		for k, v := range n {
-			switch k {
-			case "properties", "patternProperties", "definitions", "$defs":
-				if props, ok := v.(map[string]any); ok {
-					for _, pv := range props {
-						inferEnumTypes(pv)
-					}
-				}
-			case "items", "additionalProperties", "not", "contains":
-				inferEnumTypes(v)
-			case "anyOf", "oneOf", "allOf", "prefixItems":
-				if list, ok := v.([]any); ok {
-					for _, x := range list {
-						inferEnumTypes(x)
-					}
-				}
-			}
-		}
-	case []any:
-		for _, v := range n {
-			inferEnumTypes(v)
-		}
 	}
-}
-
-// enumScalarType 由 enum 取值推断 JSON Schema type；无法无损推断时返回空串。
-func enumScalarType(vals []any) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	typ := ""
-	for _, v := range vals {
-		var cur string
-		switch x := v.(type) {
-		case string:
-			cur = "string"
-		case bool:
-			cur = "boolean"
-		case float64:
-			if math.Trunc(x) == x {
-				cur = "integer"
-			} else {
-				cur = "number"
-			}
-		default:
-			return ""
-		}
-		switch {
-		case typ == "":
-			typ = cur
-		case typ == cur:
-			// 同型，继续
-		case (typ == "integer" && cur == "number") || (typ == "number" && cur == "integer"):
-			typ = "number"
-		default:
-			return ""
-		}
-	}
-	return typ
 }

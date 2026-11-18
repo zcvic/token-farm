@@ -399,3 +399,27 @@ a7e98912ad6db2da9f155c8641509cdf2ea3aadb
 a895c3632be8cbdfd8e268eb1992e382df6535d1
 61cfd1a0fc5269567ec8af841c9a9b41fea21930
 d780cabdc0672d21dc3b035c2bf4fa6b6c415e39
+# ---- 2026-11 第八批：misakano 34120825 附录 E 落地 ----
+#      E-1 工具 schema 出站纠偏 + 11129 / 11152 登记（按本仓结构重写）：
+#        · 新增 upstream/internal/upstream/schema_normalize.go：
+#          normalizeToolParameters / normalizeSchemaTree / coerceSchemaKeywords /
+#          schemaNumber / schemaBool / inferEnumType / inlineKimiSchema。
+#          payload.go 的 normalizeToolPatterns 收口成唯一入口（tools[] 与
+#          functions[] 同口径），旧的 unescapePatternLiteralEscapes /
+#          normalizeToolEnumTypes / inferEnumTypes 并入。规整范围：关键字取值类型
+#          （minimum:"1"、uniqueItems:"true"、description:123、enum:"x"、
+#          additionalProperties:"false"）、nil 元数据键剔除（const/default 保留）、
+#          类型别名、required 去重清污、array items 解包、pattern `\_`、
+#          顶层 $ref 展开（仅顶层：嵌套 $ref 实测 200）。
+#        · client.go：isToolSchemaRejected（hasBusinessCode 认 11129/11152 +
+#          文案 markers）与 containsAnyMarker，接进 Classify 的 400 分支 →
+#          ErrBadParams，不再落 ErrClient 轮转全池。
+#        · hint.go：ErrBadParams 增加「问题在 tools」的 hint；FrameKind 增加
+#          frameRequestCodes，按 error.code 定类（11115/11129/11135/11148/
+#          11151/11152），只有码没有文案的帧不再判 ErrNone。
+#        · 新增 schema_normalize_test.go / tool_schema_guard_test.go。
+#      未取：a650bd04 / 392c4025 等 merge 面（子提交已判定，单独看无增量）。
+615dc753894fc10c859d43a10910c5820f0a2fea
+d6301fe9fdf8886e167e4f5e84ebebeea12dc63d
+733942a75011cb2dd66caa97281b1ad67fa95c90
+ae44d739f6f9fc9a0b37aea5667c69a0c6dd3814
