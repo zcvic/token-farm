@@ -521,3 +521,41 @@ c9b059c457bdccd691b3d1046912941614150411
 8125831de3f1d1a42c39c20bef0619a4d0ae0e2b
 782a641473573cc07d6784b19f738f45eb4b3ef0
 75576b8b57aaba5d782eb6db52a7aa70cd20bae4
+
+# ---- 2026-11 第十一批：一档剩余 5 项（M-P1-9 / B-2 / B-11 / M-P2-13 / D-9）----
+#      M-P1-9 思考标签拆分（771c887f）：上游漏进正文的 <think:...> 拆回 thinking 块。
+#      本地 /v1/messages 只有 Python 实现，落点在 server/routers/anthropic.py 的
+#      _ThinkTagSplitter：只在 content 以 <think: 开头时启用；未启用 thinking 时
+#      这些块按 CoT 丢弃；流式 _StreamTranslator 与非流式都接入，收尾前 flush 残留。
+#      B-2 body 侧会话轮级字段（56057810）：新增
+#      upstream/internal/upstream/conv_fields.go，injectConversationFields 只给最后
+#      一条 user 消息写 conversationRequestId + startsNewUserRequest + agent:"cli"；
+#      客户端已带则不覆盖，历史轮不改写；注入点在 InjectPromptCacheKey 之后
+#      （prepareBody 增 convReqID 参数）。本地头侧 X-Conversation-* 已有，本次只补
+#      body。
+#      B-11 昵称手动同步 + M-P2-16（04005ba2 / d78131ba）：tencent.fetch_account_profile
+#      走 GET {web_base}/console/account（Bearer + x-client-platform: web），只解析
+#      nickname/uid，uid 不一致报错；信封与顶层平铺两种响应都接；空昵称判失败。
+#      profilesync.sync_nicknames 只在手动刷新（force=true）收尾触发，并发
+#      WB_PROFILE_CONCURRENCY 默认 3，单号失败静默；wb2api.set_account_nickname
+#      只改 account.nickname（file_lock + 原子替换），未变化不写盘。
+#      realm.web_base 独立于 chat/billing：CN www.workbuddy.cn，GL www.workbuddy.ai。
+#      未取：参考仓 panel 侧同步昵称的日志分类（本地静默，不给资料接口加日志）。
+#      M-P2-13 热重载两条护栏（9e5c2cda / c54c5176 / 4f6adc0e）：auth.LoadDirReport
+#      区分「本轮有解析失败」，pool.SyncToDirAddOnly 只增不删；watch.reloadAuthDir
+#      里在途请求中的 uid 不删。未取：护栏 2/3（删除确认计数、内容指纹）与跨进程
+#      reloadMu——本地面板与上游是两个进程，拿不到 Go 侧的锁，等价语义落在
+#      「只增不删」与「在途不删」两条上。
+#      D-9 默认 + mp 任务列表合并（0a2a55fb）：默认列表 miss 时回落 _mp_task_status，
+#      命中后仍用默认头走 process_task（与上游 taskByCode 口径一致）；新增
+#      wb_wechat_oa_subscribe_task（MAPPING kind claimonly、minichat_in_map、默认
+#      codes 排除表），process_minichat_task 对 claimonly 只 accept → 回读 → claim，
+#      不构造事件。
+771c887fb326b579026966d5540d5cf413b1c577
+56057810efecfe85c352dcb0f140be05eecc2dc1
+04005ba24338b71f3309cab4b0c19879f62ef00d
+d78131bab8eda765640533098f79a58d4151452d
+9e5c2cda170a3de744d13543801ad85eec670d4a
+c54c51767d19c31dc149f3ff9cc21be2c7503dce
+4f6adc0e2649dea05b309d3c6ba6c41c05a28ee7
+0a2a55fb2603c2b2a79323ac25341a4ebab723f7

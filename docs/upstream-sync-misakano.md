@@ -1617,6 +1617,11 @@ tie-break）；`LoadDir` 本身不去重，去重在 `pool.SyncToDir`（后载�
 **建议**：与 M-B-11（账号昵称同步）合并做，不要单独做。做的时候带上这两条：
 空昵称判失败、兼容顶层平铺。
 
+**落地（`8b1f7cc5`）**：随 B-11 一起落。`tencent.fetch_account_profile` 现在对
+`{code:0,data:{…}}` 与顶层平铺 `{uid,nickname}` 两种形态统一归一（信封里没有
+`data` 对象时回落原始响应体）；昵称 trim 后为空按失败抛异常，调用方计入失败并
+静默跳过，不再出现「同步成功但什么都没改」。
+
 **成本/风险**：低。但依赖 M-B-11 先落地。
 
 ### P2-17　思考完直接收尾时救援一次 / 说一句就停的救援链
@@ -1710,11 +1715,11 @@ transport（`upstream/transport.go`），Python 侧有
 | 10 | **M-P1-13** | 签到回执四态（要改 `DailyCheckin` 签名） | 中低 | ✅ 已同步（`c0d616aa`） |
 | 11 | **M-P1-12** | 11134 归供应商过载，依赖 `failKeepBinding` | 低 | ✅ 已同步 |
 | 12 | **M-P1-10** | 输出预算下限 | 低 | ✅ 已同步（`b8431873`） |
-| 13 | **M-P1-9** | `<think:...>` 拆回 thinking（落点在 Python） | 低 | 待做 |
+| 13 | **M-P1-9** | `<think:...>` 拆回 thinking（落点在 Python） | 低 | ✅ 已同步（`c718da1b`） |
 | 14 | **M-P1-7** | 首帧前 SSE 注释帧（并发正确性） | 中低 | 待做 |
 | 15 | **M-P0-4** | `$wbEncrypted` 解密 + 回写保持加密（Go + Python） | 中 | 待做 |
 | 16 | **M-P1-5** | 只发 `user_id` 也派生粘性键（改流量分布，需灰度） | 低 | 待做（单独灰度） |
-| 17 | **M-P2-13** | 目录热重载补两条护栏 | 低 | 待做 |
+| 17 | **M-P2-13** | 目录热重载补两条护栏 | 低 | ✅ 已同步（`6b7be32b`，只取护栏 1/4） |
 | 18 | **M-P2-12** | 日志落盘 / 劣化告警 / 选号策略（三件分开做） | 中 | 待做 |
 | 19 | **M-P2-10** | 免费号事前避让 `exclusive` 模型（依赖两处解析） | 中 | 待做 |
 | 20 | **M-P2-17** | 续写 / 救援链（与 M-P1-3 同一套机制） | 高 | 待做 |
@@ -2014,13 +2019,13 @@ MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
 
 ### B.0 结论摘要
 
-**低风险、建议先做**：
+**低风险、建议先做**（均已于 2026-11-18 落地）：
 
-- B-2 会话轮级 body 字段（`conversationRequestId` / `startsNewUserRequest` / `agent`）；
-- B-3 Kimi 工具 `$ref` 展开；
-- B-4 usage 缓存命中别名归一；
-- B-11 账号昵称手动同步（只读、隐私边界清楚）；
-- B-16 prep/do 分段耗时（纯观测）。
+- B-2 会话轮级 body 字段（`conversationRequestId` / `startsNewUserRequest` / `agent`）→ `4b3f7bc0`；
+- B-3 Kimi 工具 `$ref` 展开 → 已由 E-1 覆盖（`90b93807`）；
+- B-4 usage 缓存命中别名归一 → `e612cd5b`；
+- B-11 账号昵称手动同步（只读、隐私边界清楚）→ `8b1f7cc5`；
+- B-16 prep/do 分段耗时（纯观测）→ `3353cd8f`。
 
 **收益明确、成本中等**：
 
@@ -2041,7 +2046,7 @@ MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
 | 项 | 本地现状 | 参考实现 | 判定 | 建议动作 | 成本/风险 |
 |---|---|---|---|---|---|
 | B-1 DSML 工具调用还原 | 无。`tool_pairing.go` 只修已结构化的 `tool_calls` / `tool` 消息；`sanitize.go` 只剥指纹 | `upstream/dsml.go`（`e0ee6b9a`）：识别正文里的全角竖线 DSML 标记，流式与非流式都还原成标准 `tool_calls`；严格判定（工具名在名单）与弱判定（名单为空但块完整闭合、工具名形态合法）两级；本回合已有结构化 `tool_calls` 时不覆盖 | **缺失** | 在 `sse.go` 与非流式响应组装处加一层 `repairDSML`；只处理完整闭合块，块内不夹带正文；工具参数被截断不修；必须有开关与日志 | 中高；误判正文会破坏正常输出，严格判定优先 |
-| B-2 会话轮级 body 字段 | 只在头里写 `X-Conversation-ID` / `X-Conversation-Request-ID`；消息体没有 `conversationRequestId`、`startsNewUserRequest`、`agent` | `upstream/conv_fields.go`（`56057810`，issue #51）：只给当前轮最后一个 user 消息写 `conversationRequestId` + `startsNewUserRequest`，并补 `agent:"cli"`；历史消息不伪造 | **缺失** | 在 `PrepareBody*` 之后注入；客户端已带则不覆盖；只写当前轮，不补历史 | 低 |
+| B-2 会话轮级 body 字段 | 只在头里写 `X-Conversation-ID` / `X-Conversation-Request-ID`；消息体没有 `conversationRequestId`、`startsNewUserRequest`、`agent` | `upstream/conv_fields.go`（`56057810`，issue #51）：只给当前轮最后一个 user 消息写 `conversationRequestId` + `startsNewUserRequest`，并补 `agent:"cli"`；历史消息不伪造 | **已覆盖（`4b3f7bc0`）**：新增 `upstream/internal/upstream/conv_fields.go`，`prepareBody` 在 `InjectPromptCacheKey` 之后调用 `injectConversationFields`；客户端已带字段的不覆盖 | — | 低 |
 | B-3 Kimi 工具 `$ref` 展开 | ~~不展开 `$ref` / `$defs`~~ **已覆盖（E-1）**：`schema_normalize.go` 对**顶层** `$ref`（`#/$defs/…`）做内联展开（`inlineKimiSchema`，带深度/环保护），展不开就删键退化成无参工具；嵌套 `$ref` 实测上游 200，不动 | `upstream/kimi_tools.go`（`854e74cd`）：仅 CN 且模型名 `kimi*` 时，把 tools schema 里的 `$ref` 内联展开；不裁剪任何工具；解析失败原样返回 | **已覆盖** | 无需动作。E-1 的落地把范围放宽到全 realm 的顶层 `$ref`（上游对顶层 `$ref` 是整单 400 11129，与模型无关），比只对 CN Kimi 更严；`kimi*` 专属裁剪没有落点 | — |
 | B-4 usage 缓存命中别名 | ~~`sse.go:287` 只补 `total_tokens`，不统一缓存命中字段~~ **已覆盖（`e612cd5b`）**：新增 `usage_alias.go`，按 `prompt_tokens_details.cached_tokens` → `prompt_cache_hit_tokens` → `cache_read_input_tokens` → `cached_tokens` → `input_tokens_details.cached_tokens` 取第一个正值回写全部别名；真 miss 不新增字段，`input_tokens_details` 只在原本就有时回填；聚合与逐帧两条路径都接 | `upstream/usage.go`（`782a6414`）：取五种写法中的最大正值，统一写回别名；流式与非流式都调用 | **已覆盖** | — | 低 |
 | B-5 401 三态求证 | `handler.go:884` refresh 失败且 `ErrSessionDead` 才 `NoteSessionDead`；其余 401 没有统一求证；余额刷新失败只记日志（`scheduler.go:587`） | `upstream/verify.go`（`21a6e456`、`f6bd0539`）+ `scheduler/balance_401.go`：`VerifyAlive` / `VerifyDead` / `VerifyInconclusive`，refresh 做权威求证；alive 不罚、dead 计 session dead、inconclusive 不罚 | **部分覆盖** | 把 401 求证收敛到一个 `VerifySessionByRefresh`；chat 401 与余额探测共用；refresh 成功必须保存轮换后的新 token；inconclusive 不写池状态 | 中；轮换 token 必须落盘，否则会把号弄坏 |
@@ -2055,7 +2060,7 @@ MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
 | B-8 签到活动状态 | 无 | `upstream/checkin_activity.go`（`17d12a5f`）：`POST /billing/meter/checkin-activity-status`；CN `/v2`，global 无前缀优先、404 回落；只读 | **缺失** → ✅ **已同步**（见 A.1.1） | 见 A-6/A-7；CN 查询失败 fail-open，global fail-closed | 低 |
 | B-9 礼包状态 | 无 | `upstream/benefit.go`（`5367e78d`、`16f39d26`）：`POST /billing/meter/check-gift-claimed`（**不带 `/v2`**）；`Pending() = active && !claimed && credit_num>0` | **缺失** → ✅ **已同步**（见 A.1.1） | 见 A-1；不要复用 CN `billingMeterPaths`（它只给 `/v2`） | 低 |
 | B-10 国际版注册 / 地区 / trial | Python `tencent.py:1545` `registration_status`、`:1578` `submit_region`、`:1664` `claim_trial`，并已调 `get-country-code` | `upstream/global_register.go`：注册状态 + `get-user-area-info` 当前地区 + `console/login/account` 提交地区 + `ide/trial` 领 trial；响应可能是双层 JSON 字符串 | **基本覆盖（Python）** | 不搬 Go；如需面板回显「当前地区」，补 `get-user-area-info` 只读调用；地区选择仍由用户决定 | 低；隐私/地区合规 |
-| B-11 账号昵称同步 | 无 `/console/account` 调用；昵称来自导入文件 | `upstream/profile.go`（`04005ba2`，issue #94）：`GET {webBase}/console/account`，Bearer + `x-client-platform: web`；只解析 `nickname` 与 `uid`，手机号等字段不解析、不落日志、不透传；仅手动刷新触发 | **缺失（低优先）** | 只做手动刷新；只取 nickname/uid；后台余额刷新不调用 | 低；隐私边界必须写死 |
+| B-11 账号昵称同步 | ~~无 `/console/account` 调用；昵称来自导入文件~~ **已覆盖（`8b1f7cc5`）**：`tencent.fetch_account_profile` 走 `GET {web_base}/console/account`（Bearer + `x-client-platform: web`），只解析 `nickname` / `uid`，uid 不一致报错；`profilesync.sync_nicknames` 只在手动刷新收尾触发（`WB_PROFILE_CONCURRENCY` 默认 3），单号失败静默；`wb2api.set_account_nickname` 只改 `account.nickname`，未变化不写盘 | `upstream/profile.go`（`04005ba2`，issue #94）：`GET {webBase}/console/account`，Bearer + `x-client-platform: web`；只解析 `nickname` 与 `uid`，手机号等字段不解析、不落日志、不透传；仅手动刷新触发 | **已覆盖** | — | 低 |
 | B-12 桌面端 / 外观 | Python 有桌面事件链与 skin 事件，但没有真实 `appearance/set`；Go 无 | `upstream/desktop.go`（`5677928d`、`ee1c80d8`）：`desktopReport` + `SetAppearanceTheme`（`POST /v2/user-asset/appearance/set`，`kind:"theme"` + `resource_key`） | **部分覆盖 / 分叉** | 先补 A-12 的真实 apply；事件链与指纹按任务完成率再决定是否全量对齐 | 低到中 |
 | B-13 小程序埋点 / 任务 | Python `school_open_day_2026.py` + `task_runner.py` 已覆盖小程序 `X-Client-Platform: miniprogram`、`chat_request_send` + `activityId`、小程序任务 | `upstream/mp_events.go`、`upstream/tasks.go` | **已覆盖（架构不同）** | 不搬；只补 Python 调度与锁 | 低 |
 
@@ -2106,12 +2111,12 @@ MIT 许可的 `88lin/workbuddy-auto-signin` 与 `niyouqianma/workbuddy2api-hub`
 | **值得** | **M-P1-15** | promo 三字段不做，第三方客户端把限时免费显示成收费。解析 + 输出各一处 |
 | **值得** | **M-P2-14** | 一个排序比较函数，修「陈旧备份胜出」导致的 token 失效 |
 | **值得** | **M-P1-10** | 高档位思考吃光自己额度，用户看到的是「用着用着中断」。注意只抬上限、不抬目标长度 |
-| **值得（Python）** | **M-P1-9** | 落点在 Python 的 anthropic 适配层，Go 侧无 `/v1/messages`。改动小但只影响 Anthropic 客户端 |
+| **值得（Python）** | **M-P1-9** | 落点在 Python 的 anthropic 适配层，Go 侧无 `/v1/messages`。改动小但只影响 Anthropic 客户端（✅ `c718da1b`） |
 | **值得但需灰度** | **M-P1-5** | 唯一会**立刻改变账号分配**的一项。修好了前缀缓存命中，改错会短期 miss 上升。必须单独灰度 |
 | **值得但需灰度** | **M-P2-12** 第 3 项 | 选号策略同理，缺省保持 `weighted`，只是把选择权交给配置 |
 | **中，按需** | **M-P1-7** | 首帧注释帧解决「干等 3~6 秒」，但**并发正确性**要求高——写坏锁会产出交错帧，比干等更糟 |
 | **中，按需** | **M-P0-4** | `$wbEncrypted` 是「新版客户端文件读不了」，不修就导不进来。但密码学口径要逐字节对齐，且**回写方向比读方向危险** |
-| **中，按需** | **M-P2-13** | 只取护栏 1、4（防半写文件被当成删除）。本地轮询已能用，不做也不会立刻出问题 |
+| **中，按需** | **M-P2-13** | 只取护栏 1、4（防半写文件被当成删除）。本地轮询已能用，不做也不会立刻出问题（✅ `6b7be32b`） |
 | **中，按需** | **M-P2-10** | 要等两处解析层先做（`modelTiers` + `IsPaidUser`）。收益是少撞 11158 |
 | **缓** | **M-P2-16** | 与 B-11 合并做，单独做没有意义 |
 | **缓** | **M-P2-17** | 最复杂的一块（帧级拼接 + 工具调用去重 + 预算继承），且与 M-P1-3 是同一套机制。没有真实环境验证不要上线 |
@@ -2248,7 +2253,7 @@ B-1～B-24 同样是按旧基线整理的。`7a48d72e` 之后又筛出 18 项协
 | `1037397c` | 工具轮里「说一句就停」时试续一次 | **M-P2-17** |
 | `44bc0595` | 工具调用缺函数名被丢弃时留 WARN | 跳过：同 `d7ffe424` |
 | `c5ce29b1` | 账号导入支持多文件，选中先预览 | 跳过：面板 UI |
-| `d78131ba` | 资料接口空昵称不再静默成功，并兼容顶层平铺响应 | **M-P2-16**（与 M-B-11 合并做） |
+| `d78131ba` | 资料接口空昵称不再静默成功，并兼容顶层平铺响应 | **M-P2-16**（与 M-B-11 合并做，✅ `8b1f7cc5`） |
 | `c2003af1` | 正文停在预告句上就收尾时续写一次 | **M-P2-17** |
 | `24d0b61b` | `cache_audit.py` —— 按输入档位审计前缀缓存 | 跳过：参考仓的运维脚本 |
 | `07f8ae03` | 思考完直接收尾时也救援一次 | **M-P2-17** |
@@ -2652,6 +2657,12 @@ miniprogram` 口径下发，于是本地把它判成「该账号没有此任务�
 `process_task`；同一提交还登记了 `wb_wechat_oa_subscribe_task`（关注公众号 24h，
 进度由服务端计时发放、没有客户端动作），本地要加成一个 claim-only 的 mp kind
 （跳过「点亮」直接等 `completed` 再领），否则它会被当成「无可用对象 id」而反复 pending。
+
+**落地（`f55a8be8`）**：默认列表 miss 时回落 `_mp_task_status`（只有**列表**需要 mp 头，
+命中后仍用默认头走 `process_task`，与上游 `taskByCode` 口径一致）；
+`wb_wechat_oa_subscribe_task` 加进 MAPPING（kind `claimonly`）与 `minichat_in_map`，
+并从默认 codes 里排除；`process_minichat_task` 对 claimonly 只 accept → 回读 → claim，
+不构造事件。测试 `server/tests/test_task_runner_mp_fallback.py` 11 条。
 
 **D-10　模型规则 review 补充**（`74456c87`）随 D-8，不单列。
 
