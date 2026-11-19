@@ -23,7 +23,7 @@ from ...services.session_affinity import SessionAffinity, affinity_key
 from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
 from ..limiter import AccountLimiter
-from . import catalog, chat as chatmod, client, desktop, rates, store
+from . import catalog, chat as chatmod, client, desktop, enterprise, rates, store
 from .constants import DEFAULT_REALM, REALMS, normalize_realm
 
 logger = logging.getLogger(__name__)
@@ -398,6 +398,9 @@ class TraeAdapter(PlatformAdapter):
     def import_account(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise PlatformError('账号必须是 JSON 对象', status=400, code='invalid_account')
+        # 企业版 / SaaS 租户用个人版协议刷新只会得到含混的上游错误：在落盘和
+        # 发请求之前就明确拒绝（来源 trae2api-hub c724a65）。
+        enterprise.ensure_personal_account(payload)
         raw = payload.get('account') if isinstance(payload.get('account'), dict) else payload
         uid = _pick(raw, 'uid', 'user_id', 'userId')
         if not uid:

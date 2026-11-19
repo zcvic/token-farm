@@ -29,6 +29,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ..base import PlatformError
+from . import enterprise
 from . import icube
 
 logger = logging.getLogger('workbuddy.platforms.trae.desktop')
@@ -163,6 +165,8 @@ def _read_storage(path: Path) -> dict:
 
 def _account_from_body(body: dict, hint: str) -> dict:
     """把解密后的客户端结构映射成我们账号文件的结构（**不落 key material**）。"""
+    # 本机 storage.json 里也可能带 SaaS 租户字段；企业账号不进入个人版池。
+    enterprise.ensure_personal_account(body)
     inner = body.get('account') if isinstance(body.get('account'), dict) else {}
     uid = str(body.get('userId') or body.get('uid')
               or inner.get('userId') or inner.get('uid') or '').strip()
@@ -217,7 +221,13 @@ def read_accounts() -> list[dict]:
             except ValueError as exc:
                 logger.warning('解密 Trae 登录态失败（%s）：%s', path, exc)
                 continue
-            account = _account_from_body(body, entry['realm'])
+            try:
+                account = _account_from_body(body, entry['realm'])
+            except PlatformError as exc:
+                # 企业版 / SaaS 账号：跳过这一份登录态，不影响同一台机器上的
+                # 个人版账号（来源 trae2api-hub c724a65）。
+                logger.warning('跳过 Trae 企业账号（%s）：%s', path, exc.message)
+                continue
             if not account['uid'] or not account['token']:
                 continue
             dedupe = (account['realm'], account['uid'])

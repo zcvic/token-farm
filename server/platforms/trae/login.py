@@ -39,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from ..base import PlatformError
-from . import client, desktop, deviceproof, fingerprint, store
+from . import client, desktop, deviceproof, enterprise, fingerprint, store
 from .constants import (
     CLIENT_ID,
     IDE_VERSION,
@@ -395,6 +395,9 @@ def _finish(login_id: str, realm: str, refresh: str, auth_code: str,
         else:
             fresh = await client.exchange_token(account)
         info = await client.fetch_user_info(fresh, fresh['token'])
+        # 授权页/用户信息若明确回报企业租户，直接失败；不要拿它的 token
+        # 走个人版刷新链（来源 trae2api-hub c724a65）。
+        enterprise.ensure_personal_account(info)
         result = info.get('Result') if isinstance(info, dict) else None
         if not isinstance(result, dict):
             result = {}

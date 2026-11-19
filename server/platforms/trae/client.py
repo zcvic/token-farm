@@ -27,7 +27,7 @@ import httpx
 from ... import config
 from ..base import PlatformError
 from . import chat as chatmod
-from . import desktop, deviceproof, fingerprint
+from . import desktop, deviceproof, enterprise, fingerprint
 from .constants import (
     APP_ID,
     CLIENT_ID,
@@ -344,6 +344,9 @@ def _device_proof(account: dict, refresh: str) -> dict[str, Any] | None:
 
 def _token_result(parsed: Any, realm: str, fallback_refresh: str = '') -> dict:
     """把 ExchangeToken 的响应归一化成待落盘的凭据。"""
+    # 刷新响应若带企业租户元数据，必须在写回账号文件之前停手：把企业凭据
+    # 塞进个人版刷新链会持续得到 401/20405（来源 trae2api-hub c724a65）。
+    enterprise.ensure_personal_account(parsed)
     result = parsed.get('Result') if isinstance(parsed, dict) else None
     if not isinstance(result, dict):
         result = parsed if isinstance(parsed, dict) else {}
