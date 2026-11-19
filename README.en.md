@@ -1,4 +1,4 @@
-> **token-farm** — this repository is a multi-platform fork of [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager): every WorkBuddy capability is kept, plus the **Trae** platform (account import / check-in / models / `traecn/` and `traecom/` regional routing, with legacy `trae/` compatibility), the **Qoder** platform (CN / international, protocol layer embedded, `qodercn/` and `qodercom/` regional routing, with legacy `qoder/` compatibility) and a platforms page. Project layout, reference sync and one-command deployment live in **[TOKEN-FARM.md](TOKEN-FARM.md)**; what follows is the upstream documentation (brand, download source and installer names are this repository's), and the upstream Go source is maintained in this repository under `upstream/`.
+> **token-farm** — this repository is a multi-platform fork of [workbuddy-manager](https://github.com/ithtelab/workbuddy-manager): every WorkBuddy capability is kept, plus the **Trae** platform (account import / check-in / models / `traecn/` and `traecom/` regional routing, with legacy `trae/` compatibility), the **Qoder** platform (CN / international, protocol layer embedded, `qodercn/` and `qodercom/` regional routing, with legacy `qoder/` compatibility), the **Loomy** platform (iFlytek Spark, single region, `loomy/` routing) and a platforms page. Project layout, reference sync and one-command deployment live in **[TOKEN-FARM.md](TOKEN-FARM.md)**; what follows is the upstream documentation (brand, download source and installer names are this repository's), and the upstream Go source is maintained in this repository under `upstream/`.
 
 <div align="center">
 
@@ -243,6 +243,7 @@ Threat model and hardening notes: [security notes](docs/security-notes.md) and t
 - [Page watchdog](docs/watchdog.md) — upstream page change detection, LLM triage, email / QQ / webhook alerts
 - [Prometheus metrics](docs/metrics.md) — scrape config, metric semantics and auth
 - [Qoder](docs/qoder.md) — CN / international editions, model prefixes and the built-in gateway
+- [Loomy](docs/loomy.md) — iFlytek Spark accounts, points / check-in and the `loomy/` prefix
 - [QQ notifications & open API](docs/qq-bot.md) — AstrBot integration, UMO, bot control boundaries
 
 ---

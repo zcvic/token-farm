@@ -6,7 +6,9 @@
 第一个原生接入的平台是 **Trae**（国内版 / 国际版）。WorkBuddy 的既有链路
 **完全不改**：仍然由随包的 `workbuddy2api`（Go）持有账号池，面板只做管理面与
 前置反代。第三个平台是 **Qoder**（国内版 / 国际版），协议层以源码副本内置在
-进程里（`platforms/qoder/_vendor/`），同样不需要额外部署。
+进程里（`platforms/qoder/_vendor/`），同样不需要额外部署。第四个平台是
+**Loomy**（讯飞星火），原生实现、单区域（`loomy/` 前缀），账号服务与模型网关
+都由进程内代码直接访问。
 
 ---
 
@@ -50,10 +52,14 @@ client ──/v1/chat/completions──> token-farm
                                     │                           ├── 账号池（本地文件）
                                     │                           ├── token 轮换刷新
                                     │                           └── llm_raw_chat（SSE）
-                                    └── model = "qodercn/xxx" / "qodercom/xxx" ─> QoderAdapter
-                                                                        └── 内置网关（回环随机端口）
-                                                                              ├── 双区账号池
-                                                                              └── COSY 签名 / 设备授权 / 签到
+                                    ├── model = "qodercn/xxx" / "qodercom/xxx" ─> QoderAdapter
+                                    │                                           └── 内置网关（回环随机端口）
+                                    │                                                 ├── 双区账号池
+                                    │                                                 └── COSY 签名 / 设备授权 / 签到
+                                    └── model = "loomy/xxx" ─> LoomyAdapter
+                                                                ├── 账号池（本地文件）
+                                                                ├── 手机号密码登录 / 会话重登
+                                                                └── OpenAI 兼容网关（SSE 原样透传）
 ```
 
 平台路由**只由模型名决定**，不由密钥决定。原因：一把密钥可能既想调
@@ -96,6 +102,17 @@ server/platforms/
     embedded.py          # 在回环随机端口拉起内置网关（懒加载）
     _vendor/             # qoder2api-hub 的源码副本（相对导入，见其 README）
     tools/vendor_qoder.py # 重新 vendor / 校验导入改写
+  loomy/
+    __init__.py
+    constants.py         # 网关 / 账号服务地址、签名 AK、模型别名与兜底目录
+    crypto.py            # 登录用 RSA/PKCS#1 v1.5 加密（纯标准库）
+    signer.py            # 账号服务 HMAC-SHA1 签名
+    store.py             # 账号文件（原子写 + 文件锁 + 脱敏）
+    client.py            # 上游协议层（登录 / 模型 / 积分 / 签到 / 对话）
+    wechat.py            # 微信开放平台「网站应用」扫码（取码 / 长轮询 / 换 session）
+    login.py             # 扫码登录会话状态机（服务端取码 + 粘回调兜底）
+    desktop.py           # 从本机客户端读已登录会话（只读，不写回）
+    adapter.py           # 实现 PlatformAdapter：账号/签到/积分/模型/对话
 server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
 ```
 
@@ -238,6 +255,11 @@ registry.register(FooAdapter())
   默认「网关默认」= 与改动前完全一致。网关每次请求现读，保存即生效，不用重启
   内置网关；本地 Web 工具是唯一由模型驱动出网的能力，默认关闭。详见
   [`docs/qoder.md`](qoder.md) 的「协议兼容开关」。
+- **Loomy 的设置集**：与 Trae 同构的选号 / 缓存 / 冷却参数（`max_accounts_try`、
+  `session_affinity`、`catalog_*`、`credits_*`、`cooldown_*`）。它支持「从本机
+  导入」，但客户端文件是**只读**的（没有会话回写），也没有协议兼容开关，因此
+  不含 `desktop_sync` / `solo_max_tokens` / `credit_meter`。
+  详见 [`docs/loomy.md`](loomy.md)。
 
 三种状态都只写平台自己的账号文件（`data/platforms/<平台>/accounts/*.json`），
 不会改动 WorkBuddy 的 `auths/`，也不会删除凭据。
@@ -311,6 +333,26 @@ registry.register(FooAdapter())
   一套稳定身份（不再要求先安装客户端），并把私钥 / 公钥 / 设备号 / 机器号
   随账号落盘，后续刷新由面板自己签 `DeviceProof`。私钥只存在 `data/` 与
   账号文件里，不进日志、不回传前端。
+
+### 网页登录（Loomy，微信扫码）
+
+Loomy 的网页授权只有一条链路：微信开放平台「网站应用」扫码
+（`open.weixin.qq.com/connect/qrconnect`）。回调域被微信白名单锁死在
+`loomy.xunfei.cn`，**不能**改成本机回环，所以这里扩展了契约：
+
+- `login_start` 额外返回 `qr`（二维码图片地址，可空）。前端看到 `qr` 就在
+  弹窗里内嵌二维码，**不**自动打开浏览器；
+- 取码是异步的：`login_start` 立刻返回 `pending` + `message="正在获取二维码…"`，
+  后台线程拉授权页、从 HTML 里抠 `uuid`，之后 `login_poll` 带出 `qr`；
+- 后台线程继续长轮询 `l/qrconnect`，`wx_errcode=405` 时拿 `wx_code` →
+  `bind/auth` → `bind/skip` 换 session → `adapter.import_account` 落盘
+  （`source=web`，没有密码）；
+- `bind=0`（微信未绑手机号）需要再走短信绑定，弹窗放不下这段二次验证，直接
+  报错让用户改用密码导入；
+- 服务端连不上微信时退化为「打开授权页 + 粘回调」：
+  `login_submit_callback` 解析 `https://loomy.xunfei.cn/oauth/wechat/callback?code=…`，
+  并用 `state == login_id` 校验是不是本次会话的链接；
+- 登录会话只在内存里、4 分钟有效；`login_id` 直接复用微信的 `state`。
 
 ### 前端：国内版 / 国际版切换（Trae）
 
@@ -828,6 +870,8 @@ Trae 事件 → OpenAI chunk：
   多账号选择。
 - `server/tests/test_platform_trae_desktop.py`：blob 编解码（含 FIPS-197 官方向量）、
   导入（含 CLI 临时 token 兜底）、回写、备份。
+- `server/tests/test_platform_loomy_adapter.py`：Loomy 的签名 / RSA 原语、账号文件、
+  模型别名与输出上限、`/no_think` 翻译、本机会话导入、微信扫码登录状态机。
 - `server/tests/test_platform_sse.py`：SSE 拼帧、错误帧、断开时不补错误帧。
 - `server/tests/test_platform_realm.py`：前端版本映射（`global` ↔ `intl`）、
   版本开关的显示条件、账号 / 模型过滤、导入时补 `realm`。

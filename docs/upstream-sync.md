@@ -96,7 +96,7 @@ git commit -m "upstream: 说清这次改了什么"
 > 那份。第一批六项的落地情况与三处有意偏离，见 baseline-gaps 开头的
 > 「同步状态」表。
 
-除 misakano 面板仓外，2026-11 还有两个参考源。
+除 misakano 面板仓外，2026-11 还有三个参考源。
 
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
 已核对的范围是 `80b4b21`（v2.11.10）→ `d780cab`：
@@ -128,7 +128,24 @@ git fetch qoder-ref --no-tags
 `--check` 校验一致性；重新 vendor 后必须重新应用那份补丁
 （`server/tests/test_qoder_vendor.py` 守着）。
 
-三个来源的仓库布局与运行时都不同，**不要互相 cherry-pick**，按能力在本项目
+**`xingluoyuankong/loomy2api`**（Loomy 协议参考源）既不是 fork，也**不 vendor**：
+登录签名、RSA 加密、微信扫码、积分 / 签到、模型别名的协议事实读自它，
+但代码按 token-farm 的适配器契约在 `server/platforms/loomy/` 里重写，
+参考仓的网关、账号池与面板都不进来。
+
+```bash
+git remote add loomy-ref https://github.com/xingluoyuankong/loomy2api.git
+git fetch loomy-ref --no-tags
+git log --oneline --no-merges cb27afd..loomy-ref/HEAD   # 对照用，不 merge
+git diff --stat cb27afd...loomy-ref/HEAD                # 只看协议文件有没有动
+```
+
+已核对到 `cb27afd`（2026-11-14，范围 `eed1efa` → `cb27afd`，40 个提交）。
+基线、逐项取用 / 未取原因与实测记录在 `deploy/loomy-ref.txt`；升级时改
+`server/platforms/loomy/` 的对应文件，跑
+`server/tests/test_platform_loomy_adapter.py`，再把锚点提交号写回该文件。
+
+这些来源的仓库布局与运行时都不同，**不要互相 cherry-pick**，按能力在本项目
 对应文件重写。
 
 ### 已评估：misakano `10d01b48..c4b53cd`

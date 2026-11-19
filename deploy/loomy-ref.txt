@@ -1,0 +1,97 @@
+# 已人工核对过的 loomy2api 提交 —— 本仓库 Loomy 适配层的协议事实来源
+#
+# 仓库：https://github.com/xingluoyuankong/loomy2api （MIT）
+# 形态：不是 fork，也没有共享历史；**不是源码副本**，仓库里没有 vendor 目录。
+#       登录签名 / RSA / 微信扫码 / 积分签到 / 模型别名都在
+#       server/platforms/loomy/ 里按参考实现重写（纯标准库，不新增依赖）；
+#       参考仓自己的 HTTP 服务、账号池与面板一律不引入。
+#
+# 记录方式：一次同步写一段；未同步的提交号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/qoder-ref.txt、deploy/workbuddy-panel-ref.txt
+# 同一约定）。
+#
+# 升级流程：clone 参考仓（或 git remote add loomy-ref 后 fetch）→ 对照下表
+# 列出的协议文件看 diff → 在本仓库对应文件里重写 → 跑
+# server/tests/test_platform_loomy_adapter.py → 更新本文件的锚点提交号。
+#
+# ---- 2026-11 第一批：eed1efa (2026-10-02) → cb27afd (2026-11-14)，40 个提交
+#      基线是首次接入时参考仓的 HEAD。整段读过一遍：40 个提交里只有 11 个
+#      碰到协议文件（constants / crypto / signer / account / upstream / wechat /
+#      login_flow），其余是它自己的面板前端、Docker、文档与运维脚本。
+#      已取（按能力，不是逐个 cherry-pick）：
+#        · eed1efa 常量与端点：模型网关 loomyad.xunfei.cn/api/v1、账号服务
+#          account.xfinfr.com、appid GM3LOOMY、客户端自带 AK/SK、loomy-version、
+#          DEVICE_ID=web / WEB_MODEL_ID=Web / CLIENT_VERSION / CLIENT_UA
+#          （server/platforms/loomy/constants.py）。
+#        · eed1efa RSA / AES 原语：getPuKey 的 DER 公钥 → RSA 加密密码；
+#          LOOMYENC1 AES-256-GCM 解 resources/.env.prod（只在提取 AppID 时用，
+#          运行时不带 passphrase）→ crypto.py。
+#        · eed1efa 账号服务签名：x- 前缀头参与 canonicalized、content-md5、
+#          秒级时间戳、unsigned 分支不带签名 → signer.py。
+#        · eed1efa 登录：byPwd 密码登录（14 天 session，没有 refresh token）、
+#          登录响应的 session / userid / phone / nickname 归一化 → client.py。
+#        · eed1efa 模型网关请求头：Authorization Bearer 与 token 都发；
+#          **每次现生成 traceparent**（缺失时上游挂到超时）；loomy-version
+#          只做存在性校验 → client.model_headers。
+#        · eed1efa 模型目录与倍率、2026-11-14 快照（11f6a9c：10 个模型、
+#          官方客户端 0.9.39）；别名表（8f9cc60 + cb27afd 的结论）：
+#          对外 deepseek-v4.1-flash ↔ 上游 DeepSeek-V4.1-Flash，
+#          对外 deepseek-v4.1-flash-1017 ↔ 上游 deepseek-v4-flash-1017；
+#          请求时必须翻回上游 id，否则上游静默回落到默认模型 → constants.py。
+#        · db24d60 / f5305d4 积分流水：/points/records 只认 camelCase 的
+#          pageNo / pageSize（page_size 被静默忽略并钳到 20 条）→ client.py。
+#        · 5dfeba2 / 2d257f9 会话寿命：本地不再按 14 天假过期判死，凭证死活
+#          以上游 401/403 为唯一权威；14 天只用于展示与维护播报 → adapter.py。
+#        · 3619af1 业务码级失效：HTTP 200 + code=100002（desc 含「登录已失效」）
+#          视为 login_expired，但**不清 session**，交给下一次真实请求 / 手工刷新
+#          → client.login_expired + adapter.py。
+#        · 1153505 / 0c29db6 流式与超时语义：SSE 里扫 usage、断流时按协议收尾、
+#          首块超时换号。本地按 token-farm 的通道实现（raw_stream 原样透传 +
+#          本地扫 usage），不移植它的 failover 状态机（选号 / 重试在 adapter）。
+#        · wechat.py 微信开放平台「网站应用」扫码：build_auth_url /
+#          fetch_login_qr（从授权页 HTML 抠 uuid）/ poll_login（长轮询
+#          l/qrconnect，errno 408/404/405/403/402）/ qr_image_url /
+#          parse_callback；bind/auth → bind/skip 换 session，bind=0 表示该微信
+#          还没绑手机号（需要并发短信绑定，本地直接报 wechat_unbound）
+#          → server/platforms/loomy/wechat.py + client.login_by_wechat_sync。
+#        · server.py 的「关闭思考」翻译：上游不认 reasoning_effort /
+#          enable_thinking，只认正文里的 /no_think 前缀；客户端显式要求关闭
+#          思考时改写首条 user 消息（多模态加在第一个文本片段）→
+#          adapter._no_think_messages。
+#        · pool.py 的本机会话扫描（思路，不含账号池）：读
+#          <公共数据根>/<sha256(user)[:12]>/userData/auth-session.json 的
+#          session / userid / phone / updatedAt，只读、不写回 → 重写为
+#          server/platforms/loomy/desktop.py（支持多份安装、坏文件跳过、
+#          LOOMY_CLIENT_ROOT 覆盖）。
+#      本地新增（参考仓没有）：
+#        · 服务端取码 + 长轮询的登录会话状态机（login.py），二维码内嵌面板，
+#          login_id 复用微信 state；参考仓的 login_flow.py 只做「开浏览器 +
+#          粘回调」，本地保留为取码失败时的兜底；
+#        · 账号池 / 选号 / 冷却 / 会话亲和 / 代理线路 / 记账全部接 token-farm
+#          自己的运行时，只保留平台差异；
+#        · 平台元数据（realm=cn 单区域、签到开关、目录缓存设置）。
+#      未取：
+#        · server.py（它自己的 FastAPI 网关与 OpenAI/Anthropic 路由）、
+#          pool.py（账号池 / 轮换 / 粘性会话 / 风控；只借了本机会话扫描的
+#          思路，账号池本身不引入）、routing.py、
+#          anthropic.py：token-farm 的网关、调度、记账、协议翻译都在 server/
+#          里统一做，平台层只实现 OpenAI chat；
+#        · panel.py 与 web/（内嵌面板、登录页、备用域名与 Basic Auth 那批
+#          修复：25a17a0 / 5c1c741 / 79147dc 等）：本项目有自己的前端；
+#        · browser.py（本机 Chromium + CDP 截二维码）：要求面板与浏览器同机，
+#          与「远程部署也能登录」冲突，本地改用服务端取码；
+#        · httpc.py（手写 HTTP/1.1 连接池 + 代理隧道）：本地统一用 httpx，
+#          出口由 config.resolve_account_proxy / config.http_client 决定；
+#        · usage.py 的用量台账与积分倍率记账：token-farm 有自己的
+#          request_logs / usage_daily；
+#        · Dockerfile / docker-compose / 启动停止脚本 / 自更新 / CI：
+#          发布链由本仓库管理；
+#        · 上游的 Anthropic（/v1/messages）兼容层与 image / embeddings 通道：
+#          平台层只接 /chat/completions，其它协议由网关侧翻译或直接不暴露。
+#      实测（2026-11-19，经本机代理 127.0.0.1:7897）：
+#        · /models、/points/records、/chat/completions 在会话失效时统一回
+#          HTTP 200 + {"code":"100002","desc":"登录已失效…"}（流式请求也是
+#          JSON 而不是 SSE），与 3619af1 的记录一致；
+#        · 微信 qrconnect 取码 / 长轮询与参考仓 wechat.py 一致（uuid 能从
+#          授权页 HTML 的 fordevtool 变量里取到，408 = 等待扫码）。
+cb27afdc975f2ab202a596da257b7f9c3bae75d2
