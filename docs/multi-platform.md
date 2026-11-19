@@ -8,7 +8,9 @@
 前置反代。第三个平台是 **Qoder**（国内版 / 国际版），协议层以源码副本内置在
 进程里（`platforms/qoder/_vendor/`），同样不需要额外部署。第四个平台是
 **Loomy**（讯飞星火），原生实现、单区域（`loomy/` 前缀），账号服务与模型网关
-都由进程内代码直接访问。
+都由进程内代码直接访问。随后又按同一契约原生实现了 **DuMate**（百度搭子，
+单区域 `dumate/` 前缀，网页 Cookie 凭证）与 **MiniMax Code**（双区域，
+`minimaxcn/` / `minimaxcom/` 前缀，OAuth 设备码 + 一次性 refresh token）。
 
 ---
 
@@ -56,10 +58,17 @@ client ──/v1/chat/completions──> token-farm
                                     │                                           └── 内置网关（回环随机端口）
                                     │                                                 ├── 双区账号池
                                     │                                                 └── COSY 签名 / 设备授权 / 签到
-                                    └── model = "loomy/xxx" ─> LoomyAdapter
-                                                                ├── 账号池（本地文件）
-                                                                ├── 手机号密码登录 / 会话重登
-                                                                └── OpenAI 兼容网关（SSE 原样透传）
+                                    ├── model = "loomy/xxx" ─> LoomyAdapter
+                                    │                           ├── 账号池（本地文件）
+                                    │                           ├── 手机号密码登录 / 会话重登
+                                    │                           └── OpenAI 兼容网关（SSE 原样透传）
+                                    ├── model = "dumate/xxx" ─> DuMateAdapter
+                                    │                           ├── 账号池（网页 Cookie）
+                                    │                           └── 百度搭子网关（OpenAI 兼容 SSE）
+                                    └── model = "minimaxcn/xxx" / "minimaxcom/xxx" ─> MinimaxAdapter
+                                                                ├── 双区账号池（OAuth refresh token）
+                                                                ├── Anthropic Messages 端点（内部翻译）
+                                                                └── 签到 / 积分 / M Plan 窗口
 ```
 
 平台路由**只由模型名决定**，不由密钥决定。原因：一把密钥可能既想调
@@ -113,6 +122,23 @@ server/platforms/
     login.py             # 扫码登录会话状态机（服务端取码 + 粘回调兜底）
     desktop.py           # 从本机客户端读已登录会话（只读，不写回）
     adapter.py           # 实现 PlatformAdapter：账号/签到/积分/模型/对话
+  dumate/
+    __init__.py
+    catalog.json         # 内置模型目录快照（在线 / 桌面端拿不到时兜底）
+    constants.py         # 站点 / 网关 / 业务路径 / 输出上限
+    store.py             # 账号文件（原子写 + 文件锁 + 脱敏）
+    client.py            # 网页接口换 token / 对话 / 签到 / 积分
+    catalog.py           # 目录三层降级：桌面端配置 → 进程缓存 → 快照
+    adapter.py           # 实现 PlatformAdapter：账号/签到/积分/模型/对话
+  minimax/
+    __init__.py
+    constants.py         # 双区站点 / OAuth / 签名常量 / 模型快照与上限
+    store.py             # 账号文件（原子写 + 文件锁 + 脱敏）
+    catalog.py           # 在线模型配置解析（`providers[minimax]`）
+    translate.py         # OpenAI Chat ↔ Anthropic Messages 请求 / 响应 / SSE
+    client.py            # OAuth 设备码 / 签名账号接口 / 对话端点
+    login.py             # 设备码登录后台线程（PKCE + 轮询）
+    adapter.py           # 实现 PlatformAdapter：双区选号 / 轮换 / 签到 / 积分 / 对话
 server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
 ```
 
@@ -260,6 +286,10 @@ registry.register(FooAdapter())
   导入」，但客户端文件是**只读**的（没有会话回写），也没有协议兼容开关，因此
   不含 `desktop_sync` / `solo_max_tokens` / `credit_meter`。
   详见 [`docs/loomy.md`](loomy.md)。
+- **DuMate / MiniMax Code 的设置集**：直接复用 Loomy 那一组选号 / 缓存 / 冷却
+  参数（见 `server/platforms/settings.py` 的 `_DUMATE`、`_MINIMAX`）。MiniMax
+  Code 额外支持网页设备码登录；DuMate 的凭证是网页 Cookie，导入后**不联网**
+  校验，首次刷新或对话时才向上游换 token。
 
 三种状态都只写平台自己的账号文件（`data/platforms/<平台>/accounts/*.json`），
 不会改动 WorkBuddy 的 `auths/`，也不会删除凭据。
@@ -360,6 +390,21 @@ Loomy 的网页授权主链路是微信开放平台「网站应用」扫码
 - 登录会话只在内存里：二维码 4 分钟、验证码阶段 15 分钟有效；`login_id`
   直接复用微信的 `state`。
 
+### 网页登录（MiniMax Code，OAuth 设备码）
+
+MiniMax Code 用标准 OAuth 设备码 + PKCE，没有二维码，也没有回调地址：
+
+- `login_start(realm)` 先同步向 `account.minimax.cn` / `account.minimax.io`
+  申请设备码，**拿到授权页地址再返回**，前端可以立刻 `window.open(url)`；
+- 后台线程按 `interval` 轮询 `/oauth2/token`
+  （`grant_type=urn:ietf:params:oauth:grant-type:device_code`），
+  `authorization_pending` 继续等、`slow_down` 拉长间隔、`denied` / `expired`
+  结束会话；
+- 成功后用 access token 读一次账号信息，设备码登录结果按 `realUserID` 派生
+  `uid` 落盘（同一用户重新登录是覆盖，不会多出一条账号）；
+- refresh token 是一次性的：`adapter` 每次刷新都先落盘新的 refresh token，
+  再拿去发请求；旧 token 再用会被上游判成 `invalid_grant`。
+
 ### 前端：国内版 / 国际版切换（Trae）
 
 Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBuddy 已有的版本开关：
@@ -387,6 +432,12 @@ Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBudd
 - `traecn/<model>` / `traecom/<model>` → Trae（国内版 / 国际版）。前缀在转发前
   剥掉，上游只看到裸模型名。
 - `trae/<model>` 是旧式兼容前缀：不带区域提示，选号行为与改造前一致。
+- `qodercn/<model>` / `qodercom/<model>`、`loomy/<model>` 分别走 Qoder 与
+  Loomy；前缀同样在转发前剥掉。
+- `dumate/<model>` 走 DuMate（百度搭子）；它是单区域平台，账号与模型统一
+  `realm='cn'`。
+- `minimaxcn/<model>` / `minimaxcom/<model>` 走 MiniMax Code（国内站 /
+  国际站）；旧式 `minimax/<model>` 不带区域提示，按目录 / 账号推断。
 - 其他模型名 → 原样走 WorkBuddy（与今天完全一致）。
 - `/v1/models` 会把 Trae 的模型**按区域**并入列表（`traecn/` / `traecom/`），
   `owned_by` 标成 `trae`、`realm` 标出所属区域，客户端据此区分来源。
@@ -878,6 +929,11 @@ Trae 事件 → OpenAI chunk：
   导入（含 CLI 临时 token 兜底）、回写、备份。
 - `server/tests/test_platform_loomy_adapter.py`：Loomy 的签名 / RSA 原语、账号文件、
   模型别名与输出上限、`/no_think` 翻译、本机会话导入、微信扫码登录状态机。
+- `server/tests/test_platform_dumate_adapter.py`：DuMate 的 Cookie 归一与脱敏、
+  目录降级、选号、token 缓存与 401 重试、`max_tokens` 钳制、SSE 扫描、签到与积分。
+- `server/tests/test_platform_minimax_adapter.py`：MiniMax Code 的账号脱敏、目录解析、
+  双区选号、refresh token 轮换落盘、401 重试、签到 / 积分、OpenAI ↔ Anthropic
+  请求 / 响应 / 流式翻译。
 - `server/tests/test_platform_sse.py`：SSE 拼帧、错误帧、断开时不补错误帧。
 - `server/tests/test_platform_realm.py`：前端版本映射（`global` ↔ `intl`）、
   版本开关的显示条件、账号 / 模型过滤、导入时补 `realm`。
