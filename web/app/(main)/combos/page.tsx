@@ -28,9 +28,11 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
 
+import {ComboAffinityDialog} from '@/components/common/combos/ComboAffinityDialog';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {PageSectionTabs} from '@/components/common/layout/PageSectionTabs';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -106,6 +108,7 @@ export default function CombosPage() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [affinityOpen, setAffinityOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -279,6 +282,20 @@ export default function CombosPage() {
         description={t('combos.description')}
         actions={
           <div className="flex items-center gap-1.5">
+            {isAdmin && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-full"
+                title={t('combos.affinitySettings')}
+                onClick={() => setAffinityOpen(true)}
+              >
+                <SlidersHorizontal />
+                <span className="hidden sm:inline">
+                  {t('combos.affinitySettings')}
+                </span>
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -382,6 +399,8 @@ export default function CombosPage() {
           )}
         </>
       )}
+
+      <ComboAffinityDialog open={affinityOpen} onOpenChange={setAffinityOpen} />
 
       <p className="text-[11px] leading-4 text-muted-foreground">
         {t('combos.footnote')}
