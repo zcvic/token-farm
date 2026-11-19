@@ -2487,6 +2487,15 @@ export interface PlatformLoginStart {
   platform: string;
   login_id: string;
   url: string;
+  /**
+   * 扫码登录的二维码图片地址（Loomy 微信扫码）。
+   *
+   * 有值时面板内嵌显示二维码，**不**自动打开 `url`；为空时退回
+   * 「打开授权页 + 粘贴回调」的旧流程（Trae / Qoder）。
+   */
+  qr?: string;
+  /** 后端给的初始状态文案（Loomy：「正在获取二维码…」）；其它平台为空。 */
+  message?: string;
   /** 会话有效期（秒） */
   expires_in: number;
 }
@@ -2508,6 +2517,10 @@ export interface PlatformLoginPoll {
   account: PlatformAccount | null;
   /** 失败原因（`status === 'error'` 时有值） */
   message: string;
+  /** 扫码登录的二维码图片（Loomy 微信扫码；未取到时为空） */
+  qr?: string;
+  /** 授权页地址（扫码不可用时的粘贴兜底） */
+  url?: string;
 }
 
 /** 导入的逐条结果：单个失败不中断整批。 */

@@ -422,6 +422,8 @@ export function PlatformAccountsPanel({
   const [login, setLogin] = useState<{
     id: string;
     url: string;
+    /** 扫码登录的二维码（Loomy 微信扫码）；有值时面板内扫码，不自动开浏览器。 */
+    qr?: string;
     status: PlatformLoginStatus;
     message: string;
   } | null>(null);
@@ -448,7 +450,7 @@ export function PlatformAccountsPanel({
         const out = await platformApi.loginPoll(name, id);
         if (token !== loginToken.current) return;
         setLogin((prev) => prev && prev.id === id
-          ? {...prev, status: out.status, message: out.message}
+          ? {...prev, status: out.status, message: out.message, qr: out.qr || prev.qr}
           : prev);
         if (out.status === 'success') {
           notify.ok(t('platforms.loginSuccess'),
@@ -478,8 +480,18 @@ export function PlatformAccountsPanel({
     if (login) void platformApi.loginCancel(platform, login.id).catch(() => {});
     try {
       const out = await platformApi.loginStart(platform, realmAware ? realmScope : 'cn');
-      setLogin({id: out.login_id, url: out.url, status: 'pending', message: ''});
-      window.open(out.url, '_blank', 'noopener,noreferrer');
+      setLogin({
+        id: out.login_id,
+        url: out.url,
+        qr: out.qr,
+        status: 'pending',
+        message: out.message || '',
+      });
+      // 扫码平台（Loomy）在面板内扫码；其它平台开浏览器授权页。二维码是后台
+      // 线程去取的，`start` 返回时还给不出来，所以这里不能按 `qr` 判断。
+      if (platform !== 'loomy') {
+        window.open(out.url, '_blank', 'noopener,noreferrer');
+      }
       void pollLogin(platform, out.login_id);
     } catch (e) {
       notify.err(errText(e));
@@ -500,7 +512,7 @@ export function PlatformAccountsPanel({
     try {
       const out = await platformApi.loginCallback(platform, login.id, value);
       setLogin((prev) => prev && prev.id === login.id
-        ? {...prev, status: out.status, message: out.message}
+        ? {...prev, status: out.status, message: out.message, qr: out.qr || prev.qr}
         : prev);
       setCallbackUrl('');
       if (out.status === 'success') {
@@ -738,6 +750,10 @@ export function PlatformAccountsPanel({
   const supportsWeight = info?.supports_weight !== false;
   const supportsCooling = info?.supports_cooling !== false;
   const supportsLoginCallback = info?.supports_login_callback !== false;
+  // 回调固定指向 `127.0.0.1:<端口>`（Trae 的授权页强校验），只有这类平台
+  // 才需要提示「面板与浏览器必须同机」。Loomy 的回调落在 loomy.xunfei.cn，
+  // 走的也是「粘链接」，不受这条约束。
+  const loginNeedsLoopback = supportsLoginCallback && platform !== 'loomy';
   const busyAny = busy !== '';
   // 积分来源按平台区分：Trae 走权益接口，Qoder 走内置网关的余额快照。
   // 以前这里只有一句写死「Trae 权益接口」的文案，Qoder 页会显示错误的说明。
@@ -745,13 +761,16 @@ export function PlatformAccountsPanel({
     ? t('platforms.creditsHintQoder')
     : platform === 'trae'
       ? t('platforms.creditsHintTrae')
-      : t('platforms.creditsHint');
+      : platform === 'loomy'
+        ? t('platforms.creditsHintLoomy')
+        : t('platforms.creditsHint');
 
   const loginStatusText = (() => {
     if (!login) return '';
     switch (login.status) {
       case 'pending':
-        return t('platforms.loginWaiting');
+        // 后端会给出更具体的状态（「等待微信扫码」/「已扫码，请在手机上确认」）。
+        return login.message || t('platforms.loginWaiting');
       case 'exchanging':
         return t('platforms.loginExchanging');
       case 'success':
@@ -762,6 +781,9 @@ export function PlatformAccountsPanel({
         return login.message || t('platforms.loginFailed');
     }
   })();
+  /** 扫码二维码只在等扫码 / 换令牌时展示；成功或过期后收起，避免误导。 */
+  const loginQrVisible = !!login?.qr
+    && (login.status === 'pending' || login.status === 'exchanging');
 
   return (
     <>
@@ -1652,17 +1674,30 @@ export function PlatformAccountsPanel({
           <DialogHeader>
             <DialogTitle>{t('platforms.loginTitle', {label})}</DialogTitle>
             <DialogDescription>
-              {supportsLoginCallback
-                ? t('platforms.loginDesc')
-                : t('platforms.loginDeviceDesc')}
+              {loginQrVisible
+                ? t('platforms.loginQrDesc')
+                : platform === 'loomy'
+                  ? t('platforms.loginDescLoomy')
+                  : loginNeedsLoopback
+                    ? t('platforms.loginDesc')
+                    : t('platforms.loginDeviceDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
             <div className="space-y-3 px-6 pb-2">
-              {supportsLoginCallback && (
+              {loginNeedsLoopback && (
                 <div className="flex items-start gap-2 rounded-[12px] bg-muted/60 p-3 text-[11px] leading-5 text-muted-foreground">
                   <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
                   <span>{t('platforms.loginSameMachine')}</span>
+                </div>
+              )}
+              {loginQrVisible && (
+                <div className="flex justify-center">
+                  <img
+                    src={login.qr}
+                    alt={t('platforms.loginQrAlt')}
+                    className="h-44 w-44 rounded-xl border border-border/60 bg-white p-1"
+                  />
                 </div>
               )}
               <div className="flex items-start gap-2 text-xs">
@@ -1699,7 +1734,9 @@ export function PlatformAccountsPanel({
                     <Input
                       value={callbackUrl}
                       onChange={(e) => setCallbackUrl(e.target.value)}
-                      placeholder={t('platforms.loginCallbackPlaceholder')}
+                      placeholder={platform === 'loomy'
+                        ? t('platforms.loginCallbackPlaceholderLoomy')
+                        : t('platforms.loginCallbackPlaceholder')}
                       className="h-8 rounded-xl text-xs"
                       disabled={callbackBusy}
                       autoComplete="off"
@@ -1716,7 +1753,9 @@ export function PlatformAccountsPanel({
                     </Button>
                   </form>
                   <p className="text-[11px] leading-5 text-muted-foreground">
-                    {t('platforms.loginCallbackHint')}
+                    {platform === 'loomy'
+                      ? t('platforms.loginCallbackHintLoomy')
+                      : t('platforms.loginCallbackHint')}
                   </p>
                 </div>
               )}
@@ -1745,14 +1784,20 @@ export function PlatformAccountsPanel({
         <DialogContent className="max-w-[560px]" showCloseButton>
           <DialogHeader>
             <DialogTitle>{t('platforms.importTitle')}</DialogTitle>
-            <DialogDescription>{t('platforms.importDesc')}</DialogDescription>
+            <DialogDescription>
+              {platform === 'loomy'
+                ? t('platforms.importDescLoomy')
+                : t('platforms.importDesc')}
+            </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
             <div className="px-6 pb-2">
               <Textarea
                 value={importText}
                 onChange={(e) => setImportText(e.target.value)}
-                placeholder={t('platforms.importPlaceholder')}
+                placeholder={platform === 'loomy'
+                  ? t('platforms.importPlaceholderLoomy')
+                  : t('platforms.importPlaceholder')}
                 className="min-h-40 font-mono text-[11px]"
                 spellCheck={false}
                 autoFocus
