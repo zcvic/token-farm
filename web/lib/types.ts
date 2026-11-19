@@ -2112,6 +2112,11 @@ export interface PlatformInfo {
    * 设备授权轮询不需要（为 false）。
    */
   supports_login_callback?: boolean;
+  /**
+   * 能否用手机号 + 短信验证码登录（Loomy：验证码登录，以及微信未绑手机号
+   * 时的补绑）。为 true 时前端在登录弹窗里显示「验证码登录」入口。
+   */
+  supports_login_code?: boolean;
   account_count: number;
   /** 单个平台坏掉时的原因（该平台其余字段仍然有效） */
   error?: string;
@@ -2504,14 +2509,21 @@ export interface PlatformLoginStart {
   qr?: string;
   /** 后端给的初始状态文案（Loomy：「正在获取二维码…」）；其它平台为空。 */
   message?: string;
+  /** 登录方式：`qr` 扫码 / `sms` 短信验证码（Loomy，其它平台恒为 qr）。 */
+  mode?: 'qr' | 'sms';
   /** 会话有效期（秒） */
   expires_in: number;
 }
 
-/** 网页登录状态机：`pending` → `exchanging` → `success` / `error`；超时 → `expired`。 */
+/**
+ * 网页登录状态机：`pending` → `exchanging` → `success` / `error`；超时 →
+ * `expired`。`needs_bind` 是 Loomy 专有分支：微信授权成功但该微信没绑手机号，
+ * 需要就地补填手机号 + 短信验证码（此时 `mode` 仍是 `qr`）。
+ */
 export type PlatformLoginStatus =
   | 'pending'
   | 'exchanging'
+  | 'needs_bind'
   | 'success'
   | 'error'
   | 'expired';
@@ -2529,6 +2541,16 @@ export interface PlatformLoginPoll {
   qr?: string;
   /** 授权页地址（扫码不可用时的粘贴兜底） */
   url?: string;
+  /** 登录方式：`qr` 扫码 / `sms` 短信验证码 */
+  mode?: 'qr' | 'sms';
+  /** 微信已授权但未绑手机号：前端显示手机号 + 验证码输入 */
+  needs_bind?: boolean;
+  /** 当前会话已经下发过验证码（验证码输入可用） */
+  code_sent?: boolean;
+  /** 距下次可以重新获取验证码还有多少秒（0 = 现在就能发） */
+  retry_after?: number;
+  /** 已填手机号（脱敏，`138****8000`） */
+  phone?: string;
 }
 
 /** 导入的逐条结果：单个失败不中断整批。 */

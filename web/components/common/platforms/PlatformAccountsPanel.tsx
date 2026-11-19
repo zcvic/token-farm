@@ -93,6 +93,7 @@ import type {
   PlatformCredits,
   PlatformImportResult,
   PlatformInfo,
+  PlatformLoginPoll,
   PlatformLoginStatus,
   PlatformSettings,
   PlatformUsage,
@@ -426,8 +427,21 @@ export function PlatformAccountsPanel({
     qr?: string;
     status: PlatformLoginStatus;
     message: string;
+    /** 登录方式：二维码 / 短信验证码（Loomy）。微信补绑时保持 qr。 */
+    mode?: 'qr' | 'sms';
+    /** 已经下发过验证码（输入框可用） */
+    codeSent?: boolean;
+    /** 已填手机号（后端脱敏后回传） */
+    phone?: string;
   } | null>(null);
   const [loginStarting, setLoginStarting] = useState(false);
+  /** Loomy 登录方式：扫码 / 短信验证码。 */
+  const [loginMode, setLoginMode] = useState<'qr' | 'sms'>('qr');
+  /** 验证码链路：手机号、验证码与发码冷却（秒）。 */
+  const [smsPhone, setSmsPhone] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [codeBusy, setCodeBusy] = useState(false);
+  const [codeCooldown, setCodeCooldown] = useState(0);
   /** 远程登录兜底：浏览器打不开 127.0.0.1 回调页时，粘贴地址栏里的完整链接。 */
   const [callbackUrl, setCallbackUrl] = useState('');
   const [callbackBusy, setCallbackBusy] = useState(false);
@@ -441,6 +455,24 @@ export function PlatformAccountsPanel({
     return ok;
   }, [accountsState, loadCredits]);
 
+  /** 把一次登录接口的返回合并进弹窗状态（轮询 / 发码 / 提交码共用）。 */
+  const applyLoginView = useCallback((id: string, out: PlatformLoginPoll) => {
+    setLogin((prev) => (prev && prev.id === id
+      ? {
+        ...prev,
+        status: out.status,
+        message: out.message,
+        qr: out.qr || prev.qr,
+        mode: out.mode || prev.mode,
+        codeSent: out.code_sent ?? prev.codeSent,
+        phone: out.phone || prev.phone,
+      }
+      : prev));
+    if (typeof out.retry_after === 'number' && out.retry_after > 0) {
+      setCodeCooldown(out.retry_after);
+    }
+  }, []);
+
   /** 网页登录轮询：2 秒一次，直到状态不再是 pending / exchanging。 */
   const pollLogin = useCallback(async (name: string, id: string) => {
     const token = ++loginToken.current;
@@ -449,15 +481,16 @@ export function PlatformAccountsPanel({
       try {
         const out = await platformApi.loginPoll(name, id);
         if (token !== loginToken.current) return;
-        setLogin((prev) => prev && prev.id === id
-          ? {...prev, status: out.status, message: out.message, qr: out.qr || prev.qr}
-          : prev);
+        applyLoginView(id, out);
         if (out.status === 'success') {
           notify.ok(t('platforms.loginSuccess'),
             out.account?.nickname || out.account?.uid || undefined);
           void reloadAll();
           return;
         }
+        // `needs_bind`（微信未绑手机号）之后没有后台线程了：停轮询，改由
+        // 用户填手机号 + 验证码推进。
+        if (out.status === 'needs_bind') return;
         if (out.status === 'error' || out.status === 'expired') {
           if (out.status === 'error') notify.err(out.message || t('platforms.loginFailed'));
           return;
@@ -471,22 +504,37 @@ export function PlatformAccountsPanel({
       }
     };
     void tick();
-  }, [reloadAll, t]);
+  }, [applyLoginView, reloadAll, t]);
 
-  async function startWebLogin() {
+  /** 发码冷却倒计时（后端 60 秒内只允许发一次，这里只做界面提示）。 */
+  useEffect(() => {
+    if (codeCooldown <= 0) return;
+    const timer = setTimeout(
+      () => setCodeCooldown((n) => (n > 0 ? n - 1 : 0)), 1000);
+    return () => clearTimeout(timer);
+  }, [codeCooldown]);
+
+  async function startWebLogin(mode: 'qr' | 'sms' = 'qr') {
     if (loginStarting) return;
     setLoginStarting(true);
+    setLoginMode(mode);
     setCallbackUrl('');
+    setSmsCode('');
+    setCodeCooldown(0);
     if (login) void platformApi.loginCancel(platform, login.id).catch(() => {});
     try {
-      const out = await platformApi.loginStart(platform, realmAware ? realmScope : 'cn');
+      const out = await platformApi.loginStart(
+        platform, realmAware ? realmScope : 'cn', mode);
       setLogin({
         id: out.login_id,
         url: out.url,
         qr: out.qr,
         status: 'pending',
         message: out.message || '',
+        mode,
+        codeSent: false,
       });
+      if (mode === 'sms') return;      // 等用户填手机号，没有可轮询的后台任务
       // 扫码平台（Loomy）在面板内扫码；其它平台开浏览器授权页。二维码是后台
       // 线程去取的，`start` 返回时还给不出来，所以这里不能按 `qr` 判断。
       if (platform !== 'loomy') {
@@ -497,6 +545,66 @@ export function PlatformAccountsPanel({
       notify.err(errText(e));
     } finally {
       setLoginStarting(false);
+    }
+  }
+
+  /** 切换登录方式：同一方式且会话还活着时不动（避免把正在扫的码换掉）。 */
+  function switchLoginMode(mode: 'qr' | 'sms') {
+    if (mode === loginMode && login
+        && login.status !== 'error' && login.status !== 'expired') {
+      return;
+    }
+    void startWebLogin(mode);
+  }
+
+  /** 下发短信验证码（验证码登录，或微信未绑手机号时的补绑）。 */
+  async function sendLoginCode() {
+    if (!login || codeBusy) return;
+    const phone = smsPhone.trim();
+    if (!phone) {
+      notify.warn(t('platforms.loginPhoneRequired'));
+      return;
+    }
+    setCodeBusy(true);
+    try {
+      const out = await platformApi.loginSendCode(platform, login.id, phone);
+      applyLoginView(login.id, out);
+      notify.ok(t('platforms.loginCodeSent'));
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setCodeBusy(false);
+    }
+  }
+
+  /** 提交验证码；成功即完成登录 / 微信绑定。 */
+  async function submitLoginCode() {
+    if (!login || codeBusy) return;
+    const code = smsCode.trim();
+    if (!code) {
+      notify.warn(t('platforms.loginCodeRequired'));
+      return;
+    }
+    setCodeBusy(true);
+    try {
+      const out = await platformApi.loginSubmitCode(platform, login.id, code);
+      applyLoginView(login.id, out);
+      setSmsCode('');
+      if (out.status === 'success') {
+        notify.ok(t('platforms.loginSuccess'),
+          out.account?.nickname || out.account?.uid || undefined);
+        void reloadAll();
+      } else if (out.status !== 'error' && out.status !== 'expired') {
+        void pollLogin(platform, login.id);
+      }
+    } catch (e) {
+      // 验证码错了：后端已把会话状态改回可重试，这里只提示。
+      const message = errText(e);
+      setLogin((prev) => (prev && prev.id === login.id
+        ? {...prev, message} : prev));
+      notify.err(message);
+    } finally {
+      setCodeBusy(false);
     }
   }
 
@@ -511,14 +619,14 @@ export function PlatformAccountsPanel({
     setCallbackBusy(true);
     try {
       const out = await platformApi.loginCallback(platform, login.id, value);
-      setLogin((prev) => prev && prev.id === login.id
-        ? {...prev, status: out.status, message: out.message, qr: out.qr || prev.qr}
-        : prev);
+      applyLoginView(login.id, out);
       setCallbackUrl('');
       if (out.status === 'success') {
         notify.ok(t('platforms.loginSuccess'),
           out.account?.nickname || out.account?.uid || undefined);
         void reloadAll();
+      } else if (out.status === 'needs_bind') {
+        // 微信没绑手机号：弹窗转入验证码阶段，不再轮询。
       } else if (out.status !== 'error' && out.status !== 'expired') {
         void pollLogin(platform, login.id);
       }
@@ -534,6 +642,10 @@ export function PlatformAccountsPanel({
     const id = login?.id;
     setLogin(null);
     setCallbackUrl('');
+    setLoginMode('qr');
+    setSmsPhone('');
+    setSmsCode('');
+    setCodeCooldown(0);
     if (id) void platformApi.loginCancel(platform, id).catch(() => {});
   }
 
@@ -750,6 +862,8 @@ export function PlatformAccountsPanel({
   const supportsWeight = info?.supports_weight !== false;
   const supportsCooling = info?.supports_cooling !== false;
   const supportsLoginCallback = info?.supports_login_callback !== false;
+  // 短信验证码登录（Loomy）：验证码直接登录 + 微信未绑手机号时的补绑。
+  const supportsLoginCode = !!info?.supports_login_code;
   // 回调固定指向 `127.0.0.1:<端口>`（Trae 的授权页强校验），只有这类平台
   // 才需要提示「面板与浏览器必须同机」。Loomy 的回调落在 loomy.xunfei.cn，
   // 走的也是「粘链接」，不受这条约束。
@@ -773,6 +887,9 @@ export function PlatformAccountsPanel({
         return login.message || t('platforms.loginWaiting');
       case 'exchanging':
         return t('platforms.loginExchanging');
+      case 'needs_bind':
+        // 微信授权过了但没绑手机号：后端会给一句具体说明。
+        return login.message || t('platforms.loginBindRequired');
       case 'success':
         return t('platforms.loginSuccess');
       case 'expired':
@@ -784,6 +901,14 @@ export function PlatformAccountsPanel({
   /** 扫码二维码只在等扫码 / 换令牌时展示；成功或过期后收起，避免误导。 */
   const loginQrVisible = !!login?.qr
     && (login.status === 'pending' || login.status === 'exchanging');
+  /**
+   * 验证码输入区：短信登录的 `pending`，或微信 `bind=0` 转进来的 `needs_bind`。
+   * 注意 `needs_bind` 仍属于扫码链路（mode 是 qr），只是不再轮询二维码。
+   */
+  const codeFlowVisible = supportsLoginCode && !!login
+    && (login.status === 'needs_bind'
+      || (loginMode === 'sms' && login.status === 'pending'));
+  const codeFormBusy = codeBusy || login?.status === 'exchanging';
 
   return (
     <>
@@ -1674,17 +1799,42 @@ export function PlatformAccountsPanel({
           <DialogHeader>
             <DialogTitle>{t('platforms.loginTitle', {label})}</DialogTitle>
             <DialogDescription>
-              {loginQrVisible
-                ? t('platforms.loginQrDesc')
-                : platform === 'loomy'
-                  ? t('platforms.loginDescLoomy')
-                  : loginNeedsLoopback
-                    ? t('platforms.loginDesc')
-                    : t('platforms.loginDeviceDesc')}
+              {loginMode === 'sms' && supportsLoginCode
+                ? t('platforms.loginDescSms')
+                : login?.status === 'needs_bind'
+                  ? t('platforms.loginBindDesc')
+                  : loginQrVisible
+                    ? t('platforms.loginQrDesc')
+                    : platform === 'loomy'
+                      ? t('platforms.loginDescLoomy')
+                      : loginNeedsLoopback
+                        ? t('platforms.loginDesc')
+                        : t('platforms.loginDeviceDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
             <div className="space-y-3 px-6 pb-2">
+              {supportsLoginCode && login?.status !== 'success' && (
+                <div className="flex gap-1 rounded-full bg-muted p-1 text-[11px]">
+                  {(['qr', 'sms'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`flex-1 rounded-full px-3 py-1.5 transition-colors ${
+                        loginMode === mode
+                          ? 'bg-background font-medium text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                      disabled={loginStarting}
+                      onClick={() => switchLoginMode(mode)}
+                    >
+                      {mode === 'qr'
+                        ? t('platforms.loginModeQr')
+                        : t('platforms.loginModeSms')}
+                    </button>
+                  ))}
+                </div>
+              )}
               {loginNeedsLoopback && (
                 <div className="flex items-start gap-2 rounded-[12px] bg-muted/60 p-3 text-[11px] leading-5 text-muted-foreground">
                   <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
@@ -1705,9 +1855,77 @@ export function PlatformAccountsPanel({
                   ? <CircleCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
                   : login?.status === 'error' || login?.status === 'expired'
                     ? <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-                    : <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-muted-foreground" />}
+                    : login?.status === 'needs_bind'
+                      ? <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                      : <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-muted-foreground" />}
                 <span className="break-all leading-5">{loginStatusText}</span>
               </div>
+              {codeFlowVisible && login && (
+                <div className="space-y-2">
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-medium text-foreground">
+                      {t('platforms.loginPhoneLabel')}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Input
+                        value={smsPhone}
+                        onChange={(e) => setSmsPhone(e.target.value)}
+                        placeholder={t('platforms.loginPhonePlaceholder')}
+                        className="h-8 rounded-xl text-xs"
+                        inputMode="tel"
+                        autoComplete="tel"
+                        disabled={codeFormBusy}
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-8 shrink-0 rounded-full px-3 text-[11px]"
+                        disabled={codeFormBusy || codeCooldown > 0 || !smsPhone.trim()}
+                        onClick={() => void sendLoginCode()}
+                      >
+                        {codeBusy ? <Loader2 className="animate-spin" /> : null}
+                        {codeCooldown > 0
+                          ? t('platforms.loginResendIn', {s: codeCooldown})
+                          : t('platforms.loginSendCode')}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-medium text-foreground">
+                      {t('platforms.loginCodeLabel')}
+                    </div>
+                    <form
+                      className="flex items-center gap-1.5"
+                      onSubmit={(e) => { e.preventDefault(); void submitLoginCode(); }}
+                    >
+                      <Input
+                        value={smsCode}
+                        onChange={(e) => setSmsCode(e.target.value)}
+                        placeholder={t('platforms.loginCodePlaceholder')}
+                        className="h-8 rounded-xl text-xs"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={8}
+                        disabled={codeFormBusy || !login.codeSent}
+                      />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        className="h-8 shrink-0 rounded-full px-3 text-[11px]"
+                        disabled={codeFormBusy || !login.codeSent || !smsCode.trim()}
+                      >
+                        {codeBusy ? <Loader2 className="animate-spin" /> : null}
+                        {t('platforms.loginCodeSubmit')}
+                      </Button>
+                    </form>
+                  </div>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    {login.status === 'needs_bind'
+                      ? t('platforms.loginBindHint')
+                      : t('platforms.loginCodeHint')}
+                  </p>
+                </div>
+              )}
               {!!login?.url && (
                 <Button
                   variant="outline"
@@ -1722,7 +1940,8 @@ export function PlatformAccountsPanel({
                   {t('platforms.loginOpen')}
                 </Button>
               )}
-              {login?.status === 'pending' && supportsLoginCallback && (
+              {login?.status === 'pending' && loginMode === 'qr'
+                && supportsLoginCallback && (
                 <div className="space-y-1.5">
                   <div className="text-[11px] font-medium text-foreground">
                     {t('platforms.loginCallbackLabel')}
@@ -1766,7 +1985,7 @@ export function PlatformAccountsPanel({
               <Button
                 className="rounded-full"
                 disabled={loginStarting}
-                onClick={() => void startWebLogin()}
+                onClick={() => void startWebLogin(loginMode)}
               >
                 {loginStarting ? <Loader2 className="animate-spin" /> : <LogIn />}
                 {t('platforms.loginRetry')}

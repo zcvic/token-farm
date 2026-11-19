@@ -643,8 +643,24 @@ export const platformApi = {
    *
    * 只对 `supports_web_login` 的平台可用，且要求面板后端与浏览器同机。
    */
-  loginStart: (name: string, realm = 'cn') =>
-    post<PlatformLoginStart>(`${platformPath(name)}/login/start`, {realm}),
+  loginStart: (name: string, realm = 'cn', mode: 'qr' | 'sms' = 'qr') =>
+    post<PlatformLoginStart>(`${platformPath(name)}/login/start`, {realm, mode}),
+  /**
+   * 下发短信验证码（Loomy）。
+   *
+   * 两种用法共用同一个接口：验证码登录（`mode=sms`）直接发短信；微信
+   * `bind=0` 的会话（`status=needs_bind`）则由后端改用 `bind/sendMsg` 走绑定。
+   * 同一会话 60 秒内只能发一次，超频返回 429（`retry_after` 秒）。
+   */
+  loginSendCode: (name: string, loginId: string, phone: string) =>
+    post<PlatformLoginPoll>(
+      `${platformPath(name)}/login/${encodeURIComponent(loginId)}/send-code`,
+      {phone}),
+  /** 提交短信验证码；成功返回带 `account` 的会话。 */
+  loginSubmitCode: (name: string, loginId: string, code: string) =>
+    post<PlatformLoginPoll>(
+      `${platformPath(name)}/login/${encodeURIComponent(loginId)}/code`,
+      {code}),
   /**
    * 提交浏览器地址栏里的回调 URL。
    *
