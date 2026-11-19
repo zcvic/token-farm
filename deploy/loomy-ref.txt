@@ -52,8 +52,17 @@
 #          fetch_login_qr（从授权页 HTML 抠 uuid）/ poll_login（长轮询
 #          l/qrconnect，errno 408/404/405/403/402）/ qr_image_url /
 #          parse_callback；bind/auth → bind/skip 换 session，bind=0 表示该微信
-#          还没绑手机号（需要并发短信绑定，本地直接报 wechat_unbound）
+#          还没绑手机号（继续 bind/sendMsg + bind/checkCode 完成绑定 + 登录）
 #          → server/platforms/loomy/wechat.py + client.login_by_wechat_sync。
+#        · account.py 的两套短信链路（2026-11-19 补）：
+#          1) 手机验证码直接登录 /login/phone/sendMsgCode（ccode=86 / phone /
+#             expire=300 → msgid）→ /login/phone/checkCode（phone / mcode /
+#             msgid → session / userid / phone）；
+#          2) 微信 bind=0 补绑 /login/thirdAccount/bind/sendMsg（rcode / phone /
+#             ccode）→ /login/thirdAccount/bind/checkCode（rcode / mcode /
+#             msgid → session）。两条链路的票据（手机号 vs rcode）不可混用
+#          → client.send_sms_code_sync / login_by_sms_sync /
+#            bind_send_msg_sync / bind_check_code_sync。
 #        · server.py 的「关闭思考」翻译：上游不认 reasoning_effort /
 #          enable_thinking，只认正文里的 /no_think 前缀；客户端显式要求关闭
 #          思考时改写首条 user 消息（多模态加在第一个文本片段）→
@@ -67,6 +76,9 @@
 #        · 服务端取码 + 长轮询的登录会话状态机（login.py），二维码内嵌面板，
 #          login_id 复用微信 state；参考仓的 login_flow.py 只做「开浏览器 +
 #          粘回调」，本地保留为取码失败时的兜底；
+#        · 同一状态机的验证码分支：mode=sms 直接登录、微信 bind=0 就地补绑；
+#          发码 60 秒节流 / 单会话最多 5 次 / 连错 5 次作废是面板侧策略
+#          （参考仓 panel.py 只有「最近一次短信」缓存，不限制频率）；
 #        · 账号池 / 选号 / 冷却 / 会话亲和 / 代理线路 / 记账全部接 token-farm
 #          自己的运行时，只保留平台差异；
 #        · 平台元数据（realm=cn 单区域、签到开关、目录缓存设置）。

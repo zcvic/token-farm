@@ -13,7 +13,7 @@ IP / 模型白名单、用量与日志。在此之上新增：
 | 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy 为原生实现，Qoder 用内置网关 |
 | Trae 适配器 | `server/platforms/trae/` | 账号存储 / 令牌刷新 / 签到 / 额度 / 模型 / 对话（SSE → OpenAI chunk） |
 | Qoder 适配器 | `server/platforms/qoder/` | 账号 / 签到 / 额度 / 模型 / 对话；协议层内置在 `_vendor/`，无需额外部署 |
-| Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
+| Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录（含手机号补绑）/ 手机验证码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
 | 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` 前缀走对应平台（旧式 `trae/` / `qoder/` 继续兼容），其余保持原样走 WorkBuddy |
 | 多平台接口 | `server/routers/platforms.py` | `/api/platforms/*`：账号、导入、刷新、签到、额度、模型 |
 | 多平台页面 | `web/app/(main)/accounts/page.tsx`、`models/page.tsx` | 顶部平台下拉切换；账号 / 模型页随平台更换数据源，分版本的平台（Trae / Qoder）再按国内版 / 国际版过滤，统计与日志按平台过滤 |

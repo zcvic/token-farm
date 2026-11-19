@@ -334,25 +334,31 @@ registry.register(FooAdapter())
   随账号落盘，后续刷新由面板自己签 `DeviceProof`。私钥只存在 `data/` 与
   账号文件里，不进日志、不回传前端。
 
-### 网页登录（Loomy，微信扫码）
+### 网页登录（Loomy，微信扫码 / 手机验证码）
 
-Loomy 的网页授权只有一条链路：微信开放平台「网站应用」扫码
-（`open.weixin.qq.com/connect/qrconnect`）。回调域被微信白名单锁死在
-`loomy.xunfei.cn`，**不能**改成本机回环，所以这里扩展了契约：
+Loomy 的网页授权主链路是微信开放平台「网站应用」扫码
+（`open.weixin.qq.com/connect/qrconnect`）；另有短信验证码登录（客户端内部
+接口，不跳外部页面）。回调域被微信白名单锁死在 `loomy.xunfei.cn`，**不能**
+改成本机回环，所以这里扩展了契约：
 
-- `login_start` 额外返回 `qr`（二维码图片地址，可空）。前端看到 `qr` 就在
-  弹窗里内嵌二维码，**不**自动打开浏览器；
+- `login_start` 接受 `mode`（`qr` / `sms`）并额外返回 `qr`（二维码图片地址，
+  可空）。前端看到 `qr` 就在弹窗里内嵌二维码，**不**自动打开浏览器；
 - 取码是异步的：`login_start` 立刻返回 `pending` + `message="正在获取二维码…"`，
   后台线程拉授权页、从 HTML 里抠 `uuid`，之后 `login_poll` 带出 `qr`；
 - 后台线程继续长轮询 `l/qrconnect`，`wx_errcode=405` 时拿 `wx_code` →
   `bind/auth` → `bind/skip` 换 session → `adapter.import_account` 落盘
   （`source=web`，没有密码）；
-- `bind=0`（微信未绑手机号）需要再走短信绑定，弹窗放不下这段二次验证，直接
-  报错让用户改用密码导入；
+- `bind=0`（微信未绑手机号）不算失败：`login_poll` 返回 `status=needs_bind`，
+  前端就地收手机号，`login_send_code` / `login_submit_code` 走
+  `bind/sendMsg` + `bind/checkCode` 完成绑定 + 登录（`rcode` 只留在服务端）；
+- `mode=sms` 时不能扫码：`login_send_code` 走 `/login/phone/sendMsgCode`、
+  `login_submit_code` 走 `/login/phone/checkCode`；同一会话发码冷却 60 秒、
+  最多 5 次，连错 5 次作废；
 - 服务端连不上微信时退化为「打开授权页 + 粘回调」：
   `login_submit_callback` 解析 `https://loomy.xunfei.cn/oauth/wechat/callback?code=…`，
   并用 `state == login_id` 校验是不是本次会话的链接；
-- 登录会话只在内存里、4 分钟有效；`login_id` 直接复用微信的 `state`。
+- 登录会话只在内存里：二维码 4 分钟、验证码阶段 15 分钟有效；`login_id`
+  直接复用微信的 `state`。
 
 ### 前端：国内版 / 国际版切换（Trae）
 
