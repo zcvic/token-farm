@@ -188,6 +188,11 @@ def _boot() -> Runtime:
     # 时才读环境变量；在导入之前设好，避免把状态写进 _vendor/ 源码目录。
     os.environ['ACCOUNTS_DIR'] = str(accounts)
     os.environ['QD_PROXY_USAGE_DIR'] = str(usage)
+    # 上游 1.9.10 的 `/admin/shutdown` 会停掉进程内的 HTTP 监听：内置网关跑在
+    # 主服务进程里，误触等于把整个后端带走。这里在导入上游之前显式关掉（上游
+    # 在 import 时读取该开关），路由会稳定返回 403 而不是依赖 `_ACTIVE_SERVER`
+    # 未绑定的巧合。
+    os.environ.setdefault('QD_SHUTDOWN_DISABLE', '1')
     # 协议兼容开关（工具残片 / thinking / 结构化历史 / 图片 / Web 工具）：
     # 网关每次请求现读环境变量，这里先按库里的设置灌一遍；保存时由适配器的
     # `apply_runtime_settings()` 再刷一次，所以改完不用重启内置网关。

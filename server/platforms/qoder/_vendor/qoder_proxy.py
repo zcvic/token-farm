@@ -72,7 +72,7 @@ from .qoder_accounts import (get_realm_config, gateway_candidates,
                             local_vm_status)
 from pathlib import Path
 
-VERSION = "1.9.9"
+VERSION = "1.9.11"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 
@@ -671,13 +671,17 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None,
     row = {
         "at": time.time(),
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "model": model,
+        "model": model,  # Legacy grouping/limit key; not an upstream identity claim.
+        "requested_model": (session_trace or {}).get("requested_model", model),
+        "resolved_model": (session_trace or {}).get("resolved_model"),
         "stream": bool(stream),
         "elapsed_ms": elapsed_ms,
         "ttft_ms": ttft_ms,
         "gen_ms": gen_ms,
     }
     row.update(fields)
+    if session_trace and "upstream_model_key" in session_trace:
+        row["upstream_model_key"] = session_trace["upstream_model_key"]
     if fp:
         row.update(fp)
     if session_trace:
@@ -2606,6 +2610,8 @@ def runtime_settings_view():
         "log_dir": LOG_DIR,
         "settings_file": qoder_settings.settings_path(ACCOUNTS_DIR),
         "version": VERSION,
+        # 面板「关闭网关」按钮的可执行性（不发请求、不改任何状态）
+        "shutdown": shutdown_plan_info(),
     }
 
 
@@ -3058,8 +3064,9 @@ def _register_live_names(entries):
         for mid, meta in entries or []:
             name = str((meta or {}).get("display_name")
                        or (meta or {}).get("name") or "").strip()
-            if name and mid:
-                pairs.append((name, mid))
+            if mid:
+                # A catalog key is advertised even when it has no display name.
+                pairs.append((name or mid, mid))
         if pairs:
             qoder_catalog.register_live_display_names(pairs)
     except Exception:
@@ -3101,11 +3108,63 @@ def resolve_model_key(model, realm=None):
     官方改了显示名的情况（快照未跟上）由第二次解析兜住。
     """
     key = qoder_catalog.resolve_upstream_key(model, realm=realm)
-    raw = str(model or "").strip()
-    if key and key == raw and not qoder_catalog.is_known_upstream_key(key, realm):
+    if key and not qoder_catalog.is_known_upstream_key(key, realm):
         _ensure_live_names(realm)
         key = qoder_catalog.resolve_upstream_key(model, realm=realm)
     return key
+
+
+_UNKNOWN_MODEL_WARN_AT = None
+_UNKNOWN_MODEL_WARN_LOCK = threading.Lock()
+
+
+def unknown_model_policy():
+    """Read the policy without changing custom/BYOK names by default."""
+    policy = os.environ.get("QD_UNKNOWN_MODEL", "pass").strip().lower()
+    if policy not in ("pass", "auto", "error"):
+        raise ValueError("QD_UNKNOWN_MODEL must be pass, auto, or error")
+    return policy
+
+
+def resolve_request_model(model, realm=None):
+    """Resolve against aliases AND the offline/live catalog before applying policy.
+
+    No network discovery or account selection occurs here. Unknown means absent
+    from current catalog knowledge, not proof that a BYOK name does not exist.
+    """
+    key = resolve_model_key(model, realm=realm)
+    policy = unknown_model_policy()
+    if qoder_catalog.is_known_upstream_key(key, realm) or key == "auto":
+        return key
+    if policy == "error":
+        raise ValueError("unknown model %r; select an advertised model or set "
+                         "QD_UNKNOWN_MODEL=pass for custom/BYOK names"
+                         % str(model or "")[:96])
+    # One process-wide warning per minute: bounded state and log volume even if
+    # every request supplies a different name. repr bounds/escapes client data.
+    global _UNKNOWN_MODEL_WARN_AT
+    now = time.monotonic()
+    with _UNKNOWN_MODEL_WARN_LOCK:
+        warn = (_UNKNOWN_MODEL_WARN_AT is None
+                or now - _UNKNOWN_MODEL_WARN_AT >= 60)
+        if warn:
+            _UNKNOWN_MODEL_WARN_AT = now
+    if warn:
+        log("unknown model %r: QD_UNKNOWN_MODEL=%s; upstream may select auto; "
+            "resolved_model remains unknown until reported by upstream"
+            % (str(model or "")[:96], policy), level="WARN", tag="model")
+    return "auto" if policy == "auto" else key
+
+
+def _capture_model_identity(chunk, holder=None, usage_ctx=None):
+    """Record only an explicit upstream chunk model, never the requested name."""
+    actual = chunk.get("model") if isinstance(chunk, dict) else None
+    if not isinstance(actual, str) or not actual.strip():
+        return
+    if holder is not None:
+        holder["resolved_model"] = actual
+    if usage_ctx is not None:
+        usage_ctx["resolved_model"] = actual
 
 
 # 离线合并结果的短 TTL memo（MAJOR：请求路径每请求一次磁盘 IO 的节流）。
@@ -3907,6 +3966,93 @@ def _is_loopback(host):
     host = str(host or "")
     return host in ("::1", "localhost") or host.startswith("127.") \
         or host.startswith("::ffff:127.")
+
+
+# ---------------------------------------------------------------------------
+# 面板关闭网关（POST /admin/shutdown）
+#
+# 与 /update/apply 同一套安全模型：面板会话 + 本机（QD_SHUTDOWN_ALLOW_REMOTE=1
+# 放开）+ QD_SHUTDOWN_DISABLE=1 一键禁用，并要求请求体显式 confirm，
+# 避免误点/脚本裸 POST 把网关关掉。
+#
+# HTTPServer.shutdown() 不能在运行 serve_forever 的同一线程调用（#156）。
+# ThreadingHTTPServer 的请求工作线程并不是该线程，本身不会因此死锁。
+# 为避免阻塞响应，仍由单独的 daemon 线程延迟调用
+# shutdown()，让 serve_http_server 的 finally 正常走 server_close() 与
+# atexit（pid 文件清理），与 SIGTERM 的收尾路径一致。
+# ---------------------------------------------------------------------------
+SHUTDOWN_DISABLED = str(os.environ.get("QD_SHUTDOWN_DISABLE") or "").strip().lower() \
+    in ("1", "on", "true", "yes", "enable", "enabled")
+_ACTIVE_SERVER = None                  # main() 里绑定；plan 用它判断可执行性
+_SHUTDOWN_STARTED = False              # 一次进程只关一次（连点/并发去重）
+_SHUTDOWN_LOCK = threading.Lock()
+
+
+def _shutdown_allow_remote():
+    return str(os.environ.get("QD_SHUTDOWN_ALLOW_REMOTE") or "").strip().lower() \
+        in ("1", "on", "true", "yes", "enable", "enabled")
+
+
+def shutdown_plan_info():
+    """面板展示用的可执行性（不发请求、不关任何东西）。
+
+    阻断原因同时给 code 与中文 reasons：code 供前端映射成可翻译文案，
+    reasons 供 CLI / 直接读接口的调用方（不依赖面板 i18n）。
+    """
+    codes, reasons = [], []
+    if SHUTDOWN_DISABLED:
+        codes.append("disabled")
+        reasons.append("已禁用（QD_SHUTDOWN_DISABLE=1）")
+    if _SHUTDOWN_STARTED:
+        codes.append("stopping")
+        reasons.append("网关正在关闭")
+    if _ACTIVE_SERVER is None:
+        codes.append("no_listener")
+        reasons.append("当前进程未持有监听器（可能是测试或子进程）")
+    return {
+        "can_shutdown": not reasons,
+        "disabled": SHUTDOWN_DISABLED,
+        "allow_remote": _shutdown_allow_remote(),
+        "blocked_codes": codes,
+        "blocked_reasons": reasons,
+        "restart_hint": ("Windows: start-qoder-proxy.bat" if IS_WINDOWS
+                         else "Linux/macOS: ./start-qoder-proxy.sh"),
+    }
+
+
+def schedule_shutdown(delay=0.4):
+    """延迟关闭监听循环：先让响应的字节发出去，再优雅退出。
+
+    返回 False 表示当前没有可关闭的监听器（调用方应回 409）。
+    幂等：重复调用只会有一次关停（第二次起返回 False，避免连点起多个线程）。
+    """
+    global _SHUTDOWN_STARTED
+
+    def _run():
+        global _SHUTDOWN_STARTED
+        time.sleep(delay)
+        try:
+            server.shutdown()
+        except Exception as exc:
+            # The listener can still be serving: permit an explicit retry.
+            with _SHUTDOWN_LOCK:
+                _SHUTDOWN_STARTED = False
+            log("shutdown: server.shutdown() failed: %s" % exc, level="WARN",
+                tag="system")
+
+    with _SHUTDOWN_LOCK:
+        if _SHUTDOWN_STARTED:
+            return False
+        server = _ACTIVE_SERVER
+        if server is None:
+            return False
+        _SHUTDOWN_STARTED = True
+        try:
+            threading.Thread(target=_run, name="qd-shutdown", daemon=True).start()
+        except Exception:
+            _SHUTDOWN_STARTED = False
+            raise
+    return True
 
 
 def update_plan_info():
@@ -7077,7 +7223,7 @@ def _quota_hint(detail):
     """上游 detail -> 人话解释（issue #123 后续）。只认已实测过的码。"""
     d = str(detail or "")
     if "10605" in d or "isQueued" in d:
-        return ("上游排队中（10605 / RESOURCE_LIMIT）：等 retryAfterSeconds 后会放行，")
+        return ("上游排队中（10605 / RESOURCE_LIMIT）：建议按 retryAfterSeconds 退避，不保证放行；原因未确认。")
     if "112" in d and ("pricingUrl" in d or "code" in d):
         return "上游模型额度/套餐拒绝（112）：不代表总余额为零，核对实际账号、区域和模型权限"
     if "Billing daily count exceeded" in d or "110" in d:
@@ -7562,6 +7708,113 @@ if QUEUE_MODE not in ("visible", "fast", "wait"):
     QUEUE_MODE = "visible"
 
 
+# #158: response-scoped observations, never a provider-risk verdict. Raw error
+# text, account IDs, endpoints and model names are not retained in the snapshot.
+_QUEUE_OBSERVATIONS = OrderedDict()
+_QUEUE_OBSERVATION_LOCK = threading.Lock()
+_QUEUE_OBSERVATION_TTL = 86400
+_QUEUE_OBSERVATION_GAP = 900
+_QUEUE_OBSERVATION_LIMIT = 256
+
+
+def queue_fields(detail):
+    """Read bounded nested JSON (some providers encode message as JSON text)."""
+    pending = [detail]
+    found = {}
+    for _ in range(16):
+        if not pending:
+            break
+        value = pending.pop(0)
+        if isinstance(value, str):
+            if len(value) > 8192:
+                continue
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError, RecursionError):
+                continue
+            if isinstance(value, str):
+                pending.append(value)
+                continue
+        if not isinstance(value, dict):
+            continue
+        for key in ("code", "isQueued", "queueType", "queueCount",
+                    "retryAfterSeconds", "serviceAvailable"):
+            if key in value:
+                found[key] = value[key]
+        for key in ("body", "message", "error", "data"):
+            if isinstance(value.get(key), (dict, str)):
+                pending.append(value[key])
+    if str(found.get("code")) != "10605" and found.get("isQueued") is not True:
+        return None
+    kind = found.get("queueType")
+    kind = kind if isinstance(kind, str) and re.fullmatch(r"p[0-9]", kind) else "unknown"
+    result = {"queue_type": kind, "service_available": None,
+              "retry_after": None, "queue_count": None, "reason": "unknown"}
+    if type(found.get("serviceAvailable")) is bool:
+        result["service_available"] = found["serviceAvailable"]
+    for key, source in (("retry_after", "retryAfterSeconds"), ("queue_count", "queueCount")):
+        value = found.get(source)
+        if type(value) is int and 0 <= value <= 86400:
+            result[key] = value
+    return result
+
+
+def _queue_observation_prune(now):
+    for key, value in list(_QUEUE_OBSERVATIONS.items()):
+        if now - value["last"] > _QUEUE_OBSERVATION_TTL:
+            del _QUEUE_OBSERVATIONS[key]
+
+
+def note_queue_observation(scope, detail=None, success=False):
+    if not isinstance(scope, str) or not scope:
+        return
+    fields = queue_fields(detail) if not success else None
+    if not fields and not success:
+        return
+    now = time.monotonic()
+    with _QUEUE_OBSERVATION_LOCK:
+        _queue_observation_prune(now)
+        if success:
+            _QUEUE_OBSERVATIONS.pop(scope, None)
+            return
+        item = _QUEUE_OBSERVATIONS.get(scope)
+        if item is None or now - item["last"] > _QUEUE_OBSERVATION_GAP:
+            item = {"first": now, "count": 0}
+        item.update(last=now, count=item["count"] + 1, fields=fields)
+        _QUEUE_OBSERVATIONS[scope] = item
+        _QUEUE_OBSERVATIONS.move_to_end(scope)
+        while len(_QUEUE_OBSERVATIONS) > _QUEUE_OBSERVATION_LIMIT:
+            _QUEUE_OBSERVATIONS.popitem(last=False)
+
+
+def queue_observation_snapshot():
+    now = time.monotonic()
+    with _QUEUE_OBSERVATION_LOCK:
+        _queue_observation_prune(now)
+        items = list(_QUEUE_OBSERVATIONS.values())
+        active = [v for v in items if now - v["last"] <= _QUEUE_OBSERVATION_GAP]
+        persistent = [v for v in active if v["count"] >= 3 and v["last"] - v["first"] >= 900]
+        types = {}
+        for item in active:
+            kind = item["fields"]["queue_type"]
+            types[kind] = types.get(kind, 0) + 1
+        return {"reason": "unknown", "persistent": bool(persistent),
+                "active_scopes": len(active), "persistent_scopes": len(persistent),
+                "observations": sum(v["count"] for v in active), "queue_types": types,
+                "max_observed_span_seconds": int(max((v["last"] - v["first"] for v in active), default=0)),
+                "retention_seconds": _QUEUE_OBSERVATION_TTL,
+                "process_only": True, "max_gap_seconds": _QUEUE_OBSERVATION_GAP,
+                "scope_limit": _QUEUE_OBSERVATION_LIMIT,
+                "hint": "持续排队不等于已确认风控；p4 与 serviceAvailable 不能单独证明原因，需官方客户端对照或上游确认。"}
+
+
+def _queue_scope(account, model, endpoint=None):
+    if endpoint is None:
+        endpoint = qoder_accounts.account_realm_config(account).get("gateway", "")
+    value = (str(getattr(account, "uid", "")), str(endpoint), str(model))
+    return hashlib.sha256(json.dumps(value).encode()).hexdigest()
+
+
 def queue_mode():
     """当前排队策略（visible / fast / wait）。"""
     return QUEUE_MODE
@@ -7569,7 +7822,7 @@ def queue_mode():
 
 QUEUE_MSG_WAIT_ZH = "上游模型排队中（10605 / RESOURCE_LIMIT）：已等待 %d 秒，仍在队列中"
 QUEUE_MSG_FAIL_ZH = ("上游模型排队超时（已等待 %d 秒，上限 %d 秒）：请稍后重试，"
-                     "或换一个模型/区域。这不是你的 Key、账号或网络问题。")
+                     "请按建议退避；持续排队原因未确认，不应无限重试或据此判定账号正常/风控。")
 
 
 def visible_queue_acquire(seed_exc, reopen, emit, budget_secs=None, started=None):
@@ -7984,11 +8237,14 @@ def friendly_upstream_error(code, detail):
                 "可稍后重试；若重复出现，请分批发送图片或检查原图格式。"
                 "上游详情：%s" % (code_i, _safe[:400] or "(无详情)"),
                 "upstream_image_conversion_timeout")
+    if "upstream stream read failed" in detail or "upstream stream idle timeout" in detail:
+        return ("上游流读取失败，本轮未完成；网关未自动重放已建立的请求。",
+                "upstream_stream_error")
     # issue #87：排队（fast 模式在这里统一给出中文原因，所有入口共用）
     if ("10605" in detail or "isQueued" in detail
             or "RESOURCE_LIMIT" in detail) and _to_int_status(code) in (403, 503):
         return ("上游模型排队中（10605 / RESOURCE_LIMIT）：请稍后重试，"
-                "或换一个模型/区域。这不是你的 Key、账号或网络问题。"
+                "请按建议退避；持续排队原因未确认，不能仅凭队列号排除账号或出口因素。"
                 "上游详情：%s" % (_safe[:160] or "(无详情)")
                 + _QUEUED_CLIENT_HINT, "upstream_queued")
     # issue #108：额度耗尽也走 403，但重试无效——让客户端看懂该充值/换号
@@ -8016,7 +8272,7 @@ def friendly_upstream_error(code, detail):
     # issue #38/#51：上游排队 / 资源不足（10605 RESOURCE_LIMIT）
     if "10605" in detail or "isQueued" in detail or "RESOURCE_LIMIT" in detail:
         return ("上游排队中（10605 / RESOURCE_LIMIT）：已按 retryAfterSeconds 等待并重试，"
-                "仍拿不到可用资源。请稍后重试；若频繁出现，说明该模型当前排队严重。"
+                "仍未放行；持续排队原因未确认，不能仅凭队列号判定容量或风控。"
                 "上游详情：%s" % (_safe[:200] or "(无详情)")
                 + _QUEUED_CLIENT_HINT, "upstream_queued")
     if "pricingUrl" in detail:
@@ -8483,6 +8739,8 @@ def _take_image_retry(usage_ctx):
 
 
 def should_retry_envelope(exc, emitted_bytes, attempt, usage_ctx=None):
+    if isinstance(exc, UpstreamStreamError):
+        return False  # A broken established stream must not trigger a paid replay.
     # issue #37：坏参数是**模型内容问题**，不是瞬时上游故障——绝不自动重发
     # （否则会重复计费，且下一次很可能同样非法）。客户端想重试由它自己决定。
     """流内错误信封是否值得**重开上游**再试。
@@ -8874,7 +9132,8 @@ def _chat_chunks(obj, model):
     """把聚合好的 chat 对象摊成 SSE 分片（web 工具路径用：内容是整段回放）。"""
     cid = (obj or {}).get("id") or "chatcmpl-web"
     created = int((obj or {}).get("created") or time.time())
-    mdl = (obj or {}).get("model") or model or ""
+    mdl = ((obj.get("resolved_model") or "") if "resolved_model" in (obj or {})
+           else (obj or {}).get("model") or model or "")
     text = (((obj or {}).get("choices") or [{}])[0].get("message") or {}).get(
         "content") or ""
     base = {"id": cid, "object": "chat.completion.chunk",
@@ -8964,7 +9223,12 @@ def open_upstream(payload, session_key=None, target_realm=None, usage_ctx=None,
             if usage_ctx is not None:
                 # 确定性原因 → 面板直接显示，不必自己推断
                 usage_ctx["realm_reason"] = auto_realm_reason(model, realm)
-    model_key = resolve_model_key(model, realm=realm)
+    try:
+        model_key = resolve_request_model(model, realm=realm)
+    except ValueError as exc:
+        raise UpstreamStatus(400, str(exc))
+    usage_ctx.update(requested_model=model, upstream_model_key=model_key,
+                     resolved_model=None)
 
     # issue #86：钉死账号时用它构造请求体（身份类字段必须与被测号一致）
     representative = (only_account if only_account is not None
@@ -9127,7 +9391,16 @@ def open_upstream(payload, session_key=None, target_realm=None, usage_ctx=None,
                 # issue #38：上游排队 -> 等放行后重试同一账号（不把排队 JSON
                 # 交给客户端）。仅在预算与单轮上限内等待；超出即按原错误走
                 # 既有分类（fail-open 语义不变）。
+                note_queue_observation(_queue_scope(account, model_key, raw_url), detail)
+                if usage_ctx.get("_queue_probe_once"):
+                    usage_ctx["_queue_probe_account"] = account
                 qwait = _queue_wait_seconds(detail)
+                if usage_ctx.get("_queue_probe_once"):
+                    _team_release(account, _team_lease)
+                    _team_lease = None
+                    if qwait > 0:
+                        raise UpstreamQueued(qwait, detail)
+                    raise UpstreamStatus(exc.code, detail)
                 _can_wait = (qwait > 0 and queue_tries < QUEUE_MAX_ROUNDS
                              and qwait <= QUEUE_WAIT_MAX_SECS
                              and (time.time() - queue_start) + qwait
@@ -9192,6 +9465,10 @@ def open_upstream(payload, session_key=None, target_realm=None, usage_ctx=None,
                     continue
                 break
             except Exception as exc:
+                if usage_ctx.get("_queue_probe_once"):
+                    _team_release(account, _team_lease)
+                    _team_lease = None
+                    raise
                 last_exc = exc
                 detail = ""
                 # 传输层瞬时故障（TLS EOF / 连接重置 / 超时）同样原地重试；
@@ -9238,6 +9515,11 @@ def open_upstream(payload, session_key=None, target_realm=None, usage_ctx=None,
                         model=str(payload.get("model") or ""))
                 except Exception:
                     pass
+            try:
+                resp._qd_model_audit = usage_ctx
+                resp._qd_queue_scope = _queue_scope(account, model_key, raw_url)
+            except (AttributeError, TypeError):
+                pass
             if _team_lease:
                 # 关闭/退出时自动释放租约（handler 都走 with resp / resp.close）
                 return _TeamLeaseResp(resp, account, _team_lease), account, encoded
@@ -9399,6 +9681,22 @@ def open_upstream(payload, session_key=None, target_realm=None, usage_ctx=None,
         % realm)
 
 
+class UpstreamStreamError(UpstreamStatus):
+    """Source read failure after HTTP establishment; never a client disconnect."""
+    def __init__(self, detail):
+        super().__init__(502, detail)
+
+
+def _upstream_stream_source(source):
+    """Keep source transport errors distinct from downstream socket write errors."""
+    try:
+        yield from source
+    except UpstreamStatus:
+        raise
+    except Exception as exc:
+        raise UpstreamStreamError("upstream stream read failed (%s)" % type(exc).__name__) from exc
+
+
 def sse_with_heartbeat(source, send, interval=None, idle_limit=None):
     """在等待上游数据的空档里发送 SSE 注释心跳（`: ping`），并原样转发数据。
 
@@ -9413,8 +9711,9 @@ def sse_with_heartbeat(source, send, interval=None, idle_limit=None):
     idle_limit : 单次等待上限（秒），默认 900；超过抛 TimeoutError
 
     读线程把上游数据放入队列，主线程只在“队列空闲”时补心跳，保证顺序与
-    错误传播（上游异常原样在主线程抛出）。
+    错误传播（上游状态异常保留；源读取异常统一标记，避免误判客户端断开）。
     """
+    source = _upstream_stream_source(source)
     if interval is None:
         try:
             interval = float(os.environ.get("QD_SSE_HEARTBEAT", "5") or 5)
@@ -9454,8 +9753,8 @@ def sse_with_heartbeat(source, send, interval=None, idle_limit=None):
             send(b": ping\n\n")               # SSE 注释：客户端忽略
             waited += interval
             if waited >= idle_limit:
-                raise TimeoutError(
-                    "upstream produced no data for %.0fs" % waited)
+                raise UpstreamStreamError(
+                    "upstream stream idle timeout after %.0fs" % waited)
             continue
         if item is done:
             return
@@ -9555,6 +9854,7 @@ def iter_inner_sse(resp, holder=None):
       - body == "[DONE]"       -> 结束迭代
       - 内层 chunk 里的 usage 记入 holder
     """
+    scope = getattr(resp, "_qd_queue_scope", None)
     for raw in resp:
         if isinstance(raw, bytes):
             try:
@@ -9575,8 +9875,10 @@ def iter_inner_sse(resp, holder=None):
         status = outer.get("statusCodeValue")
         body = outer.get("body")
         if status not in (None, 200, "200"):
+            note_queue_observation(scope, body)
+            limit = 8192 if holder and holder.get("_queue_probe_once") else 400
             raise UpstreamStatus(status, body if isinstance(body, str)
-                                 else json.dumps(outer, ensure_ascii=False)[:400])
+                                 else json.dumps(outer, ensure_ascii=False)[:limit])
         if not isinstance(body, str):
             continue
         if body == "[DONE]":
@@ -9586,8 +9888,19 @@ def iter_inner_sse(resp, holder=None):
         except Exception:
             continue
         if isinstance(inner, dict):
+            _capture_model_identity(inner, holder, getattr(resp, "_qd_model_audit", None))
             # task-34：只观测（计数 + 首次告警），不影响下面的清洗/透传分支。
             note_inner_upstream_error(inner, status=status)
+            note_queue_observation(scope, inner.get("error"))
+            if holder is not None and holder.get("_queue_probe_once") and inner.get("error"):
+                raise UpstreamStatus(502, json.dumps(inner["error"], ensure_ascii=False)[:8192])
+            choices = inner.get("choices")
+            if not inner.get("error") and isinstance(choices, list) and any(
+                    isinstance(ch, dict) and ch.get("finish_reason") in ("stop", "tool_calls", "function_call", "length")
+                    for ch in choices):
+                note_queue_observation(scope, success=True)
+                if holder is not None:
+                    holder["_upstream_finished"] = True
             if holder is not None and inner.get("usage") \
                     and not holder.get("usage"):
                 holder["usage"] = inner["usage"]
@@ -9603,6 +9916,7 @@ def aggregate_stream(resp, model, resp_id=None, holder=None, allowed_names=None)
     allowed_names：本次请求声明的工具名集合；用于「泄漏文本回读」的守卫
     （见 parse_leaked_tool_calls / issue #8）。
     """
+    holder = holder if holder is not None else {}
     content, reasoning, finish = [], [], "stop"
     tool_calls_map = {}
     usage = holder.get("usage") if holder else None
@@ -9828,6 +10142,7 @@ def aggregate_stream(resp, model, resp_id=None, holder=None, allowed_names=None)
             and finish not in ("length", "content_filter")):
         raise EmptyToolEcho(0, "reasoning_only" if reasoning else "empty_tool_turn")
     out = {
+        "resolved_model": (holder or {}).get("resolved_model"),
         "id": resp_id or "chatcmpl-qoder",
         "object": "chat.completion",
         "created": created or int(time.time()),
@@ -10371,6 +10686,13 @@ def _responses_usage(u):
     }
 
 
+def _response_model_identity(requested, resolved=None):
+    """Unknown actual identity is explicit; never label a requested alias actual."""
+    actual = resolved if isinstance(resolved, str) and resolved.strip() else None
+    return {"model": actual or "", "requested_model": requested,
+            "resolved_model": actual}
+
+
 def chat_to_response(chat_obj, model, custom_names=None, ns_map=None,
                      allowed_names=None):
     """Fold a Chat Completions object into a Responses API response object.
@@ -10467,6 +10789,8 @@ def chat_to_response(chat_obj, model, custom_names=None, ns_map=None,
         "tools": [],
         "metadata": {},
     }
+    obj.update(_response_model_identity(
+        model, chat_obj.get("resolved_model", chat_obj.get("model"))))
     u = _responses_usage(chat_obj.get("usage"))
     if u:
         obj["usage"] = u
@@ -10512,6 +10836,7 @@ def stream_responses_events(inner_lines, model, holder):
             "tools": [],
             "metadata": {},
         }
+        obj.update(_response_model_identity(model, holder.get("resolved_model")))
         u = _responses_usage(usage)
         if u:
             obj["usage"] = u
@@ -10546,6 +10871,7 @@ def stream_responses_events(inner_lines, model, holder):
 
     yield ev("response.created", {"response": resp_obj("in_progress")})
     yield ev("response.in_progress", {"response": resp_obj("in_progress")})
+    announced_model = holder.get("resolved_model")
     for raw in inner_lines:
         data = strip_data_prefix(raw.decode("utf-8", "replace")
                                  if isinstance(raw, bytes) else raw)
@@ -10555,6 +10881,10 @@ def stream_responses_events(inner_lines, model, holder):
             chunk = json.loads(data)
         except Exception:
             continue
+        _capture_model_identity(chunk, holder)
+        if holder.get("resolved_model") != announced_model:
+            announced_model = holder.get("resolved_model")
+            yield ev("response.in_progress", {"response": resp_obj("in_progress")})
         if usage is None and chunk.get("usage"):
             usage = chunk["usage"]
             holder["usage"] = usage
@@ -10956,7 +11286,7 @@ def _responses_completed_quiet(holder, model=""):
             "id": holder.get("id") or "resp_lenient",
             "object": "response",
             "status": "completed",
-            "model": model or "",
+            **_response_model_identity(model, holder.get("resolved_model")),
             "output": ([{"type": "message", "role": "assistant",
                           "content": [{"type": "output_text", "text": text}]}]
                         if text else []),
@@ -11309,9 +11639,17 @@ class Handler(BaseHTTPRequestHandler):
         三处请求入口（chat / responses / anthropic messages）**共用本方法**——
         新增入口必须一并挂上，否则会出现「chat 被拦、别的协议绕过」的缺口。
         """
-        return (self._cross_realm_error(model, realm)
-                or self._banned_model_error(model)
-                or self._key_model_error(model))
+        blocked = (self._cross_realm_error(model, realm)
+                   or self._banned_model_error(model)
+                   or self._key_model_error(model))
+        if blocked:
+            return blocked
+        # Fail before opening a billed request, including web-tools/bridges.
+        try:
+            resolve_request_model(model, realm=realm)
+        except ValueError as exc:
+            return str(exc)
+        return None
 
     def _apply_context_header(self, target):
         """把 X-QD-Context 请求头写进将传给 build_qoder_body 的 payload（#106）。
@@ -11579,6 +11917,7 @@ class Handler(BaseHTTPRequestHandler):
                 "accounts_ready": POOL.count_ready() if POOL else 0,
                 "api_key_required": bool(API_KEY),
                 "risk": risk_snapshot(),
+                "queue_observation": queue_observation_snapshot(),
                 "env": env_report(),
                 "quality": quality_snapshot(),
                 "image_preflight": qoder_images.status(),
@@ -12563,6 +12902,48 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_admin(self, path, payload):
         if not isinstance(payload, dict):
             return self._error(400, "expected a JSON object", "invalid_request_error")
+        if path == "/admin/shutdown":
+            # 关闭网关：面板会话（已在 do_POST 校验）+ 本机 + 显式 confirm。
+            # 与 /update/apply 同一套闸门；动作本身不可撤销，所以要求 confirm
+            # 为布尔 true，而不是任何真值（裸 POST 不能关掉网关）。
+            if SHUTDOWN_DISABLED:
+                return self._error(403, "shutdown is disabled "
+                                        "(QD_SHUTDOWN_DISABLE=1)",
+                                   "invalid_request_error")
+            # Local reverse proxies must not silently turn remote users into
+            # local operators. Ignore spoofed values; reject proxy provenance
+            # altogether unless remote shutdown was explicitly enabled.
+            proxy_headers = ("Forwarded", "X-Forwarded-For", "X-Real-IP",
+                             "CF-Connecting-IP")
+            if not _shutdown_allow_remote() and any(
+                    name in self.headers for name in proxy_headers):
+                return self._error(403, "shutdown rejects forwarded requests "
+                                        "(set QD_SHUTDOWN_ALLOW_REMOTE=1 to allow)",
+                                   "invalid_request_error")
+            if not _shutdown_allow_remote() and not _is_loopback(
+                    (self.client_address or ["?"])[0]):
+                return self._error(403, "shutdown is loopback-only "
+                                        "(set QD_SHUTDOWN_ALLOW_REMOTE=1 to allow)",
+                                   "invalid_request_error")
+            if payload.get("confirm") is not True:
+                return self._error(400, "confirm must be true "
+                                        "(body: {\"confirm\": true})",
+                                   "invalid_request_error")
+            try:
+                scheduled = schedule_shutdown()
+            except Exception as exc:
+                log("shutdown: could not start worker: %s" % exc, level="WARN", tag="system")
+                return self._error(503, "could not start shutdown worker; retry",
+                                   "server_error")
+            if not scheduled:
+                return self._error(409, "no active listener in this process "
+                                        "(already shutting down?)",
+                                   "invalid_request_error")
+            log("panel: shutdown requested by %s - stopping after this response"
+                % ((self.client_address or ["?"])[0]), level="WARN", tag="system")
+            return self._json(200, {"ok": True, "stopping": True,
+                                    "restart_hint":
+                                        shutdown_plan_info()["restart_hint"]})
         if path == "/admin/routing/save":
             try:
                 config = qoder_routing.save_config(ACCOUNTS_DIR,
@@ -12682,11 +13063,17 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_diag_queue(self, payload):
         # issue #139：上游排队（10605）诊断——一次最小探测，把业务码、
         # retryAfterSeconds、queueCount 与机器身份来源一起回显。
-        # 目的：让用户能自己区分「上游模型排队」与「账号/身份被针对」。
+        # 排队字段只作观测，不据此断言容量、账号或身份被针对。
         model = str((payload or {}).get("model") or "").strip() or "auto"
         realm = (payload or {}).get("realm") or self._request_realm()
         uid = str((payload or {}).get("uid") or "").strip()
-        acc = POOL.get(uid) if uid else None
+        acc = POOL.get(uid) if uid and POOL else None
+        if uid and acc is None:
+            return self._error(404, "no such account")
+        if realm is not None and realm not in ("cn", "intl"):
+            return self._error(400, "invalid realm")
+        if acc is not None and realm is not None and acc.realm != realm:
+            return self._error(400, "account realm does not match requested realm")
         probe = {
             "model": model,
             "messages": [{"role": "user", "content": "ping"}],
@@ -12696,23 +13083,36 @@ class Handler(BaseHTTPRequestHandler):
         out = {"ok": True, "model": model, "realm": realm,
                "account": (acc.uid[:8] if acc else None),
                "code": None, "kind": "", "retry_after": None,
-               "queue_count": None, "detail": "", "hint": ""}
+               "queue_count": None, "queue_type": "unknown",
+               "service_available": None, "reason": "unknown",
+               "detail": "", "hint": ""}
         t0 = time.time()
+        probe_ctx = {"_queue_probe_once": True}
         try:
             resp, used, _ = open_upstream(
                 probe, target_realm=realm,
-                only_account=acc if acc else None)
+                only_account=acc if acc else None,
+                usage_ctx=probe_ctx)
+            out["account"] = used.uid[:8] if used else out["account"]
+            out["realm"] = used.realm if used else realm
+            acc = used or acc
             try:
-                resp.read(2048)
-            except Exception:
-                pass
-            resp.close()
+                holder = {"_queue_probe_once": True}
+                aggregate_stream(resp, model, holder=holder)  # HTTP 200 is not success
+                if not holder.get("_upstream_finished"):
+                    raise UpstreamStatus(502, "upstream ended without a completed response")
+            finally:
+                resp.close()
             out["code"] = 200
             out["kind"] = "ok"
             out["account"] = used.uid[:8] if used else out["account"]
         except UpstreamStatus as exc:
+            acc = probe_ctx.get("_queue_probe_account") or acc
+            if acc is not None:
+                out["account"], out["realm"] = acc.uid[:8], acc.realm
             detail = str(getattr(exc, "detail", "") or "")
             out["code"] = exc.status
+            out["kind"] = "error"
             out["detail"] = detail[:400]
             out["hint"] = _quota_hint(detail)
             if "10605" in detail or "isQueued" in detail:
@@ -12739,12 +13139,16 @@ class Handler(BaseHTTPRequestHandler):
             out["identity_source"] = "native" if _native else "derived"
         except Exception:
             out["identity_source"] = "unknown"
+        out["queue_observation"] = queue_observation_snapshot()
         if out["kind"] == "queued":
+            fields = queue_fields(detail) or {}
+            out.update(fields)
+            out["detail"] = ""  # never expose arbitrary provider body in queue telemetry
             _cnt = out.get("queue_count")
-            out["advice"] = ("上游模型排队中（10605）。这与 Key/账号凭证无关："
-                             "官方客户端同一时刻也可能排队，只是它不提示。"
-                             "可换模型或换区域重试；也可设 QD_QUEUE_WAIT_MODE=fast "
-                             "让请求立即返回 429 而不是等待。")
+            out["advice"] = ("上游排队原因未确认；p4 与 serviceAvailable:true 不足以确认风控或容量。"
+                             "请按 retryAfterSeconds 退避并避免无限重试，使用官方客户端做同账号同时间对照，"
+                             "必要时向上游支持确认。QD_QUEUE_WAIT_MODE=fast 仅改变本地等待策略，"
+                             "初始排队快速返回 503，不会解除限制。")
             if _cnt:
                 out["advice"] += " 当前队列长度约 %d。" % _cnt
         elif out["kind"] in ("exhausted", "daily"):
@@ -13214,7 +13618,7 @@ class Handler(BaseHTTPRequestHandler):
                                    else "disabled"))
             return self._json(200, {"account": updated})
         if path == "/accounts/weight":
-            # 账号权重：0 = 恢复默认 1.0；只影响选号分摊，不动凭证。
+            # 账号权重（0 = 恢复默认 1.0）：只影响选号分摊，不动凭证。
             uid = str(payload.get("uid") or "").strip()
             if not uid:
                 return self._error(400, "uid required")
@@ -13444,17 +13848,10 @@ class Handler(BaseHTTPRequestHandler):
                         self._sse_write(frame)
                 except (BrokenPipeError, ConnectionResetError,
                         ConnectionAbortedError):
-                    wall = int((time.time() - t_start) * 1000)
-                    record_usage(model, holder.get("usage"), stream=True,
-                                 elapsed_ms=wall, ttft_ms=first_ms,
-                                 gen_ms=(wall - first_ms)
-                                 if first_ms is not None else None,
-                                 fp=fp, account=account.uid,
-                                 effort=usage_ctx.get("effort"),
-                                 effort_requested=usage_ctx.get("effort_requested"),
-                                 key_id=self._key_id_for_usage(),
-                                 realm_reason=usage_ctx.get("realm_reason", ""),
-                                 session_trace=usage_ctx)
+                    record_error(model, 499, "client disconnected while writing SSE",
+                                 elapsed_ms=int((time.time() - t_start) * 1000),
+                                 stream=True, account=account.uid if account else None,
+                                 key_id=self._key_id_for_usage())
                     return
                 except UpstreamStatus as exc:
                     # Anthropic 侧不重开（见 docstring）：直接给终态 error 事件。
@@ -13633,7 +14030,8 @@ class Handler(BaseHTTPRequestHandler):
             self._sse_begin()
             for frame in stream_responses_events(
                     _chat_chunks_iter(obj, model), model,
-                    {"usage": obj.get("usage")}):
+                    {"usage": obj.get("usage"),
+                     "resolved_model": obj.get("resolved_model")}):
                 self._sse_write(clean_responses_frame(frame))
             return
         if not want_stream:
@@ -13797,17 +14195,10 @@ class Handler(BaseHTTPRequestHandler):
                             break
                         except (BrokenPipeError, ConnectionResetError,
                                 ConnectionAbortedError):
-                            wall = int((time.time() - t_start) * 1000)
-                            record_usage(model, holder.get("usage"), stream=True,
-                                         elapsed_ms=wall, ttft_ms=first_ms,
-                                         gen_ms=(wall - first_ms)
-                                         if first_ms is not None else None,
-                                         fp=fp, account=account.uid,
-                                         effort=usage_ctx.get("effort"),
-                                         effort_requested=usage_ctx.get("effort_requested"),
-                                         key_id=self._key_id_for_usage(),
-                                         realm_reason=usage_ctx.get("realm_reason", ""),
-                                         session_trace=usage_ctx)
+                            record_error(model, 499, "client disconnected while writing SSE",
+                                         elapsed_ms=int((time.time() - t_start) * 1000),
+                                         stream=True, account=account.uid if account else None,
+                                         key_id=self._key_id_for_usage())
                             return
                         except UpstreamStatus as exc:
                             _handle_envelope_account_cooldown(account, exc, model=model, session_key=session_key)
@@ -13976,6 +14367,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, result)
 
     def do_POST(self):
+        try:
+            return self._do_POST()
+        finally:
+            # Every streaming return/error path must terminate HTTP chunk framing.
+            # Idempotent; a disconnected downstream socket cannot be repaired.
+            self._sse_end()
+
+    def _do_POST(self):
         # #26：同 do_GET —— 每次请求入口清空，避免 keep-alive 复用实例时把上一次
         # chat 的出口/原因带到别的响应上。
         self.realm_used = ""
@@ -14385,18 +14784,10 @@ class Handler(BaseHTTPRequestHandler):
                             break
                         except (BrokenPipeError, ConnectionResetError,
                                 ConnectionAbortedError):
-                            # 客户端断开；上游已产出的部分照常记账。
-                            wall = int((time.time() - t_start) * 1000)
-                            record_usage(model, holder.get("usage"), stream=True,
-                                         elapsed_ms=wall, ttft_ms=first_ms,
-                                         gen_ms=(wall - first_ms)
-                                         if first_ms is not None else None,
-                                         fp=fp, account=account.uid,
-                                         effort=usage_ctx.get("effort"),
-                                         effort_requested=usage_ctx.get("effort_requested"),
-                                         key_id=self._key_id_for_usage(),
-                                         realm_reason=usage_ctx.get("realm_reason", ""),
-                                         session_trace=usage_ctx)
+                            record_error(model, 499, "client disconnected while writing SSE",
+                                         elapsed_ms=int((time.time() - t_start) * 1000),
+                                         stream=True, account=account.uid if account else None,
+                                         key_id=self._key_id_for_usage())
                             return
                         except UpstreamStatus as exc:
                             _handle_envelope_account_cooldown(account, exc, model=model, session_key=session_key)
@@ -14594,7 +14985,7 @@ def _keepalive_send(entry):
 
 def main():
     global POOL, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT, USAGE_DIR, USAGE_LOG, \
-        USAGE_SUMMARY, SCHEDULER
+        USAGE_SUMMARY, SCHEDULER, _ACTIVE_SERVER
     API_KEY_GENERATED = False
     ap = argparse.ArgumentParser(
         description="Qoder (qoder.com.cn / qoder.com) -> OpenAI-compatible proxy")
@@ -14949,6 +15340,10 @@ def main():
     log("listening  : http://%s:%d/v1  (api key: %s)"
         % (args.host, args.port, "on" if API_KEY else "off"))
     log("dashboard  : http://%s:%d/" % (args.host, args.port))
+    # 面板「关闭网关」只允许作用于本进程真正在服务的监听器：把它登记下来，
+    # schedule_shutdown() 才有对象可关（子进程/测试里会是 None）。
+    global _ACTIVE_SERVER
+    _ACTIVE_SERVER = server
 
     # 启动预热（后台线程，不阻塞监听）：拉一次动态模型清单并注册显示名，
     # 让「客户端跳过 /v1/models 直接发新模型名」的第一条请求也能解析对
