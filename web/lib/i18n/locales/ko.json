@@ -316,6 +316,8 @@
     "realtimeTrend": "최근 3분",
     "realtimePeak": "최대 {n}",
     "realtimeCapacity": "한도 {c}",
+    "realtimeClientInflight": "클라이언트 처리 중 {n}",
+    "realtimeUnlimited": "무제한",
     "realtimeAverage": "3분 평균 {v}",
     "realtimeUnavailable": "업스트림에 연결할 수 없음",
     "customRange": "사용자 지정",

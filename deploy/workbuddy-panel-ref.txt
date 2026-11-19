@@ -559,3 +559,50 @@ d78131bab8eda765640533098f79a58d4151452d
 c54c51767d19c31dc149f3ff9cc21be2c7503dce
 4f6adc0e2649dea05b309d3c6ba6c41c05a28ee7
 0a2a55fb2603c2b2a79323ac25341a4ebab723f7
+
+# ---- 2026-11 第十二批：面板仓 d780cab → 2b6b386（panel / Web / Docker）----
+#      这一批没有 Go upstream/ 改动，全部落在面板与部署文件；上游与本地无共享
+#      历史，按提交逐项重写而不是 cherry-pick。
+#
+#      2959b08 发版前审计：db._ensure_keys_hash_unique（idx_keys_hash 唯一索引，
+#      迁移时先删重复只留最早一行）；keysvc.TokenConflict（IntegrityError 包装，
+#      ValueError 子类）；routers/keys 409/400 分流；_peaks 改 SQL 窗口函数
+#      （区间 [ts-latency, ts)）；RealtimeStatsStrip 小修。开机自启触发点本地
+#      已用 OnHandleCreated 重写实现（比上游多一个「只排队一次」保护），未重取。
+#      4298544 弹窗内模型清单浮层：collisionBoundary 指向 Portal 落点
+#      （portalContainer），collisionPadding=8，避免被 DialogContent 裁掉。
+#      516dd70 客户端在途：新增 server/inflight.py（进程内计数 + 下溢告警），
+#      GatewayInFlightMiddleware 覆盖 /v1/、/v2/、/responses；接口出
+#      client_inflight，实时条 1 秒刷新并作为小字展示。
+#      ceb0324 实时并发口径：区间方向改为 [ts-latency, ts)；桶内取最大重叠；
+#      _per_account_limit 返回 {cn, global}，capacity 按 realm 分别乘；cn 的
+#      max_in_flight=0 表示不限（capacity=None，界面显示「不限」）。
+#      f078747 上游 /status 短缓存：成功 2 秒 / 失败 15 秒，挡住 1 秒轮询风暴。
+#      e2f2627 审计修：busy 守卫按 owner ticket 释放 + 换时段强制请求；
+#      在途补 /v2 与裸 /responses；_series 先按桶归拢再求重叠 + 1 秒结果缓存。
+#      211f233 代理审计：inflight 下溢告警；pgsync 字节预算雏形；i18n 微调。
+#      未取该提交在 _per_account_limit 里遗留的、return 之后的死代码。
+#      080a5c3 PG 备份失败退避 + 读超时：LAST_ATTEMPT_KEY / FAIL_COUNT_KEY，
+#      尝试时刻在 start_job 启动线程之前写（硬杀也不丢）；_backoff_factor 指数
+#      退避封顶 8×；连接加 tcp_user_timeout + keepalive 三件套。
+#      注意：上游此提交写的 socket_timeout 是 psycopg2 参数，psycopg3 会在建连
+#      前抛 ProgrammingError；本地未采用，只取 libpq 原生参数。
+#      07b39c0 PG 备份按字节预算装批：BATCH_BYTES=4MiB，_row_size 用
+#      sys.getsizeof（str 按真实存储宽度），_row_batches 逐行 fetchone。
+#      d2737dd Docker 时区：本地镜像仍是 Debian-slim，不跟进 ad1dae5 的 Alpine
+#      重写（基座、静态 docker CLI、compose 插件与构建阶段都不同，另属一件事）；
+#      但时区问题同源，已修：安装 tzdata、新增 ARG TZ、compose 的 build.args.TZ
+#      与 environment.TZ 对齐，避免 localtime 静默退回 UTC。
+#      未取：c2cc131（未合并分支「账号回填误报」）—— 本地诊断早已按 pending
+#      账号判断，不依赖 filled 标记；仅 CHANGELOG / 发版提交（5e59b92 / c3b7c29 /
+#      2b6b386）不取。
+2959b082632b786863cc3a28fd018494418695da
+42985443ca4d6cc738b52acf77625c3732ec7f6f
+516dd7000e1cd553ac183bbd73817f92812b4e80
+ceb03248293d6c0d1a0acb4a8903879d951e19b5
+f07874713a8f32f40174e6758d3a1c03fff45354
+e2f262726a715248ffbb44094b65f87e26c95d39
+211f2330ba60f88035962e31b0804f0ef8d9e0c8
+080a5c31e5a4479cadd7a86cc1f3409da01349e1
+07b39c0cb807692209eb014dba19f06d7ed2ba68
+d2737dd4c9341805cc6f47ed244e72cfa5adc9ed

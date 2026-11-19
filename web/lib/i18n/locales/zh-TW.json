@@ -316,6 +316,8 @@
     "realtimeTrend": "近 3 分鐘",
     "realtimePeak": "峰值 {n}",
     "realtimeCapacity": "上限 {c}",
+    "realtimeClientInflight": "用戶端在途 {n}",
+    "realtimeUnlimited": "不限",
     "realtimeAverage": "3 分鐘均 {v}",
     "realtimeUnavailable": "上游無法連線",
     "customRange": "自訂",

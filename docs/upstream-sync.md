@@ -99,7 +99,7 @@ git commit -m "upstream: 说清这次改了什么"
 除 misakano 面板仓外，2026-11 还有三个参考源。
 
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
-已核对的范围是 `80b4b21`（v2.11.10）→ `d780cab`：
+已核对的范围是 `80b4b21`（v2.11.10）→ `2b6b386`：
 
 | 区间 | 取到的能力 |
 |---|---|
@@ -107,12 +107,34 @@ git commit -m "upstream: 说清这次改了什么"
 | `8b5a4df4` → `48ba599b`（v2.11.15） | 静态资源 gzip、密钥每日 Token 限额、账号拖拽排序、单账号刷新积分 / 到期角标 / 趋势积分线、弹窗浮层滚轮、Docker data 卷命名卷开关、`/v1/tools/search` 透传 |
 | `48ba599b` → `f32521fd`（v2.11.17） | `/v1/tools/search` 全参数入站校验；`/v1`、`/v2` 数据面 CORS 面板可配（含与 `WB_CORS_ORIGINS` 共存去重、发版前审计的 8 处修正） |
 | `f32521fd` → `d780cab` | Responses 透传 `parallel_tool_calls`；统计页顶部实时并发 / RPM 指标条；账号保护预警移到「设置 → 上游」；`/v1/usage` 积分按小数返回；「限时免费」判定统一；自定义密钥形态（`WB_KEY_CUSTOM_ENABLED`） |
+| `d780cab` → `2b6b386` | PG 备份按字节预算装批 + 失败退避 + keepalive；实时指标口径纠错（区间方向 / 桶内最大重叠 / 按 realm 取上限 / `/status` 短缓存）；客户端在途计数与 1 秒刷新；密钥 hash 唯一索引 + 并发 409；弹窗模型浮层碰撞边界；Docker 时区修正 |
 
-这四批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
+这五批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
 国际版 agenttool 搜索、上游自己的 CI / 发版提交同样未取。逐项清单与
 「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批、第五批、
-第七批段落里；Web 搜索的协议与错误语义单独写在
+第七批、第十二批段落里；Web 搜索的协议与错误语义单独写在
 [web-search-passthrough.md](web-search-passthrough.md)。
+
+> **面板批（2026-11-19，`d780cab` → `2b6b386`）**：这一批是 panel / Web /
+> Docker 改动，没有 Go `upstream/` 改动。落点与三处有意偏离：
+>
+> - **实时指标**按 `[ts - latency, ts)` 计并发（`ts` 是请求**结束**时刻）；
+>   桶内取最大重叠而不是命中数；`capacity` 按 realm 分别乘
+>   `max_in_flight` / `max_in_flight_global`；`cn` 的 0 表示「不限」，接口返回
+>   `null`、界面显示「不限」。上游 `211f233` 在 `_per_account_limit` 里留了一段
+>   永远执行不到的旧 `pick` 调用，**未取**。
+> - **PG 备份额度**取「行数 + 4 MiB 字节」双上限与失败指数退避。`211f233` 曾用
+>   `socket_timeout`，那是 psycopg2 的参数、psycopg3 会在建连前直接抛
+>   `ProgrammingError`；本地改用 `tcp_user_timeout` + keepalive 三件套（并有静态守卫）。
+> - **Docker** 只取时区修正，不跟进 Alpine 重写（`ad1dae5` + `d2737dd`）：
+>   本地镜像是 Debian-slim 的自定义构建（docker CLI 静态包、compose 插件、前端
+>   构建阶段），整体换基座属于另一件事。时区问题两边同源，已在本仓修掉：
+>   安装 `tzdata`、`build.args.TZ` 与 `environment.TZ` 对齐。
+>
+> 上游未合并分支 `fix/account-backfill-false-alarm`（`c2cc131`）核对后**已覆盖**：
+> 本地账号诊断早就是「按 pending 账号判断」，不依赖旧的 `filled` 标记，跳过。
+> 开机自启触发点（`2959b08` 的 `MainForm.cs`）本地已用 `OnHandleCreated` 重写
+> 实现，并比上游多一个「只排队一次」的保护，不重复移植。
 
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：

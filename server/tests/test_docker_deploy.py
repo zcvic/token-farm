@@ -646,6 +646,31 @@ class DockerAssetsTest(unittest.TestCase):
             self.assertRegex(df, rf'(?m)^ARG\s+{name}',
                              f'Dockerfile 未声明 {name} —— compose 传了也会被忽略')
 
+    def test_timezone_matches_between_compose_and_dockerfile(self) -> None:
+        """构建期与运行期的 TZ 必须一致，且镜像里要真的有 tzdata。
+
+        按天统计、SQL 的 `'localtime'` 分桶、密钥每日额度复位都依赖本地时区。
+        只在运行期设 `TZ` 而没有时区数据时，localtime 会**静默退回 UTC**：
+        「时区写着 +8、统计却按 UTC 分天」，不报任何错。因此：
+          · compose 的 build.args.TZ 与 environment.TZ 要一致；
+          · Dockerfile 必须声明 ARG TZ 并安装 tzdata。
+        """
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        service = dc['services']['token-farm']
+        build_tz = ((service.get('build') or {}).get('args') or {}).get('TZ')
+        env_tz = (service.get('environment') or {}).get('TZ')
+        self.assertTrue(build_tz, 'compose 没有给 build.args 传 TZ')
+        self.assertEqual(build_tz, env_tz,
+                         '构建期与运行期的 TZ 不一致：两者必须相同')
+
+        df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+        self.assertRegex(df, r'(?m)^ARG\s+TZ',
+                         'Dockerfile 未声明 ARG TZ —— compose 传了也会被忽略')
+        self.assertIn('tzdata', df, '没有 tzdata 的话 TZ 会静默退回 UTC')
+        self.assertIn('/usr/share/zoneinfo', df,
+                      '需要按 TZ 落 /etc/localtime，否则进程仍按 UTC 计日')
+
     def test_dockerfile_structure_checker_passes(self) -> None:
         """跑一遍 Dockerfile 结构自检（指令拼写 / 阶段引用 / shell 配平）。
 

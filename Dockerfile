@@ -139,6 +139,22 @@ ENV PYTHONUNBUFFERED=1 \
 # 自动改用阿里云镜像重试；两者都失败才让构建失败，并把原因写清楚。
 ARG DEBIAN_MIRROR=""
 
+# 可选：容器时区（留空 = 保持镜像默认的 UTC）。
+#
+# 为什么需要：本项目的「按天」口径全部依赖**本地时区** —— 按天统计的
+# `db.day_of()`（`time.localtime()`）、SQL 里的 `'localtime'` 修饰符分桶、
+# 密钥的每日 Token 限额在本地日期零点复位。而 Debian slim 不自带 tzdata：
+# 只在运行期设 `TZ=Asia/Shanghai` 时，glibc 找不到 zoneinfo 会**静默退回
+# UTC**，表现是「时区写着 +8、统计却按 UTC 分天」，且不报任何错。
+#
+# 这里的 TZ 与 docker-compose.yml 的 `environment.TZ` 必须一致：
+#   · 构建期（这个参数）决定镜像里有没有那份时区数据、/etc/localtime 指向哪；
+#   · 运行期（environment）只是把 TZ 传进进程环境。
+# 不传也能用，只是容器按 UTC 计日。
+#
+#   docker compose build --build-arg TZ=Asia/Shanghai
+ARG TZ=""
+
 # git：一键更新要 git fetch；curl：健康检查与容器健康探针
 # openssh-client：发布包验签（ssh-keygen -Y verify 需要 OpenSSH 8.0+）
 # docker-cli：让「保存设置后重载上游」「上游日志」「更新上游」在本容器内可用
@@ -164,8 +180,8 @@ RUN set -eu; \
     }; \
     install_pkgs() { \
         apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update \
-        && apt-get install -y --no-install-recommends \
-            git curl ca-certificates openssh-client; \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git curl ca-certificates openssh-client tzdata; \
     }; \
     if [ -n "${DEBIAN_MIRROR}" ]; then \
         echo "apt: 使用指定软件源 ${DEBIAN_MIRROR}"; \
@@ -179,6 +195,13 @@ RUN set -eu; \
         set_mirror mirrors.aliyun.com; \
         install_pkgs; \
         echo "apt: 改用国内镜像后安装成功（如需固定，构建时传 DEBIAN_MIRROR 或写入 compose build.args）"; \
+    fi; \
+    if [ -n "${TZ}" ] && [ -f "/usr/share/zoneinfo/${TZ}" ]; then \
+        ln -sf "/usr/share/zoneinfo/${TZ}" /etc/localtime; \
+        echo "${TZ}" > /etc/timezone; \
+        echo "tz: 容器时区设为 ${TZ}"; \
+    elif [ -n "${TZ}" ]; then \
+        echo "tz: 未找到时区 ${TZ}（/usr/share/zoneinfo 下没有），保持 UTC" >&2; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 # docker-cli 走官方静态包（Debian 仓库里的 docker.io 会拖进 dockerd，太重）。

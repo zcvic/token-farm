@@ -343,6 +343,8 @@
     "realtimeTrend": "Last 3 minutes",
     "realtimePeak": "Peak {n}",
     "realtimeCapacity": "Capacity {c}",
+    "realtimeClientInflight": "Client in flight {n}",
+    "realtimeUnlimited": "Unlimited",
     "realtimeAverage": "3-min avg {v}",
     "realtimeUnavailable": "Upstream unreachable",
     "customRange": "Custom",
