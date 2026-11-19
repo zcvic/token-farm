@@ -21,6 +21,11 @@
 首条 user 消息的哈希。**不用 `user`**：它通常是终端用户而不是会话维度，单用户
 部署里恒定，拿它当键会让所有会话永久粘在第一个目标上。
 
+`content_key()` 是另一条独立的兜底：不看任何显式键，只哈希
+「instructions / system + 首条 user」。显式键未命中时用它兜底，避免客户端
+每轮换 `prompt_cache_key` 时同一段对话退化成纯轮询。用内容键命中时不写入
+新的显式键，否则「每请求一个随机键」的客户端会把绑定表撑爆。
+
 键长度受客户端控制，所以超长键会转成定长哈希再入表；绑定表本身有 TTL 与容量
 上限，过期 / 超限按最早到期淘汰。
 """
@@ -32,8 +37,9 @@ import time
 
 # 30 分钟没有新请求的会话视为结束，下一次重新按权重选。
 AFFINITY_TTL = 30 * 60
-# 高基数会话的容量上限，防止进程内存被撑大。
-AFFINITY_MAX = 2048
+# 高基数会话的容量上限，防止进程内存被撑大。组合会为同一会话同时记
+# 「显式键 + 内容兜底键」两条，容量按会话数的一半估算仍够用。
+AFFINITY_MAX = 4096
 # 超长会话键改成定长哈希（仍然稳定），短键原样保留便于排查。
 AFFINITY_KEY_MAX = 96
 
@@ -109,6 +115,49 @@ def affinity_key(body: object) -> str:
     return ''
 
 
+def content_key(body: object) -> str:
+    """**不看显式会话 id**，只按会话内容派生一个稳定键。
+
+    用在显式键未命中时的兜底：有些客户端每轮都换一个 `prompt_cache_key`
+    （或把随机串塞进去），只按显式键选路会让同一段对话退化成纯轮询，每轮都
+    换成员、前缀缓存全部作废。这里用「instructions / system + 首条 user」做
+    内容指纹——后续轮次只在末尾追加消息，这个前缀不变，因此跨请求稳定。
+
+    与 `affinity_key` 的 `messages:` 回落不同：它把 system / instructions
+    也算进去，命中范围更窄，不容易把不同系统提示的会话混在一起。
+
+    取不到内容时返回空串（调用方按普通选路处理）。
+    """
+    if not isinstance(body, dict):
+        return ''
+    parts: list[str] = []
+    instructions = body.get('instructions')
+    if isinstance(instructions, str) and instructions.strip():
+        parts.append('instructions:' + instructions.strip())
+
+    seen_user = False
+    messages = body.get('messages')
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get('role')
+            text = _content_text(message.get('content')).strip()
+            if not text:
+                continue
+            if role in ('system', 'developer'):
+                parts.append(f'{role}:{text}')
+            elif role == 'user':
+                parts.append(f'user:{text}')
+                seen_user = True
+            if seen_user:
+                break
+    if not parts:
+        return ''
+    digest = hashlib.sha256('\n'.join(parts).encode('utf-8', 'ignore')).hexdigest()
+    return f'content:{digest[:32]}'
+
+
 def header_key(value: str) -> str:
     """把会话键转成能安全放进 HTTP 头（ASCII）的值。
 
@@ -135,7 +184,8 @@ class SessionAffinity:
 
     目标是什么由调用方决定（组合成员键 / Trae 账号 uid）。`get()` 会顺带把
     活跃会话的到期时间往后推；目标被停用或失败切换成功时调用方 `bind()` 改绑，
-    目标彻底不可用时 `unbind()`。
+    目标彻底不可用时 `unbind()`。只想判断「当前绑的是谁」、又不希望制造一次
+    命中续期时用 `peek()`。
 
     加锁是为了兼容「同一进程里多个事件循环 / 线程」的部署形态：表操作只有
     dict 读写，锁的代价可以忽略。
@@ -172,6 +222,21 @@ class SessionAffinity:
                 self._bindings.pop(key, None)
                 return None
             self._bindings[key] = (target, now + self.ttl)
+            return target
+
+    def peek(self, key: str) -> str | None:
+        """取绑定的目标但**不续期**：用于判断「当前绑的是谁」，不制造命中。"""
+        if not key:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            item = self._bindings.get(key)
+            if item is None:
+                return None
+            target, expires = item
+            if expires <= now:
+                self._bindings.pop(key, None)
+                return None
             return target
 
     def bind(self, key: str, target: str) -> None:

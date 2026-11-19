@@ -139,10 +139,11 @@ class _FakeAdapter:
 
 class ComboChatTest(unittest.TestCase):
     def setUp(self) -> None:
-        # 选路游标与粘性绑定都是进程内状态；不重置的话相邻用例会从上一次的
-        # 位置继续轮询 / 直接命中上一条用例留下的绑定。
+        # 选路游标、粘性绑定与成员冷却都是进程内状态；不重置的话相邻用例会
+        # 从上一次的位置继续轮询 / 直接命中上一条用例留下的绑定。
         combo_adapter._currents.clear()
         combo_adapter._affinity.clear()
+        combo_adapter._cooldowns.clear()
 
     def _run(self, fake_map: dict[str, _FakeAdapter], *,
              body: dict | None = None,
@@ -228,16 +229,85 @@ class ComboChatTest(unittest.TestCase):
         self.assertEqual(combo_adapter._currents['fast'], before,
                          '粘性命中不该推进 SWRR 游标（长会话会把比例带偏）')
 
-    def test_failure_switch_rebinds_session(self) -> None:
-        p1 = _FakeAdapter(PlatformError('限流', status=429, code='rate_limited'))
+    def _bound(self, key: str = 'conv-x') -> str | None:
+        return combo_adapter._affinity.get(
+            combo_adapter._binding('fast', f'prompt_cache_key:{key}'))
+
+    def test_transient_failure_fails_over_without_rebinding(self) -> None:
+        p1 = _FakeAdapter(PlatformChat(payload={'ok': True}),
+                          PlatformError('限流', status=429, code='rate_limited'),
+                          PlatformChat(payload={'ok': True}))
         p2 = _FakeAdapter(*[PlatformChat(payload={'ok': True}) for _ in range(3)])
         body = {'prompt_cache_key': 'conv-x'}
-        first = self._run({'p1': p1, 'p2': p2}, body=body)
-        self.assertEqual(first.model, 'p2/m2')
+        self.assertEqual(self._run({'p1': p1, 'p2': p2}, body=body).model, 'p1/m1')
+        second = self._run({'p1': p1, 'p2': p2}, body=body)
+        self.assertEqual(second.model, 'p2/m2', '绑定成员冷却时先切到别的成员')
+        self.assertEqual(p1.calls, ['m1', 'm1'], '第二次失败后不再重复探测')
+        self.assertEqual(self._bound(), 'p1/m1',
+                         '瞬时失败不能把会话永久搬到别的平台')
+        # 冷却结束后回到原成员：这才是缓存能持续命中的关键。
+        combo_adapter._cooldowns.clear()
+        third = self._run({'p1': p1, 'p2': p2}, body=body)
+        self.assertEqual(third.model, 'p1/m1')
+        self.assertEqual(p1.calls, ['m1', 'm1', 'm1'])
+
+    def test_permanent_failure_rebinds_session(self) -> None:
+        p1 = _FakeAdapter(PlatformChat(payload={'ok': True}),
+                          PlatformError('模型下线', status=404,
+                                        code='model_not_found'))
+        p2 = _FakeAdapter(*[PlatformChat(payload={'ok': True}) for _ in range(2)])
+        body = {'prompt_cache_key': 'conv-x'}
+        self.assertEqual(self._run({'p1': p1, 'p2': p2}, body=body).model, 'p1/m1')
         second = self._run({'p1': p1, 'p2': p2}, body=body)
         self.assertEqual(second.model, 'p2/m2')
-        self.assertEqual(p1.calls, ['m1'],
-                         '失败切换成功后应改绑，否则每轮都先撞一次坏成员')
+        self.assertEqual(self._bound(), 'p2/m2',
+                         '凭据 / 模型确定不可用时应改绑，避免每轮白试')
+
+    def test_third_member_is_reached_when_first_two_fail(self) -> None:
+        p1 = _FakeAdapter(PlatformError('挂了', status=503, code='platform_error'))
+        p2 = _FakeAdapter(PlatformError('也挂了', status=502, code='platform_error'))
+        p3 = _FakeAdapter(PlatformChat(payload={'ok': True}))
+        raw = [_combo(members=[_member('p1', 'm1'), _member('p2', 'm2'),
+                               _member('p3', 'm3')])]
+        outcome = self._run({'p1': p1, 'p2': p2, 'p3': p3}, raw=raw)
+        self.assertEqual(outcome.model, 'p3/m3',
+                         '前两个都故障时，健康的第三个成员仍应被尝试')
+        self.assertEqual(p3.calls, ['m3'])
+
+    def test_cooldown_skips_failing_member_for_other_sessions(self) -> None:
+        p1 = _FakeAdapter(PlatformError('挂了', status=503, code='platform_error'))
+        p2 = _FakeAdapter(*[PlatformChat(payload={'ok': True}) for _ in range(3)])
+        self._run({'p1': p1, 'p2': p2}, body={'prompt_cache_key': 'conv-a'})
+        other = self._run({'p1': p1, 'p2': p2},
+                          body={'prompt_cache_key': 'conv-b'})
+        self.assertEqual(other.model, 'p2/m2')
+        self.assertEqual(p1.calls, ['m1'], '冷却中的成员不参与新会话选路')
+
+    def test_affinity_can_be_disabled(self) -> None:
+        p1, p2 = self._pair()
+        body = {'prompt_cache_key': 'conv-off'}
+        with mock.patch.object(combo_module.runtime_settings,
+                               'session_affinity', lambda name: False):
+            first = self._run({'p1': p1, 'p2': p2}, body=body)
+            second = self._run({'p1': p1, 'p2': p2}, body=body)
+        self.assertNotEqual(first.model, second.model, '关掉粘性后按权重轮换')
+        self.assertIsNone(self._bound('conv-off'))
+
+    def test_rotating_prompt_cache_key_falls_back_to_content(self) -> None:
+        p1, p2 = self._pair()
+        messages = [{'role': 'user', 'content': '同一个会话的开头'}]
+        first = self._run({'p1': p1, 'p2': p2},
+                          body={'prompt_cache_key': 'k1',
+                                'messages': messages})
+        second = self._run({'p1': p1, 'p2': p2},
+                           body={'prompt_cache_key': 'k2',
+                                 'messages': messages})
+        self.assertEqual(first.model, second.model,
+                         '显式键每轮都变时，内容指纹应把会话留在同一成员')
+        self.assertIsNone(
+            combo_adapter._affinity.get(
+                combo_adapter._binding('fast', 'prompt_cache_key:k2')),
+            '兜底命中的新显式键不该写入绑定表（随机键会撑爆容量）')
 
     def test_disabled_bound_member_drops_affinity(self) -> None:
         p1, p2 = self._pair()

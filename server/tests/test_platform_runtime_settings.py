@@ -111,6 +111,23 @@ class DefaultsTest(_DbCase):
         self.assertTrue(caps['idle_timeout'])
         self.assertFalse(caps['max_accounts_try'])
 
+    def test_combo_only_exposes_session_affinity(self) -> None:
+        """组合是虚拟平台：没有自己的请求与账号，只应有粘性两个字段。
+
+        组合页的「会话粘性」弹窗直接读写 `/api/platforms/combo/settings`；
+        能力表多开或漏开一个字段，弹窗要么画不出来、要么保存时 400。
+        """
+        caps = runtime_settings.capabilities('combo')
+        self.assertTrue(caps['session_affinity'])
+        self.assertTrue(caps['session_affinity_ttl'])
+        self.assertFalse(caps['request_timeout'])
+        self.assertFalse(caps['max_accounts_try'])
+        values = runtime_settings.load('combo')
+        self.assertTrue(values['session_affinity'], '粘性默认开启')
+        self.assertEqual(values['session_affinity_ttl'], 30 * 60)
+        self.assertEqual(values['runtime_limits']['session_affinity_ttl'],
+                         {'min': 60, 'max': 12 * 3600})
+
 
 class SaveTest(_DbCase):
     def test_partial_update_keeps_other_fields(self) -> None:

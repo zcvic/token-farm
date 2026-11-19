@@ -55,6 +55,29 @@ class AffinityKeyTest(unittest.TestCase):
             self.assertEqual(sa.affinity_key(body), '',
                              f'{body!r} 不该被当成会话键')
 
+    def test_content_key_ignores_explicit_keys(self) -> None:
+        messages = [
+            {'role': 'system', 'content': 'you are helpful'},
+            {'role': 'user', 'content': 'hello'},
+            {'role': 'assistant', 'content': 'hi'},
+            {'role': 'user', 'content': 'next turn'},
+        ]
+        a = sa.content_key({'prompt_cache_key': 'k1', 'messages': messages})
+        b = sa.content_key({'prompt_cache_key': 'k2', 'messages': messages})
+        self.assertEqual(a, b, '显式键不该影响内容指纹')
+        self.assertTrue(a.startswith('content:'))
+
+    def test_content_key_is_stable_as_history_grows(self) -> None:
+        base = [{'role': 'user', 'content': 'hello'}]
+        longer = base + [{'role': 'assistant', 'content': 'hi'},
+                         {'role': 'user', 'content': 'next'}]
+        self.assertEqual(sa.content_key({'messages': base}),
+                         sa.content_key({'messages': longer}),
+                         '后续轮次只追加消息，内容指纹必须保持不变')
+
+    def test_content_key_requires_content(self) -> None:
+        self.assertEqual(sa.content_key({'prompt_cache_key': 'k'}), '')
+
     def test_long_key_is_bounded(self) -> None:
         """会话键长度不受客户端控制：超长键要哈希，否则绑定表能被撑爆。"""
         huge = 'x' * 100_000
@@ -106,6 +129,15 @@ class SessionAffinityTest(unittest.TestCase):
         self.assertEqual(table.get('s2'), 'uid-b')
         table.clear()
         self.assertEqual(len(table), 0)
+
+    def test_peek_does_not_extend_ttl(self) -> None:
+        table = sa.SessionAffinity()
+        table.bind('s1', 'uid-a')
+        expires = table._bindings['s1'][1]
+        self.assertEqual(table.peek('s1'), 'uid-a')
+        self.assertEqual(table._bindings['s1'][1], expires,
+                         'peek 只用于判断当前绑定，不该制造一次命中续期')
+        self.assertIsNone(table.peek('missing'))
 
     def test_capacity_evicts_oldest(self) -> None:
         table = sa.SessionAffinity(max_entries=3)

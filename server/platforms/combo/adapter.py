@@ -16,27 +16,47 @@
 
 ## 失败切换
 
-只换一次（最多两个成员）。组合的意义是分摊积分，不是无限重试：持续 5xx 时
-把每个成员都试一遍会让一次用户请求变成 N 次上游调用，既慢又可能把成员平台
-一起打挂。不可切换的错误（请求本身有问题，如参数非法 / 上下文超长）原样
-抛出——换一个平台同样会失败，只会把真实原因换成一句笼统的「全部失败」。
+一次请求最多尝试 3 个成员（含首选）。组合的意义是分摊积分，不是无限重试：
+持续 5xx 时把每个成员都试一遍会让一次用户请求变成 N 次上游调用，既慢又可能
+把成员平台一起打挂。不可切换的错误（请求本身有问题，如参数非法 / 上下文超长）
+原样抛出——换一个平台同样会失败，只会把真实原因换成一句笼统的「全部失败」。
+
+失败过的成员会进入**短冷却**：冷却期内选路直接跳过它，不再每轮先撞一次。
+冷却按连续失败次数指数退避（15 秒起，封顶 10 分钟）；429 优先采用上游给的
+`retry_after`。成功的成员立即解除冷却。3 个以上成员时也必须有第三次机会：
+只试两个成员会让「前两个故障、第三个健康」的组合持续 503。
 
 ## 会话粘性（prompt cache 亲和）
 
 上游的提示词缓存按**账号/平台**隔离，同一段对话换成员就等于缓存全部作废；
 而纯 SWRR 在等权两成员上几乎每轮换一次。所以第一个请求按权重选出成员后，
-把「会话键 → 成员」钉住（TTL 30 分钟），后续同一会话直接复用，不再推进
-SWRR 游标——否则一个长会话会把全局分配比例带偏。新会话才参与加权选路，
-整体比例仍由权重决定。会话键的提取见 `services/session_affinity.affinity_key`
-（`prompt_cache_key` → 会话 id → 首条 user 消息哈希）。
+把「会话键 → 成员」钉住（默认 TTL 30 分钟，可通过平台设置
+`platforms.combo.session_affinity` / `session_affinity_ttl` 关掉或调整时长），
+后续同一会话直接复用，不再推进 SWRR 游标——否则一个长会话会把全局分配比例
+带偏。新会话才参与加权选路，整体比例仍由权重决定。会话键的提取见
+`services/session_affinity.affinity_key`（`prompt_cache_key` → 会话 id →
+首条 user 消息哈希），显式键未命中时还会用 `content_key` 的内容指纹兜底。
+
+**绑定的成员只是「暂时」不可用时（429 / 5xx），本次请求会切到别的成员，但
+不改写绑定**：冷却结束后会话自动回到原成员。否则一次限流就会把这段对话永久
+搬到另一个平台；等新平台再出一次故障又会搬一次，之前建立的缓存反复作废，
+积分全花在重新读上下文上。只有凭据 / 模型确定不可用（401 / 403 / 404）或
+连续失败达到阈值，才解除绑定并改绑到本次能成功的成员。
 """
 from __future__ import annotations
 
+import logging
+import time
+
 from ... import db, keysvc
 from ...services import combo as combo_svc
-from ...services.session_affinity import SessionAffinity, affinity_key
+from ...services.session_affinity import (SessionAffinity, affinity_key,
+                                          content_key)
+from .. import settings as runtime_settings
 from ..base import (ChatContext, PlatformAdapter, PlatformChat, PlatformError)
 from ..registry import get as get_platform
+
+logger = logging.getLogger('workbuddy.combo')
 
 # 换一个成员**可能**成功的状态：凭据 / 模型下线 / 限流 / 上游故障。
 _SWITCHABLE_STATUS = frozenset({401, 403, 404, 408, 409, 425, 429})
@@ -49,8 +69,19 @@ _NO_SWITCH_CODES = frozenset({
     'unsupported_parameter',
 })
 
+# 确定「这个成员本身不可用」的状态：换一次不会好，继续探测只会白花积分。
+_PERMANENT_STATUS = frozenset({401, 403, 404})
+
 # 一次请求最多尝试几个成员（含首选）。
-MAX_ATTEMPTS = 2
+MAX_ATTEMPTS = 3
+
+# 成员冷却（秒）：连续失败按 2 的幂退避，封顶 10 分钟。
+_COOLDOWN_START = 15.0        # 5xx / 超时 / 网络类
+_COOLDOWN_RATE_LIMIT = 30.0   # 429：通常要等配额窗口
+_COOLDOWN_MAX = 600.0
+# 绑定的成员连续失败到这个次数，认为它对当前会话已不可用：允许改绑，
+# 避免「每轮探测一次坏成员 → 换走 → 冷却结束再探测」的长期抖动。
+_BREAK_AFTER = 3
 
 
 def _switchable(exc: PlatformError) -> bool:
@@ -72,6 +103,9 @@ class ComboAdapter(PlatformAdapter):
         self._currents: dict[str, dict[str, float]] = {}
         # 会话粘性：组合名 + 会话键 → 成员键。绑定表自带 TTL / 容量上限。
         self._affinity = SessionAffinity()
+        # 成员级短冷却：(组合名, 成员键) → (恢复时间, 连续失败次数)。
+        # 失败过的成员在一段时间内不参与选路，避免每次请求都先撞一次。
+        self._cooldowns: dict[tuple[str, str], tuple[float, int]] = {}
 
     # ── 会话粘性 ────────────────────────────────────────────
     def _binding(self, combo_name: str, key: str) -> str:
@@ -98,6 +132,42 @@ class ComboAdapter(PlatformAdapter):
         if key:
             self._affinity.bind(self._binding(combo_name, key),
                                 combo_svc.member_key(member))
+
+    # ── 成员冷却 ────────────────────────────────────────────
+    def _cooling(self, combo_name: str, member_key: str, now: float) -> bool:
+        item = self._cooldowns.get((combo_name, member_key))
+        return item is not None and item[0] > now
+
+    def _cool(self, combo_name: str, member: dict,
+              exc: PlatformError) -> int:
+        """记一次失败并返回连续失败次数。429 优先用上游的 retry_after。"""
+        key = (combo_name, combo_svc.member_key(member))
+        now = time.monotonic()
+        _, streak = self._cooldowns.get(key, (0.0, 0))
+        streak += 1
+        if exc.status in _PERMANENT_STATUS:
+            delay = _COOLDOWN_MAX
+        else:
+            start = (_COOLDOWN_RATE_LIMIT if exc.status == 429
+                     else _COOLDOWN_START)
+            delay = min(_COOLDOWN_MAX, start * (2 ** (streak - 1)))
+        hint = getattr(exc, 'retry_after', None)
+        if isinstance(hint, int) and hint > 0:
+            delay = min(_COOLDOWN_MAX, max(delay, float(hint)))
+        self._cooldowns[key] = (now + delay, streak)
+        return streak
+
+    def _recover(self, combo_name: str, member: dict) -> None:
+        self._cooldowns.pop((combo_name, combo_svc.member_key(member)), None)
+
+    def _currents_for(self, combo_name: str,
+                      members: list[dict]) -> dict[str, float]:
+        """取该组合的 SWRR 游标，并清掉已被删除 / 改名的成员。"""
+        currents = self._currents.setdefault(combo_name, {})
+        live = {combo_svc.member_key(m) for m in members}
+        for stale in [k for k in currents if k not in live]:
+            currents.pop(stale, None)
+        return currents
 
     # ── 账号：虚拟平台没有账号 ────────────────────────────
     def list_accounts(self) -> list[dict]:
@@ -170,25 +240,67 @@ class ComboAdapter(PlatformAdapter):
                                 status=503, code='combo_all_failed')
 
         combo_name = target['name']
-        affinity = affinity_key(body)
-        chosen = self._bound_member(combo_name, affinity, members)
-        if chosen is not None:
-            # 粘住的成员仍启用：直接用，**不推进 SWRR 游标**——长会话会把
+        candidates: list[str] = []
+        # 粘性可在平台设置里关闭（`platforms.combo.session_affinity`）：
+        # 有些客户端每轮都换会话键，关掉比让它随机钉在某个成员上更可控。
+        if runtime_settings.session_affinity(self.name):
+            self._affinity.set_ttl(
+                float(runtime_settings.session_affinity_ttl(self.name)))
+            explicit = affinity_key(body)
+            if explicit:
+                candidates.append(explicit)
+            # 显式键可能每轮都变（客户端把随机串塞进 prompt_cache_key）。
+            # 内容键只在显式键未命中时兜底；它命中时不写入新的显式键，
+            # 否则「每请求一个随机键」会把绑定表撑爆。`messages:` 本身
+            # 已经由内容派生，不再重复加一条。
+            if not explicit or not explicit.startswith('messages:'):
+                derived = content_key(body)
+                if derived and derived not in candidates:
+                    candidates.append(derived)
+
+        pinned = None
+        hit_key = ''
+        for candidate in candidates:
+            pinned = self._bound_member(combo_name, candidate, members)
+            if pinned is not None:
+                hit_key = candidate
+                break
+        had_pin = pinned is not None
+
+        now = time.monotonic()
+        available = [m for m in members
+                     if not self._cooling(combo_name,
+                                          combo_svc.member_key(m), now)]
+        if not available:
+            # 全部在冷却：冷却只是「优先跳过」，不该让组合彻底不可用。
+            available = list(members)
+
+        if had_pin and pinned in available:
+            # 粘住的成员仍可用：直接用，**不推进 SWRR 游标**——长会话会把
             # 全局比例带偏，只有新会话才参与加权选路。
-            rest = combo_svc.alternatives(members, chosen)
+            chosen = pinned
+            rest = combo_svc.alternatives(available, pinned)
+        elif had_pin:
+            # 粘住的成员只是暂时冷却：本次临时切到权重最高的可用成员，
+            # **不推进游标、不改绑定**，冷却结束后自动回到原成员。
+            ranked = combo_svc.alternatives(available, pinned)
+            chosen = ranked[0] if ranked else None
+            rest = ranked[1:]
         else:
-            currents = self._currents.setdefault(combo_name, {})
-            # 成员被删除 / 改名后旧游标会永久残留；顺手清掉，避免配置反复调整
-            # 时这个 dict 只增不减。
-            live = {combo_svc.member_key(m) for m in members}
-            for stale in [k for k in currents if k not in live]:
-                currents.pop(stale, None)
-            chosen, rest = combo_svc.pick(members, currents)
+            chosen, rest = combo_svc.pick(
+                available, self._currents_for(combo_name, members))
             # 先绑定再调用：同一会话并发发出的两条请求也应落同一成员，等结果
-            # 回来才绑定就晚了。失败切换成功时会被改绑到新成员。
-            if affinity and chosen is not None:
-                self._bind(combo_name, affinity, chosen)
+            # 回来才绑定就晚了。首次请求若失败切走，会在成功分支改绑。
+            if chosen is not None:
+                for candidate in candidates:
+                    self._bind(combo_name, candidate, chosen)
         attempts = ([chosen] + rest if chosen else rest)[:MAX_ATTEMPTS]
+        logger.debug(
+            'combo %s: affinity=%s pinned=%s chosen=%s attempts=%s',
+            combo_name, 'yes' if candidates else 'no',
+            combo_svc.member_key(pinned) if pinned else '-',
+            combo_svc.member_key(chosen) if chosen else '-',
+            [combo_svc.member_key(m) for m in attempts])
 
         failures: list[str] = []
         for member in attempts:
@@ -220,19 +332,46 @@ class ComboAdapter(PlatformAdapter):
                 outcome = await adapter.chat(member['model'], body, ctx)
             except PlatformError as exc:
                 failures.append(f'{key}: {exc.message}')
-                if _switchable(exc):
-                    continue
-                # 请求本身的问题：换平台也一样失败，把原始状态码与错误码
-                # 透给客户端，它才知道该改哪里。
-                raise
+                if not _switchable(exc):
+                    # 请求本身的问题：换平台也一样失败，把原始状态码与错误码
+                    # 透给客户端，它才知道该改哪里。
+                    raise
+                streak = self._cool(combo_name, member, exc)
+                member_key = combo_svc.member_key(member)
+                bound_now = any(
+                    self._affinity.peek(self._binding(combo_name, candidate))
+                    == member_key
+                    for candidate in candidates)
+                if bound_now and (exc.status in _PERMANENT_STATUS
+                                  or streak >= _BREAK_AFTER):
+                    # 绑定的成员确定不可用 / 连续多次失败：解除绑定，
+                    # 本次若切到别的成员并成功，就改绑过去。
+                    for candidate in candidates:
+                        self._affinity.unbind(
+                            self._binding(combo_name, candidate))
+                    had_pin = False
+                logger.debug('combo %s: %s 失败（%s %s），连续第 %s 次',
+                             combo_name, key, exc.status, exc.code, streak)
+                continue
             # 成员适配器不一定填 model（WorkBuddy 那条老路径没有）。补成真实
             # 去向，网关记账才能记出「这次到底走了哪个平台」。
             if not outcome.model:
                 outcome.model = key
-            if affinity:
-                # 首轮绑定通常与这里相同；失败切到别的成员时必须改绑，
-                # 否则这个会话每轮都会先撞一次坏成员。
-                self._bind(combo_name, affinity, member)
+            self._recover(combo_name, member)
+            if candidates:
+                same = (had_pin and pinned is not None
+                        and combo_svc.member_key(member)
+                        == combo_svc.member_key(pinned))
+                if not had_pin:
+                    # 新会话（或绑定已判定失效）：把本次成功的成员记到
+                    # 所有候选键上，后续任何一条兜底路径都能命中。
+                    for candidate in candidates:
+                        self._bind(combo_name, candidate, member)
+                elif same and hit_key:
+                    # 已建立绑定：只续期**命中过的那个键**。显式键每轮都变时
+                    # 不要顺手写入新键，否则绑定表会被随机键撑爆。
+                    self._bind(combo_name, hit_key, member)
+                # 已建立绑定 + 临时故障切换：保留原绑定。
             return outcome
 
         # 全部失败（或一个候选都没有）：503 让客户端知道可以稍后重试，
