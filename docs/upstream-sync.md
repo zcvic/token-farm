@@ -144,11 +144,19 @@ git remote add qoder-ref https://github.com/shuishuipingan/qoder2api-hub.git
 git fetch qoder-ref --no-tags
 ```
 
-已核对到 `d0f4837c`（v1.9.9），基线、取用范围与本地唯一补丁（账号权重）记录在
+已核对到 `44b6f33`（v1.9.11）。基线、取用范围与本地唯一补丁（账号权重）记录在
 `deploy/qoder-ref.txt`。升级方式是重跑
 `python server/platforms/qoder/tools/vendor_qoder.py --source <clone>`，
 `--check` 校验一致性；重新 vendor 后必须重新应用那份补丁
 （`server/tests/test_qoder_vendor.py` 守着）。
+
+> **Qoder 批（2026-11-13 → 2026-11-19，`d0f4837` → `44b6f33`）**：4 个非 merge
+> 提交，只有 `qoder_proxy.py` 变动，按整目录重 vendor 吸收：持久排队诊断
+> （`f0b41e4`）、面板关闭网关（`adeadcb` + `deb48f8`）、流失败收尾与实际模型
+> 身份审计（`44b6f33`，新增 `QD_UNKNOWN_MODEL`，默认 `pass` 与旧行为一致）。
+> 内置网关跑在 uvicorn 进程里，`embedded.py` 在导入上游前设
+> `QD_SHUTDOWN_DISABLE=1`，`/admin/shutdown` 稳定 403，误触不会带走整个后端。
+> 账号权重补丁已重新应用；上游 dashboard / i18n / 自更新 / Docker / CI 仍不取。
 
 **`xingluoyuankong/loomy2api`**（Loomy 协议参考源）既不是 fork，也**不 vendor**：
 登录签名、RSA 加密、微信扫码、积分 / 签到、模型别名的协议事实读自它，
@@ -225,6 +233,20 @@ CN 专发的 `X-Client-*` 三头、小程序口径撤头、global UA 品牌段�
 `b85d4f25` / `c9b059c4`，明细见附录 D-12 与 E.3；billing UA 改 `axios/1.16.1`
 与头集 / 头顺序（B-20 剩余部分、B-21、B-22）仍按原判定留待独立批次。
 
+### 已评估：misakano `34120825..d40d4b8`
+
+扫描边界之后上游又推了 3 个非 merge 提交（2026-11-19），逐条判定后**只取 1 项**：
+
+- **取 `d40d4b8`**（issue #276）：选不到号时把成因拆解写进 503 与 WARN。本地落点
+  `upstream/internal/pool/nopick.go` + `internal/server/noselect.go`，`gateway_hint`
+  末尾追加 `no_pick{...}`；本地没有 reserve_credits / 硬性 credit_floor，拆解里
+  不设这两类，手动停用沿用 `manualDisabled` 语义。
+- **不取 `85179d4`**：narration 救援开关 / 指令自报身份 / 今日救援计数——本地没有
+  narration 模块（M-P1-3 + M-P2-17 排期项）。
+- **不取 `1fafb14`**：`/v1/search` / `/v1/fetch` / `/v1/embeddings` 进请求台账——
+  这三个入口在本地是 Python 面板侧，Go 侧没有对应路由。
+- 两个未取提交都已在上面写明；本批没有其他增量。
+
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）
 git format-patch -1 <commit> -o /tmp/sync
@@ -248,7 +270,8 @@ git am -3 -p1 --directory=upstream /tmp/sync/0001-*.patch
 
 ## 剩余待办总览（2026-11-18 整理）
 
-基线：参考仓 `34120825`（附录 A–E 已逐提交评完）。这一节把两份清单里**还没做**的
+基线：参考仓 `d40d4b8`（附录 A–E 已逐提交评完；`34120825..d40d4b8` 的 3 个
+提交也已判定，取的 `d40d4b8` 见上一节）。这一节把两份清单里**还没做**的
 项合到一张表，按「改动面 / 要不要灰度」分档；明细仍以
 [upstream-sync-misakano.md](upstream-sync-misakano.md)（`M-` 项、附录 A–E）与
 [upstream-sync-baseline-gaps.md](upstream-sync-baseline-gaps.md)（`G-` 项）的条目为准，

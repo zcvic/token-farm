@@ -25,4 +25,21 @@
 #     （部分抓包显示 CN 可能不回传），带 trace 时仍严格比对。
 #   · 95c97fab 的面板会话 owner 绑定：本地登录接口已限定管理员会话，不再加一层。
 #   · 每号默认并发 8 → 2：本地并发是平台设置里的单账号上限（默认不限），语义不同。
-95c97fab0529bc75dbf906df04f8ad190d217f0a
+
+# ---- 2026-11 第二批（基线 95c97fab → 3d2e23e，5 个非 merge 提交）
+# 已同步：
+#   · c724a65（v1.6.1）企业版 / SaaS 账号护栏：企业租户走独立协议，拿个人版
+#     ExchangeToken / 设备证明去刷新只会得到含混的 401/20405。本地按原生风格
+#     重写为 server/platforms/trae/enterprise.py，在四个入口挡下：
+#     adapter.import_account（落盘前）、login._finish（用户信息返回后）、
+#     client._token_result（刷新响应写入前）、desktop._account_from_body（本机
+#     导入）；桌面扫描遇到企业登录态只跳过该份，不影响同机个人版账号。
+#     判据只认显式租户元数据（realm=enterprise|saas、scope/loginScope=saas、
+#     非空 saasBootConfig、非空 TenantInfoBase），不根据裸 token 猜、
+#     不递归扫描用户正文。测试：server/tests/test_platform_trae_enterprise.py。
+# 有意不跟：
+#   · a35ab48 / 0873662 / 3d2e23e 的 Qoder CN 第三通道及其网关策略：那是参考仓
+#     把 Qoder 接成另一种上游，与本仓 qoder 平台适配器是两套运行时，不合并。
+#   · 1535821 的 fork 维护同步脚本：本仓已有 deploy/sync-upstream.sh 与
+#     各 ref 文件，重复工具只增加维护面。
+3d2e23e28b9f90b8ba51b5c494b8531d0b3ac6ef

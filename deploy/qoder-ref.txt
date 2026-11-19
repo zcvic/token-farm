@@ -48,3 +48,24 @@
 #          不使用上游 main()；
 #        · 锚点提交：d0f4837c8f38c090f6d76baadc3da2c09f5c66c0（v1.9.9）
 #          上一次基线：a59f89e60a6bc34b92d1ef08467618e1b78f136d（v1.7.12）
+
+# ---- 2026-11 第二批：1.9.9 (d0f4837) → 1.9.11 (44b6f33)，4 个非 merge 提交
+#      整目录重新 vendor（唯一变动的协议文件仍是 qoder_proxy.py），
+#      server/platforms/qoder/_vendor/README.md 的版本戳已由脚本更新。
+#      已取：
+#        · f0b41e4 持久排队诊断：上游长时间排队（6020/6021）时不再被误判成
+#          「成功但零输出」；等待/预算/排队位置写进日志与错误路径。
+#        · adeadcb + deb48f8 面板关闭网关（POST /admin/shutdown）：三层闸门
+#          （面板会话 + 本地来源/显式 confirm + QD_SHUTDOWN_DISABLE）与优雅退出。
+#          token-farm 内置网关跑在 uvicorn 进程里，embedded.py 在导入上游前
+#          设 QD_SHUTDOWN_DISABLE=1，误触不会把整个后端带走。
+#        · 44b6f33 流失败收尾 + 实际模型身份审计：上游建流后失败/中断时补齐
+#          终止帧与错误归因；响应模型名以实际路由结果为准。新增
+#          QD_UNKNOWN_MODEL=pass|auto|error，默认 pass 与旧行为一致。
+#      未取：
+#        · 协议层仍不取上游 dashboard / i18n / admin UI / 自更新 / Docker / CI；
+#          只有 qoder_proxy.py 的协议与运维语义进入副本。
+#        · 账号权重补丁仍由本仓维护，vendor 后已重新应用
+#          （server/tests/test_qoder_vendor.py 守着重跑）。
+#        · 锚点提交：44b6f3377a68e20f0f6d2fb4a626ca616db2415f（v1.9.11）
+#          上一次基线：d0f4837c8f38c090f6d76baadc3da2c09f5c66c0（v1.9.9）

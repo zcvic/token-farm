@@ -576,6 +576,12 @@ access token、不能刷新，也没有 userId，导入时按 token 摘要生成
 
 每次同步到哪个提交、同步了什么、哪些有意不跟，记录在 `deploy/trae-ref.txt`。
 
+企业版 / SaaS 租户走独立协议，个人版的 `ExchangeToken` / 设备证明刷新不了它们。
+`server/platforms/trae/enterprise.py` 在导入、网页登录收尾、刷新响应落盘与本机
+`storage.json` 扫描四个入口，按显式租户元数据（`realm=enterprise|saas`、
+`scope` / `loginScope=saas`、非空 `saasBootConfig` 或 `TenantInfoBase`）拒绝，
+不根据裸 token 猜、也不扫描用户正文（来源 `c724a65`，v1.6.1）。
+
 | 用途 | 国内版 | 国际版 |
 | --- | --- | --- |
 | 核心数据面 | `https://trae-api-cn.mchost.guru` | `https://core-normal.traeapi.us` |

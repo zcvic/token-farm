@@ -606,3 +606,22 @@ e2f262726a715248ffbb44094b65f87e26c95d39
 080a5c31e5a4479cadd7a86cc1f3409da01349e1
 07b39c0cb807692209eb014dba19f06d7ed2ba68
 d2737dd4c9341805cc6f47ed244e72cfa5adc9ed
+
+# ---- 2026-11 第十三批：misakano 34120825 → d40d4b8（3 个非 merge 提交）----
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      已取（按本仓结构重写）：
+#        · d40d4b8 选不到号时把成因拆解写进 503 与 WARN（issue #276）：
+#          新增 upstream/internal/pool/nopick.go（NoPickForRealm 按 pick 的排除
+#          顺序给每个账号归一类：tried / 手动停用 / 系统禁用 / 冷却 / 在途占满），
+#          upstream/internal/server/noselect.go（按 realm+model 每分钟一条 WARN），
+#          handler 在选号失败处取快照，并在 no_healthy_account 的 gateway_hint
+#          末尾追加 no_pick{...}。本地没有 reserve_credits 与硬性 credit_floor
+#          （保底积分只是软偏好，不会造成选不到），所以拆解里不设这两类；
+#          手动停用沿用本地 manualDisabled 语义。测试：pool/nopick_test.go、
+#          server/nopick_hint_test.go。
+#      未取：
+#        · 85179d4 narration 救援开关 / 指令自报身份 / 今日救援计数：本地没有
+#          narration 模块，属于排期项（M-P1-3 + M-P2-17）。
+#        · 1fafb14 /v1/search、/v1/fetch、/v1/embeddings 进请求台账：这三个
+#          入口在本地是 Python 面板侧，Go 侧没有这些路由，没有可接的台账点。
+d40d4b83ed756f6a3362935042a35a26d1acb0a6
