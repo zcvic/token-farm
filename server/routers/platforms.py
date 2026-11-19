@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from datetime import datetime, timezone
@@ -126,6 +127,8 @@ def list_platforms(user: dict = Depends(security.current_user)) -> dict:
             'supports_cooling': type(adapter).set_account_cooling
             is not PlatformAdapter.set_account_cooling,
             'supports_login_callback': hasattr(adapter, 'login_submit_callback'),
+            # 能否用手机号 + 短信验证码登录（Loomy：验证码登录 / 微信补绑手机）
+            'supports_login_code': hasattr(adapter, 'login_submit_code'),
             'account_count': 0,
         }
         try:
@@ -335,11 +338,17 @@ async def login_start(name: str, body: dict | None = Body(None),
         raise HTTPException(status_code=400,
                             detail=f'{adapter.label} 不支持网页登录')
     realm = str((body or {}).get('realm') or 'cn').strip().lower()
+    mode = str((body or {}).get('mode') or 'qr').strip().lower()
     try:
-        out = starter(realm=realm)
+        # `mode` 目前只有 Loomy 用（qr / sms）。Trae / Qoder 的 start 不认识它，
+        # 按签名判断再传，避免为「统一签名」去改另外两个平台。
+        if 'mode' in inspect.signature(starter).parameters:
+            out = starter(realm=realm, mode=mode)
+        else:
+            out = starter(realm=realm)
     except PlatformError as exc:
         raise _fail(exc) from exc
-    security.audit(user, 'platform_login_start', name, realm)
+    security.audit(user, 'platform_login_start', name, f'{realm}/{mode}')
     return {'platform': name, **out}
 
 
@@ -380,6 +389,51 @@ async def login_callback(name: str, login_id: str,
     except PlatformError as exc:
         raise _fail(exc) from exc
     security.audit(user, 'platform_login_callback', name, login_id)
+    return {'platform': name, **out}
+
+
+@router.post('/{name}/login/{login_id}/send-code')
+async def login_send_code(name: str, login_id: str,
+                          body: dict | None = Body(None),
+                          user: dict = Depends(security.require_session_account_adder)) -> dict:
+    """下发短信验证码（Loomy：验证码登录 / 微信未绑手机时的补绑）。
+
+    发短信是一次同步上游调用（还可能触发平台风控限流），放进线程执行；
+    同会话 60 秒内只能发一次，由登录状态机在内存里挡。
+    """
+    adapter = _adapter(name)
+    sender = getattr(adapter, 'login_send_code', None)
+    if sender is None:
+        raise HTTPException(status_code=400,
+                            detail=f'{adapter.label} 不支持短信验证码登录')
+    phone = str((body or {}).get('phone') or '').strip()
+    try:
+        out = await asyncio.to_thread(sender, login_id, phone)
+    except PlatformError as exc:
+        raise _fail(exc) from exc
+    security.audit(user, 'platform_login_send_code', name, login_id)
+    return {'platform': name, **out}
+
+
+@router.post('/{name}/login/{login_id}/code')
+async def login_submit_code(name: str, login_id: str,
+                            body: dict | None = Body(None),
+                            user: dict = Depends(security.require_session_account_adder)) -> dict:
+    """提交短信验证码：验证码登录，或微信 `bind=0` 时的手机号绑定。
+
+    成功返回的会话里带刚落盘的账号；失败时验证码错误次数 +1，连续 5 次作废。
+    """
+    adapter = _adapter(name)
+    submitter = getattr(adapter, 'login_submit_code', None)
+    if submitter is None:
+        raise HTTPException(status_code=400,
+                            detail=f'{adapter.label} 不支持短信验证码登录')
+    code = str((body or {}).get('code') or '').strip()
+    try:
+        out = await asyncio.to_thread(submitter, login_id, code)
+    except PlatformError as exc:
+        raise _fail(exc) from exc
+    security.audit(user, 'platform_login_submit_code', name, login_id)
     return {'platform': name, **out}
 
 

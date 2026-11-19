@@ -805,8 +805,10 @@ class LoomyWechatClientTest(unittest.TestCase):
         with patch:
             with self.assertRaises(client.AccountError) as ctx:
                 client.login_by_wechat_sync('wx-code')
-        self.assertEqual(ctx.exception.code, 'wechat_unbound')
-        self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(ctx.exception.code, 'wechat_needs_bind')
+        self.assertEqual(ctx.exception.status, 409)
+        # rcode 留在 payload 里交给登录状态机，不直接回客户端
+        self.assertEqual(ctx.exception.payload['rcode'], 'rc-1')
         self.assertEqual(len(calls), 1)          # 不能再去 bind/skip
 
     def test_missing_rcode_is_upstream_error(self) -> None:
@@ -824,6 +826,99 @@ class LoomyWechatClientTest(unittest.TestCase):
                 client.login_by_wechat_sync('  ')
         self.assertEqual(ctx.exception.code, 'missing_code')
         self.assertEqual(calls, [])
+
+
+class LoomySmsClientTest(unittest.TestCase):
+    """短信验证码：手机号直接登录 / 微信补绑两套四步协议。"""
+
+    @staticmethod
+    def _patch(returns: dict):
+        calls: list = []
+
+        def fake(path, body, **kwargs):
+            calls.append((path, body))
+            return returns.get(path, {'code': '000000', 'data': {}})
+
+        return calls, mock.patch.object(client, '_account_call_sync',
+                                        side_effect=fake)
+
+    def test_send_sms_code_returns_msgid(self) -> None:
+        calls, patch = self._patch({
+            '/login/phone/sendMsgCode':
+                {'code': '000000', 'data': {'msgid': 'm-1'}},
+        })
+        with patch:
+            out = client.send_sms_code_sync(' 13800000000 ')
+        self.assertEqual(calls[0][0], '/login/phone/sendMsgCode')
+        self.assertEqual(calls[0][1]['param'],
+                         {'ccode': '86', 'phone': '13800000000', 'expire': 300})
+        self.assertEqual(out['msgid'], 'm-1')
+
+    def test_send_sms_code_requires_phone(self) -> None:
+        calls, patch = self._patch({})
+        with patch:
+            with self.assertRaises(client.AccountError) as ctx:
+                client.send_sms_code_sync('   ')
+        self.assertEqual(ctx.exception.code, 'missing_phone')
+        self.assertEqual(calls, [])
+
+    def test_login_by_sms_checks_code(self) -> None:
+        calls, patch = self._patch({
+            '/login/phone/checkCode': {
+                'code': '000000',
+                'data': {'session': 's-1', 'userid': 'u-1',
+                         'phone': '13800000000'},
+            },
+        })
+        with patch:
+            out = client.login_by_sms_sync('13800000000', '123456', 'm-1')
+        self.assertEqual(calls[0][0], '/login/phone/checkCode')
+        self.assertEqual(calls[0][1]['param'], {
+            'ccode': '86', 'phone': '13800000000', 'mcode': '123456',
+            'msgid': 'm-1', 'expire': C.SESSION_EXPIRE_SECONDS,
+        })
+        self.assertEqual(out['session'], 's-1')
+        self.assertEqual(out['userid'], 'u-1')
+        self.assertEqual(out['phone'], '13800000000')
+
+    def test_bind_send_msg_uses_rcode(self) -> None:
+        calls, patch = self._patch({
+            '/login/thirdAccount/bind/sendMsg':
+                {'code': '000000', 'data': {'msgid': 'm-2'}},
+        })
+        with patch:
+            out = client.bind_send_msg_sync('rc-1', '13800000000')
+        self.assertEqual(calls[0][0], '/login/thirdAccount/bind/sendMsg')
+        self.assertEqual(calls[0][1]['param'],
+                         {'rcode': 'rc-1', 'phone': '13800000000',
+                          'ccode': '86', 'expire': 300})
+        self.assertEqual(out['msgid'], 'm-2')
+
+    def test_bind_check_code_requires_all_fields(self) -> None:
+        calls, patch = self._patch({})
+        with patch:
+            with self.assertRaises(client.AccountError) as ctx:
+                client.bind_check_code_sync('rc-1', '  ', 'm-2')
+        self.assertEqual(ctx.exception.code, 'missing_param')
+        self.assertEqual(calls, [])
+
+    def test_bind_check_code_exchanges_session(self) -> None:
+        calls, patch = self._patch({
+            '/login/thirdAccount/bind/checkCode': {
+                'code': '000000',
+                'data': {'session': 's-bind', 'userid': 'u-bind',
+                         'phone': '13800000000'},
+            },
+        })
+        with patch:
+            out = client.bind_check_code_sync('rc-1', '654321', 'm-2')
+        self.assertEqual(calls[0][0], '/login/thirdAccount/bind/checkCode')
+        self.assertEqual(calls[0][1]['param'], {
+            'rcode': 'rc-1', 'mcode': '654321', 'msgid': 'm-2',
+            'expire': C.SESSION_EXPIRE_SECONDS,
+        })
+        self.assertEqual(out['session'], 's-bind')
+        self.assertEqual(out['userid'], 'u-bind')
 
 
 class LoomyWechatLoginTest(unittest.TestCase):
@@ -858,12 +953,16 @@ class LoomyWechatLoginTest(unittest.TestCase):
                     stop.set()
             login._sessions.clear()
 
-    def _session(self, login_id: str = 'a' * 32, qr_uuid: str = '') -> str:
+    def _session(self, login_id: str = 'a' * 32, qr_uuid: str = '',
+                 mode: str = 'qr', phone: str = '') -> str:
         now = time.time()
         with login._lock:
             login._sessions[login_id] = {
-                'id': login_id, 'status': 'pending', 'message': '',
+                'id': login_id, 'mode': mode, 'status': 'pending', 'message': '',
                 'uuid': qr_uuid, 'qr': '', 'url': wechat.build_auth_url(login_id),
+                'phone': phone, 'msgid': '', 'bind_rcode': '',
+                'code_sent_at': 0.0, 'sms_sends': 0, 'code_failures': 0,
+                'sending': False,
                 'account': None, 'created': now, 'updated': now,
                 'stop': threading.Event(),
             }
@@ -972,14 +1071,133 @@ class LoomyWechatLoginTest(unittest.TestCase):
             self.assertEqual(login.submit_callback(sid, url)['status'], 'success')
         again.assert_not_called()
 
-    def test_submit_callback_marks_error_on_unbound_wechat(self) -> None:
+    def test_submit_callback_switches_to_needs_bind(self) -> None:
         sid = self._session()
-        denied = PlatformError('该微信还没有绑定讯飞账号', status=400,
-                               code='wechat_unbound')
+        denied = client.AccountError('该微信还没绑定手机号', status=409,
+                                     code='wechat_needs_bind',
+                                     payload={'rcode': 'rc-9'})
         with mock.patch.object(client, 'login_by_wechat_sync', side_effect=denied):
-            with self.assertRaises(PlatformError):
-                login.submit_callback(sid, 'code=abcdefgh12')
-        self.assertEqual(login.poll(sid)['status'], 'error')
+            out = login.submit_callback(sid, 'code=abcdefgh12&state=' + sid)
+        # 不是失败：微信已授权，只差手机号绑定，会话转入 needs_bind。
+        self.assertEqual(out['status'], 'needs_bind')
+        self.assertTrue(out['needs_bind'])
+        self.assertIn('手机号', out['message'])
+
+    def test_bind_flow_sends_code_and_logs_in(self) -> None:
+        sid = self._session()
+        denied = client.AccountError('需要绑定手机号', status=409,
+                                     code='wechat_needs_bind',
+                                     payload={'rcode': 'rc-9'})
+        with mock.patch.object(client, 'login_by_wechat_sync', side_effect=denied):
+            login.submit_callback(sid, 'code=abcdefgh12&state=' + sid)
+        with mock.patch.object(client, 'bind_send_msg_sync',
+                               return_value={'msgid': 'm-bind'}) as send:
+            sent = login.send_code(sid, '13800000000')
+        send.assert_called_once_with('rc-9', '13800000000')
+        self.assertTrue(sent['code_sent'])
+        info = {'session': 's-bind', 'userid': 'u-bind',
+                'phone': '13800000000'}
+        with mock.patch.object(client, 'bind_check_code_sync',
+                               return_value=info) as bind:
+            done = login.submit_code(sid, '654321')
+        bind.assert_called_once_with('rc-9', '654321', 'm-bind')
+        self.assertEqual(done['status'], 'success')
+        raw = store.read_account('u-bind')
+        self.assertEqual(raw['session'], 's-bind')
+        self.assertFalse(raw['password'])
+
+    def test_start_sms_mode_has_no_qr(self) -> None:
+        class _NoThread:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def start(self) -> None:
+                pass
+
+        with mock.patch.object(login.threading, 'Thread', _NoThread):
+            out = login.start(mode='sms')
+        self.assertEqual(out['mode'], 'sms')
+        self.assertEqual(out['status'], 'pending')
+        self.assertEqual(out['url'], '')
+        self.assertEqual(out['qr'], '')
+        self.assertEqual(out['expires_in'], login.CODE_TTL)
+
+    def test_send_code_sms_mode_stores_msgid(self) -> None:
+        sid = self._session(mode='sms')
+        with mock.patch.object(client, 'send_sms_code_sync',
+                               return_value={'msgid': 'm-1'}) as send:
+            out = login.send_code(sid, '138 0000 0000')
+        send.assert_called_once_with('13800000000')
+        self.assertTrue(out['code_sent'])
+        self.assertEqual(out['phone'], '138****0000')
+        self.assertGreater(out['retry_after'], 0)
+        view = login.poll(sid)
+        self.assertEqual(view['status'], 'pending')
+        self.assertIn('验证码已发送', view['message'])
+
+    def test_send_code_enforces_cooldown(self) -> None:
+        sid = self._session(mode='sms')
+        with mock.patch.object(client, 'send_sms_code_sync',
+                               return_value={'msgid': 'm-1'}):
+            login.send_code(sid, '13800000000')
+        with self.assertRaises(PlatformError) as ctx:
+            login.send_code(sid, '13800000000')
+        self.assertEqual(ctx.exception.code, 'sms_cooldown')
+        self.assertEqual(ctx.exception.status, 429)
+        self.assertGreater(ctx.exception.retry_after or 0, 0)
+
+    def test_send_code_rejects_bad_phone(self) -> None:
+        sid = self._session(mode='sms')
+        for phone in ('12345', '23800000000', '1380000000', ''):
+            with self.subTest(phone=phone):
+                with self.assertRaises(PlatformError) as ctx:
+                    login.send_code(sid, phone)
+                self.assertIn(ctx.exception.code,
+                              ('invalid_phone', 'missing_phone'))
+
+    def test_send_code_not_allowed_on_qr_session(self) -> None:
+        sid = self._session()
+        with self.assertRaises(PlatformError) as ctx:
+            login.send_code(sid, '13800000000')
+        self.assertEqual(ctx.exception.code, 'code_not_supported')
+
+    def test_submit_code_sms_logs_in(self) -> None:
+        sid = self._session(mode='sms')
+        with mock.patch.object(client, 'send_sms_code_sync',
+                               return_value={'msgid': 'm-1'}):
+            login.send_code(sid, '13800000000')
+        info = {'session': 's-sms', 'userid': 'u-sms',
+                'phone': '13800000000', 'nickname': ''}
+        with mock.patch.object(client, 'login_by_sms_sync',
+                               return_value=info) as submit:
+            out = login.submit_code(sid, '123456')
+        submit.assert_called_once_with('13800000000', '123456', 'm-1')
+        self.assertEqual(out['status'], 'success')
+        raw = store.read_account('u-sms')
+        self.assertEqual(raw['session'], 's-sms')
+        self.assertEqual(raw['phone'], '13800000000')
+        self.assertFalse(raw['password'])
+
+    def test_submit_code_needs_a_sent_code(self) -> None:
+        sid = self._session(mode='sms', phone='13800000000')
+        with self.assertRaises(PlatformError) as ctx:
+            login.submit_code(sid, '123456')
+        self.assertEqual(ctx.exception.code, 'code_not_sent')
+
+    def test_wrong_code_keeps_session_retryable(self) -> None:
+        sid = self._session(mode='sms')
+        with mock.patch.object(client, 'send_sms_code_sync',
+                               return_value={'msgid': 'm-1'}):
+            login.send_code(sid, '13800000000')
+        failure = client.AccountError('验证码不正确', code='100001', status=400)
+        with mock.patch.object(client, 'login_by_sms_sync', side_effect=failure):
+            with self.assertRaises(client.AccountError):
+                login.submit_code(sid, '000000')
+        view = login.poll(sid)
+        self.assertEqual(view['status'], 'pending')
+        self.assertIn('验证码不正确', view['message'])
+        with login._lock:
+            self.assertEqual(login._sessions[sid]['code_failures'], 1)
 
     def test_cancel_removes_session(self) -> None:
         sid = self._session()
@@ -992,7 +1210,8 @@ class LoomyWechatLoginTest(unittest.TestCase):
     def test_adapter_exposes_web_login(self) -> None:
         self.assertTrue(LoomyAdapter.supports_web_login)
         for name in ('login_start', 'login_poll', 'login_cancel',
-                     'login_submit_callback'):
+                     'login_submit_callback', 'login_send_code',
+                     'login_submit_code'):
             self.assertTrue(callable(getattr(LoomyAdapter, name, None)), name)
 
 

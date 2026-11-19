@@ -32,9 +32,10 @@ from .signer import build_headers
 
 __all__ = [
     'AccountError', 'login_by_password', 'login_by_password_sync',
-    'login_by_wechat_sync', 'query_base_info_sync', 'fetch_models',
-    'fetch_points', 'fetch_points_breakdown', 'first_login', 'chat',
-    'open_chat', 'login_expired', 'model_headers', 'parse_expire_at',
+    'login_by_wechat_sync', 'send_sms_code_sync', 'login_by_sms_sync',
+    'bind_send_msg_sync', 'bind_check_code_sync', 'query_base_info_sync',
+    'fetch_models', 'fetch_points', 'fetch_points_breakdown', 'first_login',
+    'chat', 'open_chat', 'login_expired', 'model_headers', 'parse_expire_at',
 ]
 
 
@@ -271,10 +272,11 @@ def login_by_wechat_sync(code: str, *, identity: dict | None = None,
                          timeout: float = 30) -> dict:
     """微信扫码登录：`bind/auth` → `bind/skip`。
 
-    只覆盖**已绑手机号**的微信（`bind=1`）。`bind=0` 时上游要求再走
-    `bind/sendMsg` + `bind/checkCode` 绑一次手机号（本质是注册），面板的登录
-    弹窗放不下这段二次验证，这里明确报错让用户改用密码登录，而不是把
-    `rcode` 留在内存里等一个永远不会来的验证码。
+    `bind=1`（该微信已绑手机号）直接换 session；`bind=0` 时上游要求再走
+    `bind/sendMsg` + `bind/checkCode` 绑一次手机号，这里抛
+    `wechat_needs_bind` 并带上 `rcode`，由 `login.py` 引导用户补填手机号
+    （`send_sms_code` / `login_by_sms` 是另一条「验证码直接登录」链路，
+    两者不能混用：绑定必须用 `rcode`）。
 
     微信 `code` 只在 `bind/auth` 用一次，后续接口只用 `rcode`。
     """
@@ -297,12 +299,114 @@ def login_by_wechat_sync(code: str, *, identity: dict | None = None,
                            status=502, payload=auth)
     if bind not in ('1', 'true', 'True'):
         raise AccountError(
-            '该微信还没有绑定讯飞账号：请先用手机号 + 密码登录导入，'
-            '或先在官方客户端完成微信绑定，再回来扫码',
-            code='wechat_unbound', status=400, payload=auth)
+            '该微信还没有绑定手机号：填写手机号并完成短信验证即可绑定登录',
+            code='wechat_needs_bind', status=409,
+            payload={'rcode': rcode, 'bind': bind, 'data': data})
 
     payload = _account_call_sync('/login/thirdAccount/bind/skip', {
         'param': {'rcode': rcode, 'expire': C.SESSION_EXPIRE_SECONDS},
+    }, identity=identity, proxy=proxy, timeout=timeout)
+    return _extract_session(payload)
+
+
+def _sms_msgid(payload: dict) -> str:
+    """`sendMsgCode` / `bind/sendMsg` 的 msgid 在 `data` 里，个别版本在顶层。"""
+    data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+    return str(data.get('msgid') or payload.get('msgid') or '')
+
+
+def send_sms_code_sync(phone: str, *, ccode: str = '86',
+                       identity: dict | None = None,
+                       proxy: str | None = None,
+                       timeout: float = 30) -> dict:
+    """手机号验证码登录 · 第 1 步：`/login/phone/sendMsgCode`。
+
+    返回 `{msgid, phone, raw}`；`msgid` 是下一步 `checkCode` 的票据。上游
+    没给 msgid 时仍然返回（验证码可能已发出），由调用方决定是否提示。
+    """
+    phone = str(phone or '').strip()
+    if not phone:
+        raise AccountError('缺少手机号', code='missing_phone', status=400)
+    payload = _account_call_sync('/login/phone/sendMsgCode', {
+        'param': {'ccode': str(ccode or '86'), 'phone': phone, 'expire': 300},
+    }, identity=identity, proxy=proxy, timeout=timeout)
+    return {'msgid': _sms_msgid(payload), 'phone': phone, 'raw': payload}
+
+
+def login_by_sms_sync(phone: str, code: str, msgid: str, *,
+                      ccode: str = '86', identity: dict | None = None,
+                      proxy: str | None = None,
+                      timeout: float = 30) -> dict:
+    """手机号验证码登录 · 第 2 步：`/login/phone/checkCode` → session。
+
+    验证码登录拿不到密码：落盘后 `has_password=False`，会话失效只能重新
+    用验证码登录（与扫码 / 本机导入一致）。
+    """
+    phone = str(phone or '').strip()
+    code = str(code or '').strip()
+    if not phone:
+        raise AccountError('缺少手机号', code='missing_phone', status=400)
+    if not code:
+        raise AccountError('缺少验证码', code='missing_code', status=400)
+    payload = _account_call_sync('/login/phone/checkCode', {
+        'param': {
+            'ccode': str(ccode or '86'),
+            'phone': phone,
+            'mcode': code,
+            'msgid': str(msgid or ''),
+            'expire': C.SESSION_EXPIRE_SECONDS,
+        },
+    }, identity=identity, proxy=proxy, timeout=timeout)
+    return _extract_session(payload)
+
+
+def bind_send_msg_sync(rcode: str, phone: str, *, ccode: str = '86',
+                       identity: dict | None = None,
+                       proxy: str | None = None,
+                       timeout: float = 30) -> dict:
+    """微信未绑手机号（`bind=0`）· 第 2 步：`bind/sendMsg`。
+
+    `rcode` 来自 `bind/auth`，**不能**用 `code`：微信授权码是一次性的。
+    """
+    rcode = str(rcode or '').strip()
+    phone = str(phone or '').strip()
+    if not rcode:
+        raise AccountError('缺少微信绑定票据（请重新扫码）', code='missing_rcode',
+                           status=400)
+    if not phone:
+        raise AccountError('缺少手机号', code='missing_phone', status=400)
+    payload = _account_call_sync('/login/thirdAccount/bind/sendMsg', {
+        'param': {
+            'rcode': rcode,
+            'phone': phone,
+            'ccode': str(ccode or '86'),
+            'expire': 300,
+        },
+    }, identity=identity, proxy=proxy, timeout=timeout)
+    return {'msgid': _sms_msgid(payload), 'phone': phone, 'raw': payload}
+
+
+def bind_check_code_sync(rcode: str, code: str, msgid: str, *,
+                         identity: dict | None = None,
+                         proxy: str | None = None,
+                         timeout: float = 30) -> dict:
+    """微信未绑手机号（`bind=0`）· 第 3 步：`bind/checkCode` → session。
+
+    上游会顺手完成「绑定手机号」（等价注册），成功后返回 session / userid /
+    phone，和密码登录的响应同形。
+    """
+    rcode = str(rcode or '').strip()
+    code = str(code or '').strip()
+    if not (rcode and code and msgid):
+        raise AccountError('缺少 rcode / 验证码 / msgid，请重新发送验证码',
+                           code='missing_param', status=400)
+    payload = _account_call_sync('/login/thirdAccount/bind/checkCode', {
+        'param': {
+            'rcode': rcode,
+            'mcode': code,
+            'msgid': str(msgid or ''),
+            'expire': C.SESSION_EXPIRE_SECONDS,
+        },
     }, identity=identity, proxy=proxy, timeout=timeout)
     return _extract_session(payload)
 

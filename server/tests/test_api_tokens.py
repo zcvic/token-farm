@@ -341,6 +341,10 @@ class WriteEndpointScopeMatrixTest(unittest.TestCase):
         # 开端口。取消接口同样只对会话开放（它动的是别人的登录会话）。
         'POST /api/platforms/{name}/login/start',
         'POST /api/platforms/{name}/login/{login_id}/callback',
+        # 短信验证码：发码会在上游产生真实短信（费用 / 风控），提交码成功后同样
+        # 写入平台凭据；两者都只对会话开放。
+        'POST /api/platforms/{name}/login/{login_id}/send-code',
+        'POST /api/platforms/{name}/login/{login_id}/code',
         'DELETE /api/platforms/{name}/login/{login_id}',
     }
     # 写方法但只要求「已登录」——只读令牌也能调。必须逐个有理由。

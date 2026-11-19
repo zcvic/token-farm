@@ -482,14 +482,16 @@ class LoomyAdapter(PlatformAdapter):
         self._credits.pop(str(account_id or ''), None)
         return store.delete_account(account_id)
 
-    # ── 网页登录（微信扫码）────────────────────────────────
-    def login_start(self, *, realm: str | None = None) -> dict:
-        """发起一次扫码登录，返回 `{login_id, url, qr, expires_in}`。
+    # ── 网页登录（微信扫码 / 手机验证码）──────────────────────
+    def login_start(self, *, realm: str | None = None,
+                    mode: str | None = None) -> dict:
+        """发起一次登录，返回 `{login_id, url, qr, expires_in}`。
 
-        `realm` 只为符合路由的统一签名（Loomy 是单区域平台，忽略）。
+        `realm` 只为符合路由的统一签名（Loomy 是单区域平台，忽略）；
+        `mode='sms'` 时只建会话，等待前端调用 `login_send_code`。
         """
         from . import login as loginmod  # noqa: PLC0415 —— login 反向依赖 adapter
-        return loginmod.start()
+        return loginmod.start(mode or 'qr')
 
     def login_poll(self, login_id: str) -> dict:
         from . import login as loginmod  # noqa: PLC0415
@@ -503,6 +505,16 @@ class LoomyAdapter(PlatformAdapter):
         """扫不到二维码时（服务端连不上微信）粘回调链接完成登录。"""
         from . import login as loginmod  # noqa: PLC0415
         return loginmod.submit_callback(login_id, callback)
+
+    def login_send_code(self, login_id: str, phone: str) -> dict:
+        """发短信验证码：验证码登录，或微信 `bind=0` 时的补绑。"""
+        from . import login as loginmod  # noqa: PLC0415
+        return loginmod.send_code(login_id, phone)
+
+    def login_submit_code(self, login_id: str, code: str) -> dict:
+        """提交短信验证码，成功后落盘账号。"""
+        from . import login as loginmod  # noqa: PLC0415
+        return loginmod.submit_code(login_id, code)
 
     async def refresh_account(self, account_id: str, *,
                               force: bool = False) -> dict:
