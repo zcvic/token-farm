@@ -154,9 +154,19 @@ _QODER = frozenset({
     'tool_echo_mode', 'anthropic_thinking', 'structured_tool_history',
     'image_transcode', 'web_tools',
 })
+# Loomy 是原生实现（与 Trae 同构的选号 / 缓存 / 冷却策略），但没有桌面端会话
+# 回写与协议兼容开关：不含 `desktop_sync` / `solo_max_tokens` / `credit_meter`。
+_LOOMY = frozenset({
+    'request_timeout', 'idle_timeout', 'max_accounts_try',
+    'session_affinity', 'session_affinity_ttl',
+    'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout',
+    'credits_ttl', 'credits_timeout',
+    'cooldown_429', 'cooldown_5xx',
+})
 _BY_PLATFORM: dict[str, frozenset[str]] = {
     'trae': _TRAE,
     'qoder': _QODER,
+    'loomy': _LOOMY,
 }
 
 

@@ -289,7 +289,10 @@ async def import_accounts(
             failed.append({'error': '账号已存在，未覆盖', 'code': 'account_exists'})
             continue
         try:
-            imported.append(adapter.import_account(entry))
+            # 放到线程里：Loomy 的「手机号 + 密码」导入会在这一步同步登录上游，
+            # 在 async 路由里直接跑会堵住整个事件循环（其它平台的导入是纯文件
+            # 操作，放进线程也没有副作用）。
+            imported.append(await asyncio.to_thread(adapter.import_account, entry))
         except PlatformError as exc:
             failed.append({'error': exc.message, 'code': exc.code})
         except ValueError as exc:
@@ -301,7 +304,8 @@ async def import_accounts(
 async def import_from_desktop(name: str, realm: str | None = Query(None),
                               user: dict = Depends(security.require_session_account_adder)) -> dict:
     """从本机客户端一键导入（Trae：读 `%APPDATA%\\Trae CN` 里已登录的账号；
-    Qoder：读官方桌面 App 与 CLI 的登录态，双区一起导入）。
+    Qoder：读官方桌面 App 与 CLI 的登录态，双区一起导入；Loomy：读
+    `C:\\Users\\Public\\Loomy` 下各安装的会话文件）。
 
     凭据只从磁盘进内存、再落到本平台的账号目录；接口返回的是**脱敏后**的
     账号结构，和手工导入完全一致。
@@ -311,7 +315,8 @@ async def import_from_desktop(name: str, realm: str | None = Query(None),
     if importer is None:
         raise HTTPException(status_code=400,
                             detail=f'{adapter.label} 不支持从本机客户端导入')
-    return importer(realm=realm)
+    # 放进线程：扫盘、解密、询问内置网关都是同步工作，别堵住事件循环。
+    return await asyncio.to_thread(importer, realm=realm)
 
 
 @router.post('/{name}/login/start')
@@ -370,7 +375,8 @@ async def login_callback(name: str, login_id: str,
                             detail=f'{adapter.label} 不支持网页登录')
     callback = str((body or {}).get('url') or '').strip()
     try:
-        out = submitter(login_id, callback)
+        # 兑换 code 是一次同步的上游登录：放进线程，别让整页请求卡住事件循环。
+        out = await asyncio.to_thread(submitter, login_id, callback)
     except PlatformError as exc:
         raise _fail(exc) from exc
     security.audit(user, 'platform_login_callback', name, login_id)

@@ -13,6 +13,8 @@
   · Qoder —— 内置网关实现（vendor 自 `qoder2api-hub`），模型名以
     `qodercn/` / `qodercom/` 为区域前缀（旧式 `qoder/` 兼容），国内版 /
     国际版账号由内置网关持有。
+  · Loomy —— 原生实现（讯飞星火 Loomy），单区域平台，模型名以 `loomy/`
+    为前缀。账号服务 `account.xfinfr.com`，模型网关 OpenAI 兼容。
   · 组合（combo）—— **虚拟平台**：没有账号，只把 `combo/<name>` 按权重
     分发给上面这些真实平台。因此不在界面里露出（`ui_visible=False`）。
 """
@@ -26,6 +28,7 @@ from .sse import openai_sse
 from .workbuddy import adapter as workbuddy_adapter
 from .trae import adapter as trae_adapter
 from .qoder import adapter as qoder_adapter
+from .loomy import adapter as loomy_adapter
 from .combo import adapter as combo_adapter
 
 # 注册内置平台。放在 import 之后而不是模块顶层逐个 register，是为了让
@@ -33,6 +36,7 @@ from .combo import adapter as combo_adapter
 register(workbuddy_adapter)
 register(trae_adapter)
 register(qoder_adapter)
+register(loomy_adapter)
 register(combo_adapter)
 
 __all__ = [
