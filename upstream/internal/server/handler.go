@@ -893,6 +893,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	modelBlocksCleared := false
+	// noPick 选号失败的成因拆解（移植自 panel d40d4b8，issue #276）：号都在、
+	// 却只回一句 no_healthy_account 时，得能从响应本身看出是谁挡的
+	// （手动停用 / 系统禁用 / 冷却 / 在途占满 / 本次轮转已试过）。
+	var noPick pool.NoPick
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：**优先账号**（面板按密钥指定）优先于会话粘性——管理员明确要求
 		// 先花某个号的积分时，不该被「这个会话上次绑在别的号上」覆盖。
@@ -968,6 +972,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			st.status = http.StatusServiceUnavailable
+			noPick = h.cfg.Pool.NoPickForRealm(bareModel, realm, tried)
+			h.logNoSelectable(realm, bareModel, noPick)
 			break
 		}
 		st.uid = acct.UID
@@ -1400,6 +1406,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if retryAfterSec > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSec))
+	}
+	// 成因拆解（issue #276）：有号却选不到时，把各类计数直接塞进 gateway_hint——
+	// 用户不必登服务器翻日志就知道该启用账号（paused/disabled）、等冷却（cooling）、
+	// 提并发（in_flight_full）还是换号（tried）。只在选号失败时追加，正常流零开销。
+	//
+	// hint == "" 是「未覆盖的上游形态」的契约（error.gateway_hint 不落空字段）：
+	// 轮转把号试光后也会走到选号失败分支，但最终错误仍是上游原文，此时不追加。
+	if code == "no_healthy_account" && noPick.Total > 0 && hint != "" {
+		hint += "; no_pick{" + noPick.String() + "}"
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
