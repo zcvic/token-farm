@@ -35,6 +35,7 @@ __all__ = [
     'login_by_wechat_sync', 'send_sms_code_sync', 'login_by_sms_sync',
     'bind_send_msg_sync', 'bind_check_code_sync', 'query_base_info_sync',
     'fetch_models', 'fetch_points', 'fetch_points_breakdown', 'first_login',
+    'query_activation', 'bind_invite_code', 'redeem_code',
     'chat', 'open_chat', 'login_expired', 'model_headers', 'parse_expire_at',
 ]
 
@@ -647,6 +648,78 @@ async def first_login(session: str, *, proxy: str | None = None,
                             code='bad_upstream') from exc
     # 同 `fetch_points`：业务码失效交给调用方判断，不据此丢弃会话。
     return payload if isinstance(payload, dict) else {}
+
+
+async def _points_json(session: str, path: str, *, method: str = 'GET',
+                       body: dict | None = None, proxy: str | None = None,
+                       timeout: float = 30) -> dict:
+    """积分域的小接口（激活状态 / 绑定邀请码 / 兑换码）共用一次调用。
+
+    与 `first_login` 同一口径：HTTP >= 400 归成 `PlatformError`，业务码失效
+    （HTTP 200 + `code=100002`）**不在这里抛**，交给调用方用 `login_expired`
+    判断——这些端点在会话「面板级失效」时仍可能可用。
+    """
+    content = (json.dumps(body, ensure_ascii=False).encode('utf-8')
+               if body is not None else None)
+    async with config.http_client(
+            httpx.Timeout(timeout, connect=10),
+            proxy=_selected_proxy(proxy), lane='loomy') as client:
+        if method.upper() == 'GET':
+            response = await client.get(_url(path),
+                                        headers=model_headers(session))
+        else:
+            response = await client.post(_url(path),
+                                         headers=model_headers(session),
+                                         content=content)
+    if response.status_code >= 400:
+        raise _gateway_error(response, response.text, what=f'/{path}')
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise PlatformError(f'/{path} 响应不是 JSON', status=502,
+                            code='bad_upstream') from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+async def query_activation(session: str, *, proxy: str | None = None,
+                           timeout: float = 30) -> dict:
+    """激活状态：`GET /points/activation`。
+
+    `data.activated` 为 true 表示该账号已经绑过邀请码（此时不能再绑）；
+    `data.appliedInvitationCode` 是已绑定的那一个。
+    """
+    return await _points_json(session, 'points/activation', proxy=proxy,
+                              timeout=timeout)
+
+
+async def bind_invite_code(session: str, invite_code: str, *,
+                           device_id: str = '',
+                           proxy: str | None = None,
+                           timeout: float = 30) -> dict:
+    """绑定邀请码：`POST /points/activation` body `{inviteCode, deviceId?}`。
+
+    与签到（`points/first-login`）是两个接口：签到只负责发每日奖励，绑定
+    邀请码走这里。`deviceId` 是客户端上报的校园设备号，没有就不带。
+    """
+    invite = str(invite_code or '').strip()
+    if not invite:
+        raise PlatformError('请填写邀请码', status=400, code='missing_invite_code')
+    body: dict[str, Any] = {'inviteCode': invite}
+    if str(device_id or '').strip():
+        body['deviceId'] = str(device_id).strip()
+    return await _points_json(session, 'points/activation', method='POST',
+                              body=body, proxy=proxy, timeout=timeout)
+
+
+async def redeem_code(session: str, code: str, *, proxy: str | None = None,
+                      timeout: float = 30) -> dict:
+    """兑换兑换码：`POST /points/redemption-codes/redeem` body `{code}`。"""
+    value = str(code or '').strip()
+    if not value:
+        raise PlatformError('请填写兑换码', status=400, code='missing_redeem_code')
+    return await _points_json(session, 'points/redemption-codes/redeem',
+                              method='POST', body={'code': value},
+                              proxy=proxy, timeout=timeout)
 
 
 async def chat(session: str, body: dict, *, proxy: str | None = None,

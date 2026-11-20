@@ -64,6 +64,8 @@ import type {
   PlatformModelRates,
   PlatformSettingField,
   PlatformSettings,
+  PlatformTaskResult,
+  PlatformTaskStatus,
   PlatformUsage,
   Combo,
   PlaygroundModels,
@@ -734,6 +736,28 @@ export const platformApi = {
   clearCooling: (name: string, uid: string) =>
     del<{platform: string; account: PlatformAccount}>(
       `${platformPath(name)}/accounts/${encodeURIComponent(uid)}/cooling`),
+  /**
+   * 账号的任务状态（Loomy：激活情况 + 上次同步的签到 / 邀请码缓存）。
+   *
+   * 只读，不会顺手签到——签到是显式动作，走 `runTask(name, uid, 'checkin')`。
+   */
+  taskStatus: (name: string, uid: string) =>
+    get<{platform: string; task: PlatformTaskStatus}>(
+      `${platformPath(name)}/accounts/${encodeURIComponent(uid)}/tasks`),
+  /**
+   * 执行任务动作：`checkin`（签到 + 同步邀请码）/ `bind_invite` / `redeem`。
+   *
+   * 绑定邀请码是一次性的（绑错无法解绑），后端在已绑定时直接 409。
+   */
+  runTask: (
+    name: string,
+    uid: string,
+    action: 'checkin' | 'bind_invite' | 'redeem',
+    body?: {invite_code?: string; code?: string},
+  ) =>
+    post<{platform: string; action: string; task: PlatformTaskResult}>(
+      `${platformPath(name)}/accounts/${encodeURIComponent(uid)}/tasks/${action}`,
+      body ?? {}),
 };
 
 /* ── 模型组合（跨平台加权路由组）─────────────────────────

@@ -129,6 +129,9 @@ def list_platforms(user: dict = Depends(security.current_user)) -> dict:
             'supports_login_callback': hasattr(adapter, 'login_submit_callback'),
             # 能否用手机号 + 短信验证码登录（Loomy：验证码登录 / 微信补绑手机）
             'supports_login_code': hasattr(adapter, 'login_submit_code'),
+            # 是否有「平台任务」面板（签到之外的邀请码 / 兑换码等）
+            'supports_tasks': type(adapter).supports_tasks
+            is not PlatformAdapter.supports_tasks,
             'account_count': 0,
         }
         try:
@@ -816,6 +819,56 @@ async def checkin_all(name: str,
     results = await asyncio.gather(*(run(a) for a in accounts))
     return {'platform': name, 'total': len(results),
             'ok': sum(1 for r in results if r.get('ok')), 'results': results}
+
+
+# ── 平台任务（邀请码 / 兑换码 / 签到状态）──────────────────
+#
+# 与签到同一档权限：这些动作都直接改上游账号的福利状态（绑邀请码是一次性
+# 的，绑错无法解绑），所以读状态用 `current_user`、执行动作用 `require_admin`。
+def _tasks_adapter(name: str):
+    adapter = _adapter(name)
+    if type(adapter).supports_tasks is PlatformAdapter.supports_tasks:
+        raise HTTPException(status_code=400,
+                            detail=f'{adapter.label} 不支持平台任务')
+    return adapter
+
+
+@router.get('/{name}/accounts/{account_id}/tasks')
+async def task_status(name: str, account_id: str,
+                      user: dict = Depends(security.current_user)) -> dict:
+    """账号的任务状态：激活情况 + 上次同步的签到 / 邀请码缓存。
+
+    只读：**不会**顺手签到（那是一次真实的写操作，打开页面不该替用户领奖）。
+    """
+    adapter = _tasks_adapter(name)
+    try:
+        return {'platform': name, 'task': await adapter.task_status(account_id)}
+    except PlatformError as exc:
+        raise _fail(exc) from exc
+
+
+@router.post('/{name}/accounts/{account_id}/tasks/{action}')
+async def run_task(name: str, account_id: str, action: str,
+                   body: dict | None = Body(None),
+                   user: dict = Depends(security.require_admin)) -> dict:
+    """执行任务动作：`checkin` / `bind_invite` / `redeem`。
+
+    `checkin` 与 `/checkin` 共用同一把账号锁：两路并发命中同一个号时，
+    后到的一路会读到「今日已签到」、收入记 0，不会重复入账。
+    """
+    adapter = _tasks_adapter(name)
+    body = body or {}
+    try:
+        if str(action).strip().lower() in ('checkin', 'sync'):
+            async with _checkin_lock(name, account_id):
+                result = await adapter.run_task(account_id, action, **body)
+        else:
+            result = await adapter.run_task(account_id, action, **body)
+    except PlatformError as exc:
+        raise _fail(exc) from exc
+    security.audit(user, 'run_platform_task', name,
+                   f'{account_id}:{action}')
+    return {'platform': name, 'action': action, 'task': result}
 
 
 # ── 模型 ────────────────────────────────────────────────

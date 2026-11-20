@@ -349,4 +349,21 @@ def public_account(account: dict) -> dict:
         'session_age_days': round(session_age, 2) if session_age is not None else None,
         'session_stale': stale,
         'login_state': str(account.get('loginState') or ''),
+        # 任务面板缓存（签到结果 / 自己名下的邀请码 / 激活状态）。
+        # 只读展示用：真实状态由 `task_status` 联网刷新，这里是为了让列表
+        # 打开时就能看到上次同步到的邀请码，不必先点一次「签到」。
+        'task_cache': _task_cache_view(account.get('taskCache')),
+    }
+
+
+def _task_cache_view(raw: object) -> dict:
+    """账号文件里的 `taskCache` → 对外形状（脏数据一律当空）。"""
+    raw = raw if isinstance(raw, dict) else {}
+    checkin = raw.get('checkin') if isinstance(raw.get('checkin'), dict) else None
+    codes = raw.get('inviteCodes')
+    return {
+        'synced_at': int(raw.get('syncedAt') or 0),
+        'checkin': checkin,
+        'invite_codes': [c for c in codes if isinstance(c, dict)]
+        if isinstance(codes, list) else [],
     }

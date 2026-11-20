@@ -309,6 +309,29 @@ class PlatformAdapter(ABC):
         raise PlatformError(f'{self.label} 不支持查询积分', status=400,
                             code='credits_unsupported')
 
+    # ── 平台任务（可选能力）──────────────────────────────────
+    #
+    # 「任务」= 该平台客户端里除「对话」以外的成长 / 福利动作（签到、绑定
+    # 邀请码、兑换兑换码…）。与 `checkin` 的分工：`checkin` 是每日固定动作，
+    # 调度器会自己跑；这里的接口由用户**显式**触发，且需要按账号返回状态。
+    #
+    # 默认实现一律「不支持」：没有这套概念的平台不该在界面上出现一个点了
+    # 必然报错的入口（前端按 `supports_tasks` 隐藏整块）。
+
+    def supports_tasks(self) -> bool:
+        """是否提供平台任务面板（签到之外的邀请码 / 兑换码等）。"""
+        return False
+
+    async def task_status(self, account_id: str) -> dict:
+        """只读任务状态：激活情况 + 最近一次同步的缓存。"""
+        raise PlatformError(f'{self.label} 不支持平台任务', status=400,
+                            code='tasks_unsupported')
+
+    async def run_task(self, account_id: str, action: str, **params) -> dict:
+        """执行一个任务动作（`checkin` / `bind_invite` / `redeem`…）。"""
+        raise PlatformError(f'{self.label} 不支持平台任务', status=400,
+                            code='tasks_unsupported')
+
     def set_account_options(self, account_id: str, *, weight=None) -> dict:
         """修改账号级调度参数（**可选能力**）。
 

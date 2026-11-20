@@ -2154,6 +2154,11 @@ export interface PlatformInfo {
    * 时的补绑）。为 true 时前端在登录弹窗里显示「验证码登录」入口。
    */
   supports_login_code?: boolean;
+  /**
+   * 是否有「平台任务」面板（Loomy：签到 / 绑定邀请码 / 兑换兑换码）。
+   * 为 true 时账号页出现「任务」标签页。
+   */
+  supports_tasks?: boolean;
   account_count: number;
   /** 单个平台坏掉时的原因（该平台其余字段仍然有效） */
   error?: string;
@@ -2515,6 +2520,65 @@ export interface PlatformCheckinResult {
   message: string;
   uid: string;
   realm: string;
+  /** Loomy：签到响应里下发的「自己名下的邀请码」 */
+  invite_codes?: PlatformInviteCode[];
+}
+
+/** 邀请码（Loomy `points/first-login` 的 `invitationCodes` 条目）。 */
+export interface PlatformInviteCode {
+  inviteCode?: string;
+  status?: string;
+  usedCount?: number;
+  maxUses?: number;
+  [key: string]: unknown;
+}
+
+/** 账号的邀请码激活状态（Loomy `GET /points/activation`）。 */
+export interface PlatformActivation {
+  /** true = 已绑定邀请码，此时不能再绑 */
+  activated?: boolean;
+  /** 已绑定的邀请码 */
+  applied_invitation_code?: string;
+  /** 上游原始 data（排障用） */
+  raw?: Record<string, unknown>;
+  /** 查询失败时的原因 */
+  error?: string;
+  code?: string;
+}
+
+/** 任务面板里缓存的签到明细。 */
+export interface PlatformTaskCheckin {
+  ok?: boolean;
+  already?: boolean;
+  balance?: number | null;
+  permanent?: number | null;
+  daily?: number | null;
+  daily_quota?: number | null;
+  message?: string;
+  earned_credit?: number;
+  credits?: number;
+}
+
+/** `GET /api/platforms/{name}/accounts/{uid}/tasks`：任务面板状态。 */
+export interface PlatformTaskStatus {
+  uid: string;
+  nickname?: string;
+  realm?: string;
+  activation: PlatformActivation;
+  /** 上次同步到的签到结果（null = 还没同步过） */
+  checkin: PlatformTaskCheckin | null;
+  invite_codes: PlatformInviteCode[];
+  /** 上次同步时刻（epoch 秒） */
+  synced_at: number;
+}
+
+/** 任务动作的执行结果（签到 / 绑定邀请码 / 兑换）。 */
+export interface PlatformTaskResult extends Partial<PlatformTaskStatus> {
+  ok?: boolean;
+  desc?: string;
+  invite_code?: string;
+  account?: string;
+  data?: Record<string, unknown>;
 }
 
 /** 批量签到里每个账号的结局。 */

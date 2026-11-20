@@ -219,6 +219,34 @@ Loomy 没有 refresh token，所以「刷新」的语义是**用保存的手机�
 注意 `points/records` 只认 **camelCase** 的 `pageNo` / `pageSize`；写成 snake_case
 会被静默忽略（永远只回 20 条）。
 
+### 平台任务（账号页「任务」标签）
+
+Loomy 客户端里除对话之外的福利动作，都在账号页的「任务」分段里（只有声明了
+`supports_tasks` 的平台才出现这一栏）：
+
+| 动作 | 上游接口 | 说明 |
+| --- | --- | --- |
+| 激活状态 | `GET /points/activation` | `data.activated` + `data.appliedInvitationCode` |
+| 绑定邀请码 | `POST /points/activation` | body `{inviteCode, deviceId?}`，成功码 `code=000000` |
+| 每日签到 | `POST /points/first-login` | 与账号页「签到」同一接口，返回自己名下的 `invitationCodes` |
+| 兑换兑换码 | `POST /points/redemption-codes/redeem` | body `{code}`，成功后积分直接到账 |
+
+绑定邀请码是**一次性**的：已经是 `activated=true` 的账号在服务端直接返回 409
+（`already_activated`），前端对应地把输入框和按钮置灰，并显示已绑定的那一个
+邀请码。邀请码会先 `strip()` 再上报；没有校园设备号时不带 `deviceId`。
+
+签到响应的 `invitationCodes`（`inviteCode` / `status` / `usedCount` /
+`maxUses`）会随签到结果写进账号文件的 `taskCache`，所以重开页面就能看到
+「我的邀请码」，不必再点一次签到。`taskCache` 只是**展示用缓存**，真实状态
+仍以 `GET /points/activation` 为准。
+
+HTTP 接口（`server/routers/platforms.py`）：
+
+- `GET  /api/platforms/loomy/accounts/{uid}/tasks` —— 只读状态（登录用户）；
+- `POST /api/platforms/loomy/accounts/{uid}/tasks/{action}` —— 执行
+  `checkin` / `bind_invite` / `redeem`（管理员）。`checkin` 与 `/checkin`
+  共用同一把账号锁，不会重复入账。
+
 ---
 
 ## 5. 平台设置

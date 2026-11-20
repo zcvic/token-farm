@@ -85,6 +85,7 @@ import {
 } from '@/lib/platform-realm';
 import {cn} from '@/lib/utils';
 import {PlatformCoolingDialog} from './PlatformCoolingDialog';
+import {PlatformTasksPanel} from './PlatformTasksPanel';
 import {PlatformWeightDialog} from './PlatformWeightDialog';
 import type {
   CheckinLogPage,
@@ -316,6 +317,13 @@ export function PlatformAccountsPanel({
   // 表格只负责展示，避免「一个输入框逐键提交」那种中间态请求。
   const [weightTarget, setWeightTarget] = useState<PlatformAccount | null>(null);
   const [coolingTarget, setCoolingTarget] = useState<PlatformAccount | null>(null);
+  /**
+   * 当前视图：`accounts`（账号列表）/ `tasks`（平台任务）。
+   *
+   * 用页面内的分段切换而不是新增路由：任务页的一切都依赖「当前平台 + 这
+   * 份账号列表」，独立路由要么重复取数、要么得把列表塞进 URL 之外的全局状态。
+   */
+  const [view, setView] = useState<'accounts' | 'tasks'>('accounts');
   /**
    * 检索 / 状态筛选 / 排序 / 页码（与 WorkBuddy 账号页同一套语义）。
    *
@@ -875,6 +883,9 @@ export function PlatformAccountsPanel({
   const supportsLoginCallback = info?.supports_login_callback !== false;
   // 短信验证码登录（Loomy）：验证码直接登录 + 微信未绑手机号时的补绑。
   const supportsLoginCode = !!info?.supports_login_code;
+  // 平台任务（Loomy：签到 / 绑定邀请码 / 兑换兑换码）。没有这套概念的平台
+  // 不显示分段切换，整块任务页也不渲染。
+  const supportsTasks = !!info?.supports_tasks;
   // 回调固定指向 `127.0.0.1:<端口>`（Trae 的授权页强校验），只有这类平台
   // 才需要提示「面板与浏览器必须同机」。Loomy 的回调落在 loomy.xunfei.cn，
   // 走的也是「粘链接」，不受这条约束。
@@ -969,8 +980,50 @@ export function PlatformAccountsPanel({
     </div>
   ) : null;
 
+  // 视图切换：账号列表 / 平台任务。只有声明了 `supports_tasks` 的平台才出现
+  // ——其余平台没有任务概念，多一个永远空的页签只是噪音。
+  const viewSwitch = supportsTasks ? (
+    <div className="flex w-fit gap-1 rounded-full bg-muted p-1 text-[11px]">
+      {([
+        ['accounts', t('platforms.viewAccounts')],
+        ['tasks', t('platforms.viewTasks')],
+      ] as const).map(([id, text]) => (
+        <button
+          key={id}
+          type="button"
+          onClick={() => setView(id)}
+          aria-pressed={view === id}
+          className={cn(
+            'rounded-full px-3 py-1.5 transition-colors',
+            view === id
+              ? 'bg-background font-medium text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          {text}
+        </button>
+      ))}
+    </div>
+  ) : null;
+
+  // 任务视图整页替换账号表格：两者依赖的数据不同，混在一起只会在每一行
+  // 多出三个按钮和两个输入框。调度参数弹窗只服务账号行，这里不必渲染。
+  if (supportsTasks && view === 'tasks') {
+    return (
+      <div className="flex flex-col gap-4">
+        {viewSwitch}
+        <PlatformTasksPanel
+          platform={platform}
+          label={label}
+          accounts={scopedAccounts}
+        />
+      </div>
+    );
+  }
+
   return (
     <>
+      {viewSwitch}
       <section className="overflow-hidden rounded-[20px] bg-muted">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3.5 py-3">
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">

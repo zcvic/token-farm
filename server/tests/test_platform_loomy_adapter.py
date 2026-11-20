@@ -643,6 +643,257 @@ class LoomyAdapterTest(unittest.TestCase):
         self.assertIn('loomy/spark-x2.6', ids)
 
 
+class LoomyTaskTest(unittest.TestCase):
+    """平台任务：激活状态 / 绑定邀请码 / 兑换码 / 签到缓存。
+
+    全部把 `client` 的联网函数换成假实现——这里测的是**状态编排**：
+    已绑定要不要拦、失败怎么归、缓存落到哪个字段、返回值是不是前端要的形状。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._orig_db = config.DB_PATH
+        config.DB_PATH = Path(self.tmp.name) / 'a.db'
+        db._conn = None
+        db.connect()
+        patch = mock.patch.object(config, 'DATA_DIR', Path(self.tmp.name))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.adapter = LoomyAdapter()
+
+    def tearDown(self) -> None:
+        if db._conn is not None:
+            db._conn.close()
+        db._conn = None
+        config.DB_PATH = self._orig_db
+
+    def _seed(self, **overrides) -> dict:
+        data = {
+            'uid': 'u-1', 'session': 'session-1', 'password': 'pw',
+            'phone': '13800000000', 'nickname': 'n',
+            'obtainedAt': int(time.time()),
+        }
+        data.update(overrides)
+        store.save_account(data)
+        return data
+
+    # ── 只读状态 ──────────────────────────────────────────
+    def test_task_status_reads_activation_and_cache(self) -> None:
+        self._seed(taskCache={
+            'syncedAt': 100,
+            'checkin': {'ok': True, 'balance': 7},
+            'inviteCodes': [{'inviteCode': 'MINE'}],
+        })
+        view = {'code': '000000',
+                'data': {'activated': True, 'appliedInvitationCode': 'ABC'}}
+        with mock.patch.object(client, 'query_activation',
+                               new=mock.AsyncMock(return_value=view)):
+            out = asyncio.run(self.adapter.task_status('u-1'))
+        self.assertTrue(out['activation']['activated'])
+        self.assertEqual(out['activation']['applied_invitation_code'], 'ABC')
+        self.assertEqual(out['invite_codes'], [{'inviteCode': 'MINE'}])
+        self.assertEqual(out['checkin'], {'ok': True, 'balance': 7})
+        self.assertEqual(out['synced_at'], 100)
+
+    def test_task_status_does_not_checkin(self) -> None:
+        """打开任务页绝不能顺手领奖——那是写操作。"""
+        self._seed()
+        with mock.patch.object(client, 'query_activation',
+                               new=mock.AsyncMock(return_value={'data': {}})), \
+                mock.patch.object(client, 'first_login',
+                                  new=mock.AsyncMock()) as first_login:
+            asyncio.run(self.adapter.task_status('u-1'))
+        first_login.assert_not_called()
+
+    def test_task_status_survives_activation_error(self) -> None:
+        self._seed()
+        with mock.patch.object(
+                client, 'query_activation',
+                new=mock.AsyncMock(side_effect=PlatformError(
+                    '上游炸了', status=500, code='bad_upstream'))):
+            out = asyncio.run(self.adapter.task_status('u-1'))
+        self.assertEqual(out['activation']['code'], 'bad_upstream')
+        self.assertIn('上游炸了', out['activation']['error'])
+
+    # ── 绑定邀请码 ────────────────────────────────────────
+    def test_bind_invite_success_returns_activation(self) -> None:
+        self._seed()
+        views = iter([
+            {'code': '000000', 'data': {'activated': False}},
+            {'code': '000000',
+             'data': {'activated': True, 'appliedInvitationCode': 'INV1'}},
+        ])
+
+        async def fake_query(*args, **kwargs):
+            return next(views)
+
+        bind = mock.AsyncMock(return_value={
+            'code': '000000', 'desc': '绑定成功', 'data': {}})
+        with mock.patch.object(client, 'query_activation', new=fake_query), \
+                mock.patch.object(client, 'bind_invite_code', new=bind):
+            out = asyncio.run(self.adapter.run_task(
+                'u-1', 'bind_invite', invite_code=' INV1 '))
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['invite_code'], 'INV1')
+        self.assertTrue(out['activation']['activated'])
+        self.assertEqual(out['activation']['applied_invitation_code'], 'INV1')
+        # 邀请码前后的空白必须先去掉再上报，否则上游会判无效。
+        self.assertEqual(bind.await_args.args[1], 'INV1')
+
+    def test_bind_invite_rejects_already_activated(self) -> None:
+        """已绑定是**一次性**的：必须在前端就拦在 409，而不是让上游报错。"""
+        self._seed()
+        bind = mock.AsyncMock()
+        with mock.patch.object(
+                client, 'query_activation',
+                new=mock.AsyncMock(return_value={
+                    'data': {'activated': True,
+                             'appliedInvitationCode': 'OLD'}})), \
+                mock.patch.object(client, 'bind_invite_code', new=bind):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter.run_task(
+                    'u-1', 'bind_invite', invite_code='NEW'))
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(ctx.exception.code, 'already_activated')
+        self.assertIn('OLD', ctx.exception.message)
+        bind.assert_not_called()
+
+    def test_bind_invite_requires_code(self) -> None:
+        self._seed()
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(self.adapter.run_task('u-1', 'bind_invite',
+                                              invite_code='  '))
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(ctx.exception.code, 'missing_invite_code')
+
+    def test_bind_invite_upstream_failure_raises(self) -> None:
+        self._seed()
+        with mock.patch.object(
+                client, 'query_activation',
+                new=mock.AsyncMock(return_value={'data': {'activated': False}})), \
+                mock.patch.object(
+                    client, 'bind_invite_code',
+                    new=mock.AsyncMock(return_value={
+                        'code': '400001', 'desc': '邀请码不存在'})):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter.run_task('u-1', 'bind_invite',
+                                                  invite_code='BAD'))
+        self.assertEqual(ctx.exception.code, 'invite_failed')
+        self.assertIn('邀请码不存在', ctx.exception.message)
+
+    def test_bind_invite_session_expired_is_401(self) -> None:
+        self._seed()
+        with mock.patch.object(
+                client, 'query_activation',
+                new=mock.AsyncMock(return_value={'data': {'activated': False}})), \
+                mock.patch.object(
+                    client, 'bind_invite_code',
+                    new=mock.AsyncMock(return_value={
+                        'code': '100002', 'desc': '登录已失效'})):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter.run_task('u-1', 'bind_invite',
+                                                  invite_code='X'))
+        self.assertEqual(ctx.exception.status, 401)
+        self.assertEqual(ctx.exception.code, 'login_expired')
+
+    # ── 兑换码 ────────────────────────────────────────────
+    def test_redeem_success(self) -> None:
+        self._seed()
+        redeem = mock.AsyncMock(return_value={
+            'code': '000000', 'desc': '兑换成功', 'data': {'points': 100}})
+        with mock.patch.object(client, 'redeem_code', new=redeem):
+            out = asyncio.run(self.adapter.run_task('u-1', 'redeem',
+                                                    code=' CODE-1 '))
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['desc'], '兑换成功')
+        self.assertEqual(out['data'], {'points': 100})
+        self.assertEqual(redeem.await_args.args[1], 'CODE-1')
+
+    def test_redeem_requires_code(self) -> None:
+        self._seed()
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(self.adapter.run_task('u-1', 'redeem', code=''))
+        self.assertEqual(ctx.exception.code, 'missing_redeem_code')
+
+    def test_redeem_upstream_failure_raises(self) -> None:
+        self._seed()
+        with mock.patch.object(
+                client, 'redeem_code',
+                new=mock.AsyncMock(return_value={
+                    'code': '400002', 'desc': '兑换码已使用'})):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter.run_task('u-1', 'redeem',
+                                                  code='USED'))
+        self.assertEqual(ctx.exception.code, 'redeem_failed')
+        self.assertIn('兑换码已使用', ctx.exception.message)
+
+    # ── 签到 + 缓存 ───────────────────────────────────────
+    def test_task_checkin_caches_invite_codes(self) -> None:
+        self._seed()
+        balances = iter([100, 150])
+        payload = {'code': '000000', 'data': {
+            'alreadyProcessed': False, 'currentBalance': 150,
+            'permanentBalance': 150, 'dailyBalance': 0, 'dailyQuota': 1000,
+            'invitationCodes': [
+                {'inviteCode': 'MINE', 'status': 'active',
+                 'usedCount': 0, 'maxUses': 5},
+            ]}}
+
+        async def fake_fetch(*args, **kwargs):
+            return {'data': {'availableBalance': next(balances)}}
+
+        with mock.patch.object(client, 'fetch_points', new=fake_fetch), \
+                mock.patch.object(client, 'first_login',
+                                  new=mock.AsyncMock(return_value=payload)), \
+                mock.patch.object(
+                    client, 'query_activation',
+                    new=mock.AsyncMock(return_value={'data': {
+                        'activated': True,
+                        'appliedInvitationCode': 'MINE'}})):
+            out = asyncio.run(self.adapter.run_task('u-1', 'checkin'))
+
+        self.assertTrue(out['checkin']['ok'])
+        self.assertEqual(out['invite_codes'][0]['inviteCode'], 'MINE')
+        self.assertTrue(out['activation']['activated'])
+        self.assertGreater(out['synced_at'], 0)
+
+        # 缓存必须真的落盘，否则重开页面又看不到自己的邀请码。
+        raw = store.read_account('u-1')
+        self.assertEqual(raw['taskCache']['inviteCodes'][0]['inviteCode'],
+                         'MINE')
+        self.assertTrue(raw['taskCache']['checkin']['ok'])
+        self.assertEqual(raw['taskCache']['syncedAt'], out['synced_at'])
+
+    def test_public_account_exposes_task_cache(self) -> None:
+        account = self._seed(taskCache={
+            'syncedAt': 9, 'checkin': {'ok': True},
+            'inviteCodes': [{'inviteCode': 'MINE'}, 'junk'],
+        })
+        view = store.public_account(account)
+        self.assertEqual(view['task_cache']['synced_at'], 9)
+        self.assertEqual(view['task_cache']['checkin'], {'ok': True})
+        # 脏条目直接丢弃，前端不用再防一遍。
+        self.assertEqual(view['task_cache']['invite_codes'],
+                         [{'inviteCode': 'MINE'}])
+
+    def test_public_account_without_cache_is_empty(self) -> None:
+        view = store.public_account(self._seed())
+        self.assertEqual(view['task_cache'],
+                         {'synced_at': 0, 'checkin': None,
+                          'invite_codes': []})
+
+    def test_unknown_task_action_is_rejected(self) -> None:
+        self._seed()
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(self.adapter.run_task('u-1', 'self-destruct'))
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(ctx.exception.code, 'task_unsupported')
+
+    def test_adapter_declares_task_support(self) -> None:
+        self.assertTrue(self.adapter.supports_tasks())
+
+
 class LoomyConstantsTest(unittest.TestCase):
     def test_wire_and_outward_aliases(self) -> None:
         self.assertEqual(C.wire_model('deepseek-v4.1-flash'),
@@ -719,6 +970,101 @@ class LoomyClientTest(unittest.TestCase):
             with self.assertRaises(PlatformError) as ctx:
                 asyncio.run(client.fetch_points_breakdown('s'))
         self.assertEqual(ctx.exception.code, 'login_expired')
+
+    # ── 邀请码 / 兑换码（协议形状）─────────────────────────
+    def test_query_activation_is_get(self) -> None:
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen['method'] = request.method
+            seen['path'] = request.url.path
+            return httpx.Response(
+                200, headers={'content-type': 'application/json'},
+                json={'code': '000000',
+                      'data': {'activated': False}})
+
+        with mock.patch.object(config, 'http_client',
+                               self._mock_http(handler)):
+            out = asyncio.run(client.query_activation('s'))
+        self.assertEqual(seen['method'], 'GET')
+        self.assertTrue(seen['path'].endswith('/points/activation'))
+        self.assertFalse(out['data']['activated'])
+
+    def test_bind_invite_code_posts_invite_and_device(self) -> None:
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen['method'] = request.method
+            seen['path'] = request.url.path
+            seen['body'] = json.loads(request.content.decode('utf-8'))
+            return httpx.Response(
+                200, headers={'content-type': 'application/json'},
+                json={'code': '000000', 'desc': 'ok', 'data': {}})
+
+        with mock.patch.object(config, 'http_client',
+                               self._mock_http(handler)):
+            out = asyncio.run(client.bind_invite_code(
+                's', '  ABC123 ', device_id='dev-1'))
+        self.assertEqual(seen['method'], 'POST')
+        self.assertTrue(seen['path'].endswith('/points/activation'))
+        self.assertEqual(seen['body'],
+                         {'inviteCode': 'ABC123', 'deviceId': 'dev-1'})
+        self.assertEqual(out['code'], '000000')
+
+    def test_bind_invite_code_omits_blank_device(self) -> None:
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen['body'] = json.loads(request.content.decode('utf-8'))
+            return httpx.Response(
+                200, headers={'content-type': 'application/json'},
+                json={'code': '000000', 'data': {}})
+
+        with mock.patch.object(config, 'http_client',
+                               self._mock_http(handler)):
+            asyncio.run(client.bind_invite_code('s', 'ABC', device_id=' '))
+        self.assertEqual(seen['body'], {'inviteCode': 'ABC'})
+
+    def test_bind_invite_code_requires_value(self) -> None:
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(client.bind_invite_code('s', '   '))
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(ctx.exception.code, 'missing_invite_code')
+
+    def test_redeem_code_posts_code(self) -> None:
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen['method'] = request.method
+            seen['path'] = request.url.path
+            seen['body'] = json.loads(request.content.decode('utf-8'))
+            return httpx.Response(
+                200, headers={'content-type': 'application/json'},
+                json={'code': '000000', 'data': {'points': 5}})
+
+        with mock.patch.object(config, 'http_client',
+                               self._mock_http(handler)):
+            out = asyncio.run(client.redeem_code('s', ' GIFT '))
+        self.assertEqual(seen['method'], 'POST')
+        self.assertTrue(
+            seen['path'].endswith('/points/redemption-codes/redeem'))
+        self.assertEqual(seen['body'], {'code': 'GIFT'})
+        self.assertEqual(out['data'], {'points': 5})
+
+    def test_redeem_code_requires_value(self) -> None:
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(client.redeem_code('s', ''))
+        self.assertEqual(ctx.exception.code, 'missing_redeem_code')
+
+    def test_points_json_maps_http_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text='upstream down')
+
+        with mock.patch.object(config, 'http_client',
+                               self._mock_http(handler)):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(client.query_activation('s'))
+        self.assertEqual(ctx.exception.status, 503)
 
 
 class LoomyWechatTest(unittest.TestCase):
@@ -1273,6 +1619,44 @@ class LoomyRoutingTest(unittest.TestCase):
         self.assertTrue(caps['credits_ttl'])
         self.assertFalse(caps['desktop_sync'])
         self.assertFalse(caps['solo_max_tokens'])
+
+
+class LoomyTaskRoutingTest(unittest.TestCase):
+    """任务接口的两个守卫：能力位要出现在 /api/platforms，路由要真的注册了。"""
+
+    def test_capabilities_advertise_tasks(self) -> None:
+        from server.routers import platforms as platforms_router
+
+        items = {item['name']: item
+                 for item in platforms_router.list_platforms({})['platforms']}
+        self.assertTrue(items['loomy']['supports_tasks'])
+        # 其余平台没有这套概念：前端不该在它们身上出现「任务」分段。
+        for name, item in items.items():
+            if name == 'loomy':
+                continue
+            self.assertFalse(item['supports_tasks'], name)
+
+    def test_task_routes_are_registered(self) -> None:
+        from server.routers import platforms as platforms_router
+
+        routes = {(getattr(route, 'path', ''),
+                   tuple(sorted(getattr(route, 'methods', ()) or ())))
+                  for route in platforms_router.router.routes}
+        self.assertIn(('/api/platforms/{name}/accounts/{account_id}/tasks',
+                       ('GET',)), routes)
+        self.assertIn(
+            ('/api/platforms/{name}/accounts/{account_id}/tasks/{action}',
+             ('POST',)), routes)
+
+    def test_tasks_adapter_rejects_platforms_without_tasks(self) -> None:
+        from fastapi import HTTPException
+
+        from server.routers import platforms as platforms_router
+
+        with self.assertRaises(HTTPException) as ctx:
+            platforms_router._tasks_adapter('trae')
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(platforms_router._tasks_adapter('loomy').name, 'loomy')
 
 
 if __name__ == '__main__':

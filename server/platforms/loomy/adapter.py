@@ -259,6 +259,10 @@ class LoomyAdapter(PlatformAdapter):
     # 单区域平台（讯飞星火国内站）。
     realm_aware = False
 
+    def supports_tasks(self) -> bool:
+        """Loomy 客户端里有「签到 / 绑定邀请码 / 兑换兑换码」这一组任务。"""
+        return True
+
     def __init__(self) -> None:
         # uid -> 账号级锁（重新登录串行，避免并发把同一账号打两次）。
         self._locks: dict[str, asyncio.Lock] = {}
@@ -600,6 +604,201 @@ class LoomyAdapter(PlatformAdapter):
             'permanent': data.get('permanentBalance'),
             'daily': data.get('dailyBalance'),
             'daily_quota': data.get('dailyQuota'),
+            # 自己名下的邀请码只在这个响应里下发，任务页要展示就必须带出来。
+            'invite_codes': data.get('invitationCodes') or [],
+        }
+
+    # ── 任务面板（激活状态 / 邀请码 / 兑换码）──────────────
+    async def task_status(self, account_id: str) -> dict:
+        """任务面板的**只读**状态：激活情况 + 上次同步的签到 / 邀请码缓存。
+
+        刻意不在这里调 `points/first-login`：那是一次真实的签到写操作，
+        打开一个页面不该顺手替用户领奖。签到由 `run_task('checkin')` 显式触发。
+        """
+        account = self._require(account_id)
+        uid = str(account.get('uid') or '')
+        cached = account.get('taskCache') if isinstance(
+            account.get('taskCache'), dict) else {}
+
+        activation: dict[str, Any]
+        try:
+            activation = self._activation_view(await self._query_activation(account))
+        except PlatformError as exc:
+            activation = {'error': exc.message, 'code': exc.code}
+
+        checkin = cached.get('checkin') if isinstance(
+            cached.get('checkin'), dict) else None
+        codes = cached.get('inviteCodes')
+        return {
+            'uid': uid,
+            'nickname': str(account.get('nickname') or ''),
+            'realm': 'cn',
+            'activation': activation,
+            'checkin': checkin,
+            'invite_codes': [c for c in codes if isinstance(c, dict)]
+            if isinstance(codes, list) else [],
+            'synced_at': int(cached.get('syncedAt') or 0),
+        }
+
+    async def run_task(self, account_id: str, action: str, **params) -> dict:
+        """执行任务动作：`checkin`（签到 + 同步邀请码）/ `bind_invite` / `redeem`。"""
+        action = str(action or '').strip().lower()
+        if action in ('checkin', 'sync'):
+            return await self._task_checkin(account_id)
+        if action in ('bind_invite', 'invite'):
+            return await self._bind_invite(
+                account_id, str(params.get('invite_code') or ''))
+        if action in ('redeem', 'redeem_code'):
+            return await self._redeem(
+                account_id, str(params.get('code') or ''))
+        raise PlatformError(f'不支持的任务动作 {action!r}', status=400,
+                            code='task_unsupported')
+
+    def _activation_view(self, payload: dict) -> dict:
+        """`/points/activation` → 统一形状（同时保留原始 data 便于排障）。"""
+        data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+        return {
+            'activated': data.get('activated') is True,
+            'applied_invitation_code': str(
+                data.get('appliedInvitationCode') or ''),
+            'raw': data,
+        }
+
+    async def _query_activation(self, account: dict) -> dict:
+        account = await self._ensure_session(account)
+        payload = await client.query_activation(
+            str(account.get('session') or ''),
+            proxy=self._proxy_for(account),
+            timeout=runtime_settings.credits_timeout(self.name))
+        if client.login_expired(payload):
+            raise PlatformError(client._error_text(payload, '登录已失效'),
+                                status=401, code='login_expired',
+                                payload=payload)
+        return payload
+
+    async def _task_checkin(self, account_id: str) -> dict:
+        """签到（复用 `checkin`）+ 拉一次激活状态，并把结果缓存进账号文件。"""
+        account = self._require(account_id)
+        result = await self.checkin(account_id)
+        activation: dict[str, Any]
+        try:
+            activation = self._activation_view(
+                await self._query_activation(account))
+        except PlatformError as exc:
+            activation = {'error': exc.message, 'code': exc.code}
+
+        cache = {
+            'syncedAt': int(time.time()),
+            'checkin': {
+                'ok': bool(result.get('ok')),
+                'already': bool(result.get('already')),
+                'balance': result.get('balance'),
+                'permanent': result.get('permanent'),
+                'daily': result.get('daily'),
+                'daily_quota': result.get('daily_quota'),
+                'message': result.get('message') or '',
+            },
+            'inviteCodes': [
+                item for item in (result.get('invite_codes') or [])
+                if isinstance(item, dict)
+            ],
+        }
+        try:
+            store.save_account({**self._require(account_id), 'taskCache': cache})
+        except Exception:  # noqa: BLE001 —— 缓存写不进去不影响本次结果
+            pass
+
+        return {
+            'uid': str(account.get('uid') or ''),
+            'nickname': str(account.get('nickname') or ''),
+            'realm': 'cn',
+            'checkin': {
+                **cache['checkin'],
+                'earned_credit': result.get('earned_credit') or 0,
+                'credits': result.get('credits'),
+            },
+            'activation': activation,
+            'invite_codes': cache['inviteCodes'],
+            'synced_at': cache['syncedAt'],
+        }
+
+    async def _bind_invite(self, account_id: str, invite_code: str) -> dict:
+        invite = str(invite_code or '').strip()
+        if not invite:
+            raise PlatformError('请填写邀请码', status=400,
+                                code='missing_invite_code')
+        account = self._require(account_id)
+        current = await self._query_activation(account)
+        view = self._activation_view(current)
+        if view['activated']:
+            raise PlatformError(
+                '该账号已绑定邀请码'
+                + (f'：{view["applied_invitation_code"]}'
+                   if view['applied_invitation_code'] else ''),
+                status=409, code='already_activated', payload=current)
+
+        account = await self._ensure_session(account)
+        payload = await client.bind_invite_code(
+            str(account.get('session') or ''), invite,
+            device_id=str(account.get('deviceId') or ''),
+            proxy=self._proxy_for(account),
+            timeout=runtime_settings.credits_timeout(self.name))
+        if client.login_expired(payload):
+            raise PlatformError(client._error_text(payload, '登录已失效'),
+                                status=401, code='login_expired',
+                                payload=payload)
+        code = payload.get('code')
+        ok = code in (None, '', 0, '0', '000000', 200, '200')
+        desc = str(payload.get('desc') or payload.get('message') or '')
+        if not ok:
+            raise PlatformError(desc or '绑定邀请码失败', status=400,
+                                code='invite_failed', payload=payload)
+
+        # 绑定成功后余额 / 奖励可能变化，顺手清掉积分缓存。
+        self._credits.pop(str(account.get('uid') or ''), None)
+        try:
+            activation = self._activation_view(
+                await self._query_activation(account))
+        except PlatformError:
+            activation = {'activated': True,
+                          'applied_invitation_code': invite}
+        return {
+            'ok': True,
+            'uid': str(account.get('uid') or ''),
+            'account': str(account.get('uid') or ''),
+            'desc': desc,
+            'invite_code': invite,
+            'activation': activation,
+            'data': payload.get('data') or {},
+        }
+
+    async def _redeem(self, account_id: str, code: str) -> dict:
+        value = str(code or '').strip()
+        if not value:
+            raise PlatformError('请填写兑换码', status=400,
+                                code='missing_redeem_code')
+        account = await self._ensure_session(self._require(account_id))
+        payload = await client.redeem_code(
+            str(account.get('session') or ''), value,
+            proxy=self._proxy_for(account),
+            timeout=runtime_settings.credits_timeout(self.name))
+        if client.login_expired(payload):
+            raise PlatformError(client._error_text(payload, '登录已失效'),
+                                status=401, code='login_expired',
+                                payload=payload)
+        biz = payload.get('code')
+        ok = biz in (None, '', 0, '0', '000000', 200, '200')
+        desc = str(payload.get('desc') or payload.get('message') or '')
+        if not ok:
+            raise PlatformError(desc or '兑换失败', status=400,
+                                code='redeem_failed', payload=payload)
+        self._credits.pop(str(account.get('uid') or ''), None)
+        return {
+            'ok': True,
+            'uid': str(account.get('uid') or ''),
+            'account': str(account.get('uid') or ''),
+            'desc': desc,
+            'data': payload.get('data') or {},
         }
 
     async def usage(self, account_id: str) -> dict:
