@@ -12,6 +12,7 @@ import {
   ExternalLink,
   FileJson,
   Gift,
+  Globe,
   KeyRound,
   Loader2,
   LogIn,
@@ -86,6 +87,7 @@ import {
 } from '@/lib/platform-realm';
 import {cn} from '@/lib/utils';
 import {PlatformCoolingDialog} from './PlatformCoolingDialog';
+import {PlatformProxyDialog} from './PlatformProxyDialog';
 import {PlatformTasksPanel} from './PlatformTasksPanel';
 import {PlatformWeightDialog} from './PlatformWeightDialog';
 import type {
@@ -318,6 +320,7 @@ export function PlatformAccountsPanel({
   // 表格只负责展示，避免「一个输入框逐键提交」那种中间态请求。
   const [weightTarget, setWeightTarget] = useState<PlatformAccount | null>(null);
   const [coolingTarget, setCoolingTarget] = useState<PlatformAccount | null>(null);
+  const [proxyTarget, setProxyTarget] = useState<PlatformAccount | null>(null);
   /**
    * 当前视图：`accounts`（账号列表）/ `tasks`（平台任务）。
    *
@@ -899,6 +902,8 @@ export function PlatformAccountsPanel({
   const supportsCooling = info?.supports_cooling !== false;
   // 仅签到：旧后端没有这个字段，按「不支持」处理（不显示点了必然 400 的按钮）。
   const supportsCheckinOnly = info?.supports_checkin_only === true;
+  // 出口线路：国际站账号常需要境外出口。旧后端没有这个字段 → 不显示入口。
+  const supportsProxy = info?.supports_proxy === true;
   const supportsLoginCallback = info?.supports_login_callback !== false;
   // 短信验证码登录（Loomy）：验证码直接登录 + 微信未绑手机号时的补绑。
   const supportsLoginCode = !!info?.supports_login_code;
@@ -1554,6 +1559,25 @@ export function PlatformAccountsPanel({
                                   <Scale className={cn('h-3.5 w-3.5', a.weight && 'text-primary')} />
                                 </Button>
                               )}
+                              {supportsProxy && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className={cn(
+                                    'h-7 w-7 rounded-md',
+                                    a.proxy
+                                      ? 'text-primary hover:text-primary'
+                                      : 'text-muted-foreground',
+                                  )}
+                                  title={a.proxy === '__direct__'
+                                    ? `${t('platforms.proxyLine')}: ${t('platforms.proxyDirect')}`
+                                    : `${t('platforms.proxyLine')}: ${a.proxy || t('platforms.proxyFollowPool')}`}
+                                  disabled={rowBusy || busyAny}
+                                  onClick={() => setProxyTarget(a)}
+                                >
+                                  <Globe className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
                               {supportsCooling && (
                                 <Button
                                   variant="ghost"
@@ -1806,7 +1830,7 @@ export function PlatformAccountsPanel({
         )}
       </section>
 
-      {/* 调度参数弹窗：权重 / 强制冷却。与 WorkBuddy 账号页同一套交互。 */}
+      {/* 调度参数弹窗：权重 / 强制冷却 / 出口线路。与 WorkBuddy 账号页同一套交互。 */}
       <PlatformWeightDialog
         platform={platform}
         account={weightTarget}
@@ -1820,6 +1844,13 @@ export function PlatformAccountsPanel({
         open={coolingTarget !== null}
         onOpenChange={(open) => { if (!open) setCoolingTarget(null); }}
         onSuccess={() => void reloadAll()}
+      />
+      <PlatformProxyDialog
+        platform={platform}
+        account={proxyTarget}
+        open={proxyTarget !== null}
+        onOpenChange={(open) => { if (!open) setProxyTarget(null); }}
+        onSaved={() => void reloadAll()}
       />
 
       {/* ── 用量弹窗 ── */}

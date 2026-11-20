@@ -808,6 +808,21 @@ class MinimaxAdapter(PlatformAdapter):
             raise PlatformError(str(exc), status=400,
                                 code='invalid_cooling') from exc
 
+    def set_account_proxy(self, account_id: str, proxy: str) -> dict:
+        """给账号绑定出口线路（空串 = 跟随号池，`__direct__` = 强制直连）。
+
+        国际站（`realm=global`）常需要境外出口；绑好后下一次请求就用新线路
+        （`_proxy_for` 每次现读账号文件，没有缓存）。
+        """
+        try:
+            return store.set_proxy(account_id, proxy)
+        except FileNotFoundError as exc:
+            raise PlatformError('账号不存在', status=404,
+                                code='account_not_found') from exc
+        except ValueError as exc:
+            raise PlatformError(str(exc), status=400,
+                                code='invalid_account_state') from exc
+
     def invalidate_limit(self) -> None:
         self._limiter.invalidate()
 

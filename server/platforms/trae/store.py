@@ -305,6 +305,24 @@ def set_weight(account_id: object, weight: object) -> dict:
     return _update(account_id, mutate)
 
 
+def set_proxy(account_id: object, proxy: object) -> dict:
+    """改写账号绑定的出口线路（空串 = 跟随号池，`__direct__` = 强制直连）。
+
+    为什么只写一个字段而不是整份账号：线路是**调度参数**，与凭据无关；让用户
+    为改一次代理重新登录一遍是把两件事捆在一起。合法性由路由先用
+    `config.account_proxy` 校验，这里只负责落盘（与 WorkBuddy 账号页一致）。
+    """
+    value = str(proxy or '').strip()
+
+    def mutate(raw: dict) -> None:
+        if value:
+            raw['proxy'] = value
+        else:
+            raw.pop('proxy', None)
+
+    return _update(account_id, mutate)
+
+
 def set_disabled(account_id: object, disabled: bool, reason: str = '') -> dict:
     """临时冻结 / 恢复一个账号。
 

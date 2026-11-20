@@ -362,6 +362,22 @@ class PlatformAdapter(ABC):
         raise PlatformError(f'{self.label} 不支持「仅签到」', status=400,
                             code='account_checkin_only_unsupported')
 
+    def set_account_proxy(self, account_id: str, proxy: str) -> dict:
+        """改写账号绑定的出口线路（**可选能力**）。
+
+        `proxy` 语义与 WorkBuddy 账号一致（见 `config.resolve_account_proxy`）：
+
+          · 空串 = 跟随号池（按「设置 → 代理」的池策略分配）；
+          · `__direct__` = 强制直连，不经任何代理；
+          · 其余 = 线路名，必须在「设置 → 代理」里存在且启用。
+
+        为什么需要：国际站账号（MiniMax `global`、Trae 国际版）常被要求走
+        境外出口；没有入口时用户只能手改凭据 JSON，而报错信息又让人「绑定
+        境外代理」。不支持按账号绑线路的平台沿用默认实现（明确的 400）。
+        """
+        raise PlatformError(f'{self.label} 不支持绑定代理线路', status=400,
+                            code='account_proxy_unsupported')
+
     def set_account_cooling(self, account_id: str, until: float,
                             reason: str = '') -> dict:
         """强制冷却到某个时刻（epoch 秒，**可选能力**）。"""

@@ -267,6 +267,19 @@ def set_weight(account_id: object, weight: object) -> dict:
     return _update(account_id, mutate)
 
 
+def set_proxy(account_id: object, proxy: object) -> dict:
+    """改写账号绑定的出口线路（空串 = 跟随号池，`__direct__` = 强制直连）。"""
+    value = str(proxy or '').strip()
+
+    def mutate(raw: dict) -> None:
+        if value:
+            raw['proxy'] = value
+        else:
+            raw.pop('proxy', None)
+
+    return _update(account_id, mutate)
+
+
 def set_disabled(account_id: object, disabled: bool, reason: str = '') -> dict:
     def mutate(raw: dict) -> None:
         if disabled:

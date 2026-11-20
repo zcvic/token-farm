@@ -186,6 +186,9 @@ registry.register(FooAdapter())
 | `pool_weight` | 账号权重是否只在上游**池内**生效（WorkBuddy 为 `True`，界面标注「池级权重」） |
 | `record_name(bare_model)` | 记账用的 `mapped_model`：默认 `<平台>/<模型>`；WorkBuddy 为裸名 |
 | `import_from_desktop()` | **可选**：从本机客户端一键导入（没有该方法的平台，管理端会回 400） |
+| `set_account_options(id, weight)` / `set_account_disabled` / `set_account_checkin_only` | **可选**：账号级调度参数（权重 / 停用 / 仅签到）。基类默认抛 400，`/api/platforms` 的 `supports_*` 据此决定是否露出入口 |
+| `set_account_proxy(id, proxy)` | **可选**：账号级出口线路（空串 = 跟随号池，`__direct__` = 直连）。原生选号的平台都实现了；Qoder 的选号在内置网关里，不提供 |
+| `set_account_cooling` / `clear_account_cooling` | **可选**：强制冷却（定时 / 永久）与解除 |
 | `login_start/poll/cancel` | **可选**：网页登录（`login_start` / `login_poll` / `login_cancel` / `login_submit_callback`，见下节） |
 
 `PlatformChat` 有三种形态：
@@ -215,7 +218,7 @@ registry.register(FooAdapter())
 | POST | `/api/platforms/{name}/checkin-all` | 批量签到（并发与账号间隔按平台设置，默认并发 2、间隔 2–5 秒；单条失败不中断；跳过已冻结账号） |
 | GET | `/api/platforms/{name}/settings` | 平台设置：单账号在途上限（总吞吐按可用账号数折算）+ 批量签到节奏 + 请求超时 / 换号次数 / 平台专属开关（会话亲和、桌面端回写），以及设置页顶部的本地「平台概况」（账号池状态 + 已登记积分，不发上游请求） |
 | PUT | `/api/platforms/{name}/settings` | 改上述设置（可只提交要改的字段；不支持的字段会 400） |
-| PATCH | `/api/platforms/{name}/accounts/{id}` | 账号调度参数（`weight` / `disabled` / `checkin_only`） |
+| PATCH | `/api/platforms/{name}/accounts/{id}` | 账号调度参数（`weight` / `disabled` / `checkin_only` / `proxy`） |
 | POST | `/api/platforms/{name}/accounts/{id}/cooling` | 强制冷却（定时 / 永久） |
 | DELETE | `/api/platforms/{name}/accounts/{id}/cooling` | 立即解除冷却 |
 | POST | `/api/platforms/{name}/login/start` | 发起网页登录，返回授权 URL |
@@ -256,6 +259,11 @@ registry.register(FooAdapter())
   会跳过它），凭据仍保留，随时可以恢复。它解决的是「这个号先别用了」而不是
   「这个号坏了」——所以界面把它归进「已停用」，而不是「需处理」。它与「仅签到」
   互斥：设冻结会清掉 `checkinOnly`，设仅签到也会清掉冻结。
+- **出口线路**（`proxy`）：账号级绑定，取值与 WorkBuddy 账号一致——空 = 跟随
+  号池（按「设置 → 代理」的池策略分配），`__direct__` = 强制直连，其余为线路名
+  （必须存在且启用，否则保存会被拒绝）。国际站账号（MiniMax 国际版、Trae 国际版）
+  常需要境外出口；改完下一次上游请求即生效。Qoder 的选号在网关进程里，不提供这个
+  入口。
 - **会话粘性（提示词缓存亲和）**：上游 prompt cache 按账号隔离，同一段对话每轮
   换号会让前缀缓存作废。第一个请求按权重选出账号后，按会话键（`prompt_cache_key`
   → 会话 id → 首条 user 消息哈希，见 `services/session_affinity.py`）钉住
@@ -1173,7 +1181,9 @@ Qoder 的协议包含 COSY 签名、设备指纹、OAuth 设备授权、模型�
 4. **能力开关**。Qoder 有账号权重（与 Trae / WorkBuddy 同一口径，只影响选号
    分摊），但没有强制冷却 API，也没有本机回环回调，所以
    `supports_cooling` / `supports_login_callback` 为 false，前端据此隐藏按钮，
-   而不是让用户点下去才收到 400。
+   而不是让用户点下去才收到 400。**出口线路同理**：Qoder 的选号与出网都在
+   内置网关进程里，账号级 `proxy` 没有落点，`supports_proxy` 也为 false；
+   要给 Qoder 换出口，改网关自身的代理配置，而不是账号行上的线路。
 5. **会话粘性由网关执行，键由适配器传**。真实选号在网关进程里，厂商自带的
    亲和有两种：消息前缀（`messages[:2]` 的哈希）与会话 id。前者在客户端每轮
    重排 system 消息时会漂移，且厂商**不认识** `prompt_cache_key`。所以

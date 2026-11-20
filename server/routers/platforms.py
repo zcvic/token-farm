@@ -26,7 +26,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
-from .. import db, security
+from .. import config, db, security
 from ..platforms import PlatformAdapter, PlatformError, all_adapters, get as get_platform
 from ..platforms import checkinpacing, limiter, settings as runtime_settings
 from ..services import credits as creditsvc
@@ -129,6 +129,10 @@ def list_platforms(user: dict = Depends(security.current_user)) -> dict:
             # 能否「仅签到」：摘掉推理流量但保留签到 / 任务（不消耗积分）。
             'supports_checkin_only': type(adapter).set_account_checkin_only
             is not PlatformAdapter.set_account_checkin_only,
+            # 能否给单个账号绑定出口线路（国际站账号常需要境外出口）。
+            # WorkBuddy 走 `/api/accounts/{file}/proxy`，不走这里。
+            'supports_proxy': type(adapter).set_account_proxy
+            is not PlatformAdapter.set_account_proxy,
             'supports_login_callback': hasattr(adapter, 'login_submit_callback'),
             # 能否用手机号 + 短信验证码登录（Loomy：验证码登录 / 微信补绑手机）
             'supports_login_code': hasattr(adapter, 'login_submit_code'),
@@ -534,7 +538,7 @@ async def login_cancel(name: str, login_id: str,
 @router.patch('/{name}/accounts/{account_id}')
 async def update_account_options(name: str, account_id: str, body: dict = Body(...),
                                  user: dict = Depends(security.require_admin)) -> dict:
-    """修改账号级调度参数（权重 / 临时冻结 / 仅签到）。
+    """修改账号级调度参数（权重 / 临时冻结 / 仅签到 / 出口线路）。
 
     适配器负责校验与落库；未覆盖对应能力的平台会由基类抛明确的「不支持」
     （400），交给 `_fail` 原样回给界面 —— 这里不判断「平台是否支持」，
@@ -547,13 +551,25 @@ async def update_account_options(name: str, account_id: str, body: dict = Body(.
     disabled = payload.get('disabled')
     has_checkin_only = 'checkin_only' in payload
     checkin_only = payload.get('checkin_only')
+    has_proxy = 'proxy' in payload
+    proxy = payload.get('proxy')
     reason = str(payload.get('reason') or '')
-    if weight is None and not has_disabled and not has_checkin_only:
+    if (weight is None and not has_disabled and not has_checkin_only
+            and not has_proxy):
         raise HTTPException(status_code=400, detail='没有要修改的项')
     if has_disabled and not isinstance(disabled, bool):
         raise HTTPException(status_code=400, detail='disabled 必须是布尔值')
     if has_checkin_only and not isinstance(checkin_only, bool):
         raise HTTPException(status_code=400, detail='checkin_only 必须是布尔值')
+    if has_proxy:
+        if not isinstance(proxy, str):
+            raise HTTPException(status_code=400, detail='proxy 必须是线路名字符串')
+        # 与 WorkBuddy 账号页同一套校验：线路必须存在且启用（空串 = 跟随号池，
+        # `__direct__` = 强制直连）。在这里拦下，免得落盘一个永远解析不了的线路。
+        try:
+            config.account_proxy({'proxy': proxy.strip()})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if has_disabled and has_checkin_only and disabled and checkin_only:
         # 两种状态互斥：完全停用会连签到一起停，和「仅签到」不能同时成立。
         raise HTTPException(status_code=400,
@@ -569,6 +585,8 @@ async def update_account_options(name: str, account_id: str, body: dict = Body(.
             account = adapter.set_account_checkin_only(account_id, checkin_only)
         if weight is not None:
             account = adapter.set_account_options(account_id, weight=weight)
+        if has_proxy:
+            account = adapter.set_account_proxy(account_id, proxy.strip())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PlatformError as exc:
@@ -583,6 +601,7 @@ async def update_account_options(name: str, account_id: str, body: dict = Body(.
             f'weight={weight}' if weight is not None else '',
             f'disabled={disabled}' if has_disabled else '',
             f'checkin_only={checkin_only}' if has_checkin_only else '',
+            f'proxy={proxy}' if has_proxy else '',
         ) if part),
     )
     return {'platform': name, 'account': account}

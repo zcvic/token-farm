@@ -1102,6 +1102,17 @@ class LoomyAdapter(PlatformAdapter):
             raise PlatformError(str(exc), status=400,
                                 code='invalid_cooling') from exc
 
+    def set_account_proxy(self, account_id: str, proxy: str) -> dict:
+        """给账号绑定出口线路（空串 = 跟随号池，`__direct__` = 强制直连）。"""
+        try:
+            return store.set_proxy(account_id, proxy)
+        except FileNotFoundError as exc:
+            raise PlatformError('账号不存在', status=404,
+                                code='account_not_found') from exc
+        except ValueError as exc:
+            raise PlatformError(str(exc), status=400,
+                                code='invalid_account_state') from exc
+
     def invalidate_limit(self) -> None:
         self._limiter.invalidate()
 

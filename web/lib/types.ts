@@ -2184,6 +2184,11 @@ export interface PlatformInfo {
    */
   supports_checkin_only?: boolean;
   /**
+   * 能否给单个账号绑定出口线路（跟随号池 / 直连 / 指定线路）。
+   * 国际站账号常需要境外出口；为 true 时账号行露出「代理线路」入口。
+   */
+  supports_proxy?: boolean;
+  /**
    * 网页登录是否需要「粘贴回调地址」。Trae 的本机回环回调需要，Qoder 的
    * 设备授权轮询不需要（为 false）。
    */
