@@ -145,9 +145,17 @@ class GatewayPassthroughTest(unittest.TestCase):
         #   · platforms/trae/text_tools.py：同一前缀下的**文本还原层**——模型把调用
         #     写进正文（`[tool_call] name(args)`，照着历史记录 / 协议提示念）时把它
         #     解析回结构化调用。只认已声明 tools 的请求，解析不出的原样透传。
+        #   · platforms/minimax/translate.py：MiniMax Code 的上游是 Anthropic
+        #     Messages 形状，`tool_use` 必须翻译成 OpenAI 的 `tool_calls`，
+        #     流式 `input_json_delta` 也必须重建成 `delta.tool_calls`。只作用于
+        #     `minimaxcn/` / `minimaxcom/` 前缀。
+        #   · platforms/minimax/adapter.py：上一条的**流式收尾器**——它只读
+        #     OpenAI chunk 里的 `delta.tool_calls` 判断「这一帧算不算首字」，
+        #     不改变内容；真正的协议翻译仍在 translate.py。
         allow = {'routers/anthropic.py', 'routers/responses.py', 'services/tencent.py',
                  'platforms/trae/chat.py', 'platforms/trae/client.py',
-                 'platforms/trae/text_tools.py'}
+                 'platforms/trae/text_tools.py',
+                 'platforms/minimax/translate.py', 'platforms/minimax/adapter.py'}
         root = Path(__file__).resolve().parents[2] / 'server'
         # Qoder 的内置网关是**第三方源码副本**（vendor 自 qoder2api-hub），它的
         # `tool_calls` 处理属于 Qoder 私有协议 ↔ OpenAI 的翻译层，与 trae/chat.py

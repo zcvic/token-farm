@@ -163,6 +163,11 @@ _LOOMY = frozenset({
     'credits_ttl', 'credits_timeout',
     'cooldown_429', 'cooldown_5xx',
 })
+# DuMate 与 Loomy 同一组策略（原生选号 / 目录缓存 / 冷却），也没有桌面端回写。
+_DUMATE = _LOOMY
+# MiniMax Code 同为原生选号 / 目录缓存 / 冷却；额外支持网页设备码登录（路由
+# 不按能力表过滤登录，这里只是保持与适配器声明一致）。
+_MINIMAX = _LOOMY
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -171,6 +176,8 @@ _BY_PLATFORM: dict[str, frozenset[str]] = {
     'trae': _TRAE,
     'qoder': _QODER,
     'loomy': _LOOMY,
+    'dumate': _DUMATE,
+    'minimax': _MINIMAX,
     'combo': _COMBO,
 }
 

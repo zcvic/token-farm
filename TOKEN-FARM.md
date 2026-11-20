@@ -1,8 +1,8 @@
 # token-farm
 
 **多平台 token 农场**：一套面板同时管理 **WorkBuddy（腾讯 CodeBuddy）**、
-**Trae**、**Qoder** 与 **Loomy（讯飞星火）** 四类账号，统一对外提供
-OpenAI 兼容接口。
+**Trae**、**Qoder**、**Loomy（讯飞星火）**、**DuMate（百度搭子）** 与
+**MiniMax Code** 六类账号，统一对外提供 OpenAI 兼容接口。
 
 本项目派生自 [`workbuddy-manager`](https://github.com/ithtelab/workbuddy-manager)
 （MIT）。上游的全部能力都保留且行为不变 —— 账号池、扫码纳管、签到保活、密钥分发、
@@ -10,13 +10,15 @@ IP / 模型白名单、用量与日志。在此之上新增：
 
 | 新增 | 位置 | 说明 |
 |---|---|---|
-| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy 为原生实现，Qoder 用内置网关 |
+| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code 为原生实现，Qoder 用内置网关 |
 | Trae 适配器 | `server/platforms/trae/` | 账号存储 / 令牌刷新 / 签到 / 额度 / 模型 / 对话（SSE → OpenAI chunk） |
 | Qoder 适配器 | `server/platforms/qoder/` | 账号 / 签到 / 额度 / 模型 / 对话；协议层内置在 `_vendor/`，无需额外部署 |
 | Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录（含手机号补绑）/ 手机验证码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
-| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` 前缀走对应平台（旧式 `trae/` / `qoder/` 继续兼容），其余保持原样走 WorkBuddy |
+| DuMate 适配器 | `server/platforms/dumate/` | 账号（网页 Cookie）/ token 兑换与缓存 / 签到 / 积分 / 模型（桌面端 → 缓存 → 快照）/ 对话；网关 OpenAI 兼容，单区域前缀 `dumate/` |
+| MiniMax Code 适配器 | `server/platforms/minimax/` | 账号（OAuth 设备码 + 一次性 refresh token）/ 双区（`minimaxcn/`、`minimaxcom/`）/ 签到 / 积分 / M Plan 窗口 / 模型 / 对话；Anthropic Messages 端点由适配器内部翻译成 OpenAI 形状 |
+| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
 | 多平台接口 | `server/routers/platforms.py` | `/api/platforms/*`：账号、导入、刷新、签到、额度、模型 |
-| 多平台页面 | `web/app/(main)/accounts/page.tsx`、`models/page.tsx` | 顶部平台下拉切换；账号 / 模型页随平台更换数据源，分版本的平台（Trae / Qoder）再按国内版 / 国际版过滤，统计与日志按平台过滤 |
+| 多平台页面 | `web/app/(main)/accounts/page.tsx`、`models/page.tsx` | 顶部平台下拉切换；账号 / 模型页随平台更换数据源，分版本的平台（Trae / Qoder / MiniMax Code）再按国内版 / 国际版过滤，统计与日志按平台过滤 |
 | 设计文档 | [`docs/multi-platform.md`](docs/multi-platform.md) | 契约、路由、凭据安全、已知限制 |
 
 > **凭据只在本机**：平台账号落在 `data/platforms/<平台>/accounts/`，接口只返回
@@ -44,6 +46,8 @@ token-farm/
 │  ├─ trae-ref.txt      # Trae 参考源里已人工核对过的提交（--refs 的基线）
 │  ├─ qoder-ref.txt     # Qoder 源码副本的基线与本地补丁
 │  ├─ loomy-ref.txt     # Loomy 参考源的基线、取用范围与「有意不跟」
+│  ├─ dumate-ref.txt    # DuMate 参考源的端点、形状与「有意不跟」
+│  ├─ minimax-ref.txt   # MiniMax Code 参考源的 OAuth / 对话 / 签名事实
 │  ├─ install.sh        # 上游原版：装依赖 + systemd（Linux 服务器）
 │  └─ windows-native/   # 上游原版：原生 Windows（无需 Docker）
 ├─ docs/                # 用户文档与维护者手册
@@ -323,6 +327,8 @@ MANAGER_REPO = os.environ.get('WB_MANAGER_REPO') or 'zcvic/token-farm'
 | `trae-ref` | [trae2api-hub](https://github.com/shuishuipingan/trae2api-hub)（MIT） | Trae 协议事实来源，**无共享历史** | `deploy/sync-upstream.* --refs`：只对照，永不 merge |
 | `qoder-ref` | [qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub)（MIT） | **源码副本**（`server/platforms/qoder/_vendor/`） | 整目录重新 vendor，见下 |
 | `loomy-ref` | [loomy2api](https://github.com/xingluoyuankong/loomy2api)（MIT） | Loomy 协议事实来源，**原生重写**、无副本 | 对照提交，改 `server/platforms/loomy/`，永不 merge |
+| `dumate-ref` | [dumate2api](https://github.com/wearetheone777/dumate2api)（MIT） | DuMate 协议事实来源，**原生重写**、无副本 | 对照端点与业务码，改 `server/platforms/dumate/`，永不 merge |
+| `minimax-ref` | [opencode-minimax-auth](https://www.npmjs.com/package/@magpie-community/opencode-minimax-auth)（MIT） | MiniMax Code 协议事实来源，**原生重写**、无副本 | 对照 OAuth / 签名 / 对话形状，改 `server/platforms/minimax/` |
 
 上游 Go 源码（workbuddy2api）已经并入本仓库的 `upstream/`，日常直接在这里改，
 不再从外部仓库 fetch / merge。面板侧新能力的参考来源是
@@ -348,6 +354,20 @@ Loomy 的协议参考是 [`xingluoyuankong/loomy2api`](https://github.com/xinglu
 也不新增依赖。已核对范围是 `eed1efa`（2026-10-02）→ `cb27afd`（2026-11-14，
 40 个提交）；取了什么、哪些有意不跟、实测到的上游形状都记在
 `deploy/loomy-ref.txt`，用户向的说明见 [`docs/loomy.md`](docs/loomy.md)。
+
+DuMate（百度搭子）的协议参考是 [`wearetheone777/dumate2api`](https://github.com/wearetheone777/dumate2api)，
+同样是**原生重写**：网页接口换 gateway token、`dumate-svc.baidu.com` 的 OpenAI
+兼容对话、签到与积分都在 `server/platforms/dumate/` 里实现，没有引入参考仓
+的 HTTP 服务。端点、业务码与「有意不跟」（例如不做自动化百度登录、不批量注册）
+记在 `deploy/dumate-ref.txt`。
+
+MiniMax Code 的协议参考是
+[`@magpie-community/opencode-minimax-auth`](https://www.npmjs.com/package/@magpie-community/opencode-minimax-auth)
+（MIT）。本项目只取**协议事实**：OAuth 设备码 + PKCE、一次性 refresh token
+轮换、带 `yy` / `x-signature` 的账号接口、Anthropic Messages 对话端点与
+`minimax-cloud` 签到 / 积分。请求 / 响应 / SSE 的双向翻译在
+`server/platforms/minimax/translate.py`，不引入参考包的 OpenCode 插件形态，
+也不复制它的运行时。已核对的范围记在 `deploy/minimax-ref.txt`。
 
 所有参考源都没有共享提交历史，`git merge` / `git pull` 不成立 ——
 只能挑单个提交，导出成补丁再应用。流程与注意事项见

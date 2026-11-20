@@ -15,6 +15,11 @@
     国际版账号由内置网关持有。
   · Loomy —— 原生实现（讯飞星火 Loomy），单区域平台，模型名以 `loomy/`
     为前缀。账号服务 `account.xfinfr.com`，模型网关 OpenAI 兼容。
+  · DuMate —— 原生实现（百度搭子），单区域平台，模型名以 `dumate/` 为前缀。
+    凭证是网页 Cookie（`BDUSS`），模型网关 OpenAI 兼容。
+  · MiniMax Code —— 原生实现（mcode），分国内 / 国际两站，模型名以
+    `minimaxcn/` / `minimaxcom/` 为前缀。凭证是 OAuth refresh token，
+    对话端点是 Anthropic Messages 兼容（适配器内部翻译成 OpenAI 形状）。
   · 组合（combo）—— **虚拟平台**：没有账号，只把 `combo/<name>` 按权重
     分发给上面这些真实平台。因此不在界面里露出（`ui_visible=False`）。
 """
@@ -29,6 +34,8 @@ from .workbuddy import adapter as workbuddy_adapter
 from .trae import adapter as trae_adapter
 from .qoder import adapter as qoder_adapter
 from .loomy import adapter as loomy_adapter
+from .dumate import adapter as dumate_adapter
+from .minimax import adapter as minimax_adapter
 from .combo import adapter as combo_adapter
 
 # 注册内置平台。放在 import 之后而不是模块顶层逐个 register，是为了让
@@ -37,6 +44,8 @@ register(workbuddy_adapter)
 register(trae_adapter)
 register(qoder_adapter)
 register(loomy_adapter)
+register(dumate_adapter)
+register(minimax_adapter)
 register(combo_adapter)
 
 __all__ = [
