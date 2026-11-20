@@ -2662,7 +2662,19 @@
     "checkinOnlyEnable": "출석만 사용(크레딧 소모 없음, 출석과 작업은 계속)",
     "checkinOnlyDisable": "출석만 해제(정상 라우팅으로 복귀)",
     "checkinOnlyOn": "출석만 사용 설정됨: 대화에서 소모되지 않으며 출석과 작업은 계속됩니다",
-    "checkinOnlyOff": "출석만 해제됨, 계정이 정상 라우팅으로 복귀했습니다"
+    "checkinOnlyOff": "출석만 해제됨, 계정이 정상 라우팅으로 복귀했습니다",
+    "overviewTitle": "플랫폼 개요",
+    "overviewCreditsAt": "크레딧 기록: {time}",
+    "overviewUnavailable": "계정 목록을 읽지 못했습니다: {error}",
+    "overviewAccounts": "전체 계정",
+    "overviewActive": "라우팅 가능",
+    "overviewCheckinOnly": "출석만",
+    "overviewDisabled": "중지됨",
+    "overviewCooling": "쿨다운 중",
+    "overviewCredits": "기록된 크레딧",
+    "overviewNoCredits": "기록 없음",
+    "overviewCreditsKnown": "{count}개 계정",
+    "overviewNextExpire": "가장 가까운 만료"
   },
   "combos": {
     "title": "모델 조합",

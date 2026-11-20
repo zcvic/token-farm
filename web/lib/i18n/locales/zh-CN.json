@@ -2417,7 +2417,19 @@
     "checkinOnlyEnable": "开启仅签到（不参与消耗，签到与任务照常）",
     "checkinOnlyDisable": "关闭仅签到（恢复正常选号）",
     "checkinOnlyOn": "已开启仅签到：不再参与对话消耗，签到与任务照常",
-    "checkinOnlyOff": "已关闭仅签到，账号恢复正常选号"
+    "checkinOnlyOff": "已关闭仅签到，账号恢复正常选号",
+    "overviewTitle": "平台概况",
+    "overviewCreditsAt": "积分登记于 {time}",
+    "overviewUnavailable": "账号列表读取失败：{error}",
+    "overviewAccounts": "账号总数",
+    "overviewActive": "可调度",
+    "overviewCheckinOnly": "仅签到",
+    "overviewDisabled": "已停用",
+    "overviewCooling": "冷却中",
+    "overviewCredits": "已登记积分",
+    "overviewNoCredits": "暂无登记",
+    "overviewCreditsKnown": "{count} 个账号",
+    "overviewNextExpire": "最近到期"
   },
   "combos": {
     "title": "模型组合",

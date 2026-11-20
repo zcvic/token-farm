@@ -301,5 +301,50 @@ class PlatformCreditsRouteTest(_DbCase):
         self.assertIsNone(creditsvc.platform_snapshot_entry('qoder', 'u1'))
 
 
+class PlatformOverviewTest(_DbCase):
+    """设置页顶部「概况」卡：本地读账号 + 快照，不发上游。"""
+
+    def test_counts_and_snapshot_totals(self) -> None:
+        future = int(time.time()) + 86400
+        creditsvc.record_platform_balances('trae', {
+            'a': {'credits': 100,
+                  'expires': [{'amount': 100, 'expire_at': future, 'label': '包'}]},
+            'b': {'credits': 50.5},
+        })
+        adapter = _FakeAdapter({}, accounts=[
+            {'uid': 'a', 'disabled': False},
+            {'uid': 'b', 'disabled': False, 'checkin_only': True},
+            {'uid': 'c', 'disabled': True},
+            {'uid': 'd', 'disabled': False, 'cooling': True},
+        ])
+        out = platforms_router._platform_overview('trae', adapter)
+        self.assertEqual(out['accounts'], 4)
+        self.assertEqual(out['active'], 1)
+        self.assertEqual(out['checkin_only'], 1)
+        self.assertEqual(out['disabled'], 1)
+        self.assertEqual(out['cooling'], 1)
+        self.assertEqual(out['credits'], 150.5)
+        self.assertEqual(out['credits_known'], 2)
+        self.assertEqual(out['next_expire_at'], future)
+        self.assertGreater(out['snapshot_at'], 0)
+        self.assertIsNone(out['error'])
+
+    def test_account_store_outage_is_reported_not_raised(self) -> None:
+        class _Boom(_FakeAdapter):
+            def list_accounts(self) -> list[dict]:
+                raise RuntimeError('网关没起来')
+
+        out = platforms_router._platform_overview('qoder', _Boom({}))
+        self.assertEqual(out['accounts'], 0)
+        self.assertEqual(out['error'], '网关没起来')
+
+    def test_no_snapshot_yields_null_credits(self) -> None:
+        out = platforms_router._platform_overview('trae', _FakeAdapter({}, []))
+        self.assertIsNone(out['credits'])
+        self.assertEqual(out['credits_known'], 0)
+        self.assertEqual(out['snapshot_at'], 0)
+        self.assertIsNone(out['next_expire_at'])
+
+
 if __name__ == '__main__':  # pragma: no cover
     unittest.main()

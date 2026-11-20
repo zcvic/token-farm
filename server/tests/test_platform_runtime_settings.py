@@ -103,6 +103,13 @@ class DefaultsTest(_DbCase):
         self.assertFalse(runtime_settings.capabilities('minimax')['min_credits'])
         self.assertFalse(trae['min_credits'])
         self.assertFalse(qoder['min_credits'])
+        # DuMate 的模型目录读本机客户端快照，本进程不发目录请求：露出「目录
+        # 拉取超时」只会是保存成功但不生效的假开关。MiniMax 是真在线拉取。
+        self.assertFalse(runtime_settings.capabilities('dumate')['catalog_timeout'])
+        self.assertTrue(runtime_settings.capabilities('minimax')['catalog_timeout'])
+        # Qoder 的目录 / 冷却 / 换号都在内置网关里，适配器只做透传。
+        self.assertFalse(qoder['catalog_ttl'])
+        self.assertFalse(qoder['cooldown_429'])
         self.assertEqual(runtime_settings.load('loomy')['min_credits'], 5000)
         self.assertEqual(runtime_settings.load('loomy')['runtime_limits']['min_credits'],
                          {'min': 0, 'max': 10_000_000})

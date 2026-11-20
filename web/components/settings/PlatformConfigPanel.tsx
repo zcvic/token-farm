@@ -10,6 +10,7 @@ import {
   Save,
   ShieldCheck,
   Timer,
+  Users,
   Wand2,
   Zap,
 } from 'lucide-react';
@@ -30,6 +31,7 @@ import {
 import {Switch} from '@/components/ui/switch';
 import {errText, platformApi} from '@/lib/api';
 import {useAuth} from '@/lib/auth-context';
+import {fmtCompact, fmtDateTime} from '@/lib/format';
 import {useI18n} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
 import type {
@@ -403,6 +405,87 @@ export function PlatformConfigPanel({
           </p>
         )}
       </div>
+
+      {/* ── 平台概况：账号池状态 + 已登记积分 ──
+          全部来自后端本地读（账号文件 + 积分快照），切到这个 Tab 不走上游。
+          排查「为什么没有流量进来」时，第一眼看的就是这里：都进了冷却、还是
+          被停用了，两者的处理方式完全不同。 */}
+      {settings.overview && (
+        <section className="rounded-[20px] bg-muted p-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Users className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="text-sm font-medium">{t('platforms.overviewTitle')}</span>
+            </div>
+            {settings.overview.snapshot_at > 0 && (
+              <span className="text-[11px] text-muted-foreground">
+                {t('platforms.overviewCreditsAt', {
+                  time: fmtDateTime(settings.overview.snapshot_at),
+                })}
+              </span>
+            )}
+          </div>
+          {settings.overview.error && (
+            <p className="mb-2 text-[11px] leading-5 text-amber-600 dark:text-amber-400">
+              {t('platforms.overviewUnavailable', {error: settings.overview.error})}
+            </p>
+          )}
+          <div className="space-y-2">
+            {/* 账号计数读不到时整块不画：显示一排 0 会被读成「这个平台没有账号」，
+                而真实原因是账号文件 / 内置网关没起来。积分块是另一份数据
+                （快照），照常显示。 */}
+            {!settings.overview.error && (
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                {([
+                  ['overviewAccounts', settings.overview.accounts, ''],
+                  ['overviewActive', settings.overview.active, 'text-emerald-600 dark:text-emerald-400'],
+                  ['overviewCheckinOnly', settings.overview.checkin_only, settings.overview.checkin_only > 0 ? 'text-amber-600 dark:text-amber-400' : ''],
+                  ['overviewDisabled', settings.overview.disabled, settings.overview.disabled > 0 ? 'text-rose-600 dark:text-rose-400' : ''],
+                  ['overviewCooling', settings.overview.cooling, settings.overview.cooling > 0 ? 'text-sky-600 dark:text-sky-400' : ''],
+                ] as const).map(([key, value, tone]) => (
+                  <div key={key} className="rounded-2xl bg-background/60 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {t(`platforms.${key}`)}
+                    </p>
+                    <p className={`mt-0.5 text-sm tabular-nums ${tone || 'text-foreground'}`}>
+                      {value}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div className="rounded-2xl bg-background/60 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {t('platforms.overviewCredits')}
+                </p>
+                <p className="mt-0.5 text-sm tabular-nums">
+                  {settings.overview.credits === null
+                    ? '—'
+                    : fmtCompact(settings.overview.credits)}
+                  <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
+                    {settings.overview.credits === null
+                      ? t('platforms.overviewNoCredits')
+                      : t('platforms.overviewCreditsKnown', {
+                        count: settings.overview.credits_known,
+                      })}
+                  </span>
+                </p>
+              </div>
+              <div className="rounded-2xl bg-background/60 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {t('platforms.overviewNextExpire')}
+                </p>
+                <p className="mt-0.5 text-sm tabular-nums">
+                  {settings.overview.next_expire_at
+                    ? fmtDateTime(settings.overview.next_expire_at)
+                    : '—'}
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* ── 调度：单账号并发 + 签到节奏 ── */}
       <section className="rounded-[20px] bg-muted p-4">

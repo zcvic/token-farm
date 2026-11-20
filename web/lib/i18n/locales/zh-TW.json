@@ -2662,7 +2662,19 @@
     "checkinOnlyEnable": "開啟僅簽到（不參與消耗，簽到與任務照常）",
     "checkinOnlyDisable": "關閉僅簽到（恢復正常選號）",
     "checkinOnlyOn": "已開啟僅簽到：不再參與對話消耗，簽到與任務照常",
-    "checkinOnlyOff": "已關閉僅簽到，帳號恢復正常選號"
+    "checkinOnlyOff": "已關閉僅簽到，帳號恢復正常選號",
+    "overviewTitle": "平台概況",
+    "overviewCreditsAt": "積分登記於 {time}",
+    "overviewUnavailable": "帳號清單讀取失敗：{error}",
+    "overviewAccounts": "帳號總數",
+    "overviewActive": "可調度",
+    "overviewCheckinOnly": "僅簽到",
+    "overviewDisabled": "已停用",
+    "overviewCooling": "冷卻中",
+    "overviewCredits": "已登記積分",
+    "overviewNoCredits": "尚無登記",
+    "overviewCreditsKnown": "{count} 個帳號",
+    "overviewNextExpire": "最近到期"
   },
   "combos": {
     "title": "模型組合",

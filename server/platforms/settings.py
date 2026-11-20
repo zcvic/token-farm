@@ -159,6 +159,11 @@ _TRAE = frozenset({
 # Qoder 的协议兼容开关：网关的对话管线里有一批「模型行为不合预期」时的兜底
 # 策略，上游面板能改，token-farm 之前没有任何入口。它们都是网关**每次请求
 # 现读**的值（见 embedded.apply_runtime_settings），保存即生效。
+#
+# 为什么不放 `max_accounts_try` / `catalog_*` / `cooldown_*`：Qoder 的账号
+# 选路、目录与限流都在**内置网关进程**里，适配器只做一条 HTTP 透传（见
+# `qoder/adapter.py`），本进程没有任何一处会读这些值。放出来只会得到
+# 「保存成功但行为不变」——正是能力表要避免的那种假开关。
 _QODER = frozenset({
     'request_timeout', 'idle_timeout',
     'tool_echo_mode', 'anthropic_thinking', 'structured_tool_history',
@@ -177,9 +182,15 @@ _LOOMY = frozenset({
 })
 # DuMate 与 Loomy 同一组策略（原生选号 / 目录缓存 / 冷却），也没有桌面端回写。
 # 保底积分目前只在 Loomy 的选号里实现，不要顺手开给同构的 DuMate / MiniMax。
-_DUMATE = _LOOMY - {'min_credits'}
-# MiniMax Code 同为原生选号 / 目录缓存 / 冷却；额外支持网页设备码登录（路由
-# 不按能力表过滤登录，这里只是保持与适配器声明一致）。
+#
+# 但 **没有 `catalog_timeout`**：DuMate 的模型目录读的是本机客户端写下的快照
+# （`catalog.read_desktop_models()`），本进程根本不发目录请求，放出来就是一个
+# 改了也不会生效的字段。
+_DUMATE = _LOOMY - {'min_credits', 'catalog_timeout'}
+# MiniMax Code 同为原生选号 / 目录缓存 / 冷却，且目录是**真的**在线拉取
+# （`_live_models` 带 `catalog_timeout`），所以保留 Loomy 的整组字段。
+# 额外支持网页设备码登录（路由不按能力表过滤登录，这里只是保持与适配器声明
+# 一致）。
 _MINIMAX = _LOOMY - {'min_credits'}
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /

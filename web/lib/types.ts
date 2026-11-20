@@ -2369,6 +2369,32 @@ export type PlatformEnumField =
 export type PlatformSettingField =
   | PlatformNumericField | PlatformSwitchField | PlatformEnumField;
 
+/**
+ * 平台设置页顶部「概况」卡的数据（后端本地读账号池 + 积分快照，不查上游）。
+ *
+ * 积分合计是**快照**，`snapshot_at` 是登记时刻；`next_expire_at` 取快照里
+ * 最近的一笔到期。`error` 非空表示账号列表读不到（内置网关没起来），
+ * 此时其余计数为 0，界面应显示原因而不是「0 个账号」。
+ */
+export interface PlatformSettingsOverview {
+  accounts: number;
+  /** 当前参与推理选号的账号数（不含停用、仅签到与冷却中） */
+  active: number;
+  checkin_only: number;
+  disabled: number;
+  cooling: number;
+  /** 已登记余额的合计；没有任何登记时为 null */
+  credits: number | null;
+  /** 有余额登记的账号数 */
+  credits_known: number;
+  /** 积分快照的登记时刻（epoch 秒；0 = 还没登记过） */
+  snapshot_at: number;
+  /** 快照里最近的一笔到期时刻（epoch 秒） */
+  next_expire_at: number | null;
+  /** 账号列表读不到时的原因 */
+  error: string | null;
+}
+
 export interface PlatformSettings {
   platform: string;
   /** 每个账号的在途请求上限（0 = 不限）；总量 = 该值 × 可用账号数 */
@@ -2452,6 +2478,8 @@ export interface PlatformSettings {
   runtime_limits: Record<PlatformNumericField, {min: number; max: number}>;
   /** 当前平台真正支持的字段；不支持的不要显示，而不是让用户点了才收到 400 */
   capabilities: Record<PlatformSettingField, boolean>;
+  /** 顶部概况卡：账号池状态 + 已登记积分（本地读，不发上游） */
+  overview?: PlatformSettingsOverview;
 }
 
 /** 跨平台模型目录里的一项（一个平台一份）。 */

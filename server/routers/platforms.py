@@ -203,7 +203,72 @@ async def model_catalog(user: dict = Depends(security.current_user)) -> dict:
 
 
 # ── 平台设置（单账号并发上限 / 签到节奏）──────────────────
-def _settings_payload(name: str) -> dict:
+def _platform_overview(name: str, adapter) -> dict:
+    """平台设置页顶部的「概况」数字（**全部本地读，不发上游请求**）。
+
+    与 WorkBuddy 的「服务信息 / 账号池概况」对齐：账号总数、可调度、仅签到、
+    冷却、停用，再加上已登记的积分合计与最近到期。为什么要放在设置页而不是
+    只靠账号页：排查「为什么没有流量进来」时，第一眼看的就是这张卡——账号都
+    进了冷却还是都被停用了，两个原因的处理方式完全不同。
+
+    积分合计来自**快照**（最近一次成功查询登记的值），不是实时余额；
+    `snapshot_at` 如实给出登记时刻，界面据此标注「已登记」。
+    """
+    out = {
+        'accounts': 0, 'active': 0, 'checkin_only': 0,
+        'disabled': 0, 'cooling': 0,
+        'credits': None, 'credits_known': 0,
+        'snapshot_at': 0, 'next_expire_at': None,
+        'error': None,
+    }
+    try:
+        accounts = adapter.list_accounts()
+    except Exception as exc:  # noqa: BLE001 —— 内置网关没起来时仍要能看设置
+        logger.warning('平台概况读账号失败（%s）: %s', name, exc)
+        out['error'] = str(exc)
+        accounts = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        out['accounts'] += 1
+        disabled = bool(account.get('disabled'))
+        checkin_only = bool(account.get('checkin_only'))
+        cooling = bool(account.get('cooling') or account.get('cooling_until'))
+        if disabled:
+            out['disabled'] += 1
+        elif checkin_only:
+            out['checkin_only'] += 1
+        elif not cooling:
+            # 冷却中的账号仍在池里，但这一轮调度不会选它；单列出来才能看出
+            # 「有账号，但这一刻一个也选不了」。
+            out['active'] += 1
+        if cooling:
+            out['cooling'] += 1
+    try:
+        snapshot = creditsvc.platform_snapshot_entries(name)
+    except Exception as exc:  # noqa: BLE001 —— 快照文件坏了不该挡住账号概览
+        logger.warning('平台概况读积分快照失败（%s）: %s', name, exc)
+        return out
+    rows = snapshot.get('accounts') or []
+    total = 0.0
+    known = 0
+    for row in rows:
+        value = row.get('credits')
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total += float(value)
+            known += 1
+    out['credits_known'] = known
+    out['snapshot_at'] = int(snapshot.get('snapshot_at') or 0)
+    if known:
+        out['credits'] = int(total) if float(total).is_integer() else round(total, 2)
+        out['next_expire_at'] = min(
+            (int(r['next_expire_at']) for r in rows
+             if isinstance(r.get('next_expire_at'), int) and r['next_expire_at'] > 0),
+            default=None)
+    return out
+
+
+def _settings_payload(name: str, adapter=None) -> dict:
     return {
         'platform': name,
         'max_in_flight': limiter.load_limit(name),
@@ -212,6 +277,8 @@ def _settings_payload(name: str) -> dict:
         **checkinpacing.load(name),
         # 单次请求的时间预算与平台专属开关（超时 / 换号 / 会话亲和 / 回写）。
         **runtime_settings.load(name),
+        # 顶部「平台概况」卡：账号池状态 + 已登记积分（本地读，不发上游）。
+        'overview': _platform_overview(name, adapter or get_platform(name)),
     }
 
 
@@ -219,8 +286,7 @@ def _settings_payload(name: str) -> dict:
 def platform_settings(name: str,
                       user: dict = Depends(security.current_user)) -> dict:
     """平台级设置：单账号在途请求上限 + 批量签到节奏 + 单次请求预算 / 平台开关。"""
-    _adapter(name)
-    return _settings_payload(name)
+    return _settings_payload(name, _adapter(name))
 
 
 @router.put('/{name}/settings')
@@ -266,7 +332,7 @@ def save_platform_settings(name: str, body: dict = Body(...),
     changes.extend(f'{field}={runtime[field]}' for field in payload
                    if payload.get(field) is not None and caps.get(field))
     security.audit(user, 'update_platform_settings', name, ' '.join(changes))
-    return _settings_payload(name)
+    return _settings_payload(name, adapter)
 
 
 # ── 账号 ────────────────────────────────────────────────

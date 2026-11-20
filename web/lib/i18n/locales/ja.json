@@ -2662,7 +2662,19 @@
     "checkinOnlyEnable": "チェックインのみにする（クレジット消費なし、チェックインとタスクは継続）",
     "checkinOnlyDisable": "チェックインのみを解除（通常の振り分けに戻す）",
     "checkinOnlyOn": "チェックインのみを有効にしました：会話では消費されず、チェックインとタスクは継続します",
-    "checkinOnlyOff": "チェックインのみを解除しました。通常の振り分けに戻ります"
+    "checkinOnlyOff": "チェックインのみを解除しました。通常の振り分けに戻ります",
+    "overviewTitle": "プラットフォーム概要",
+    "overviewCreditsAt": "クレジット記録: {time}",
+    "overviewUnavailable": "アカウント一覧を読めませんでした: {error}",
+    "overviewAccounts": "アカウント数",
+    "overviewActive": "割り当て可能",
+    "overviewCheckinOnly": "チェックインのみ",
+    "overviewDisabled": "停止中",
+    "overviewCooling": "クールダウン中",
+    "overviewCredits": "記録済みクレジット",
+    "overviewNoCredits": "未記録",
+    "overviewCreditsKnown": "{count} アカウント",
+    "overviewNextExpire": "直近の期限"
   },
   "combos": {
     "title": "モデル組み合わせ",

@@ -2689,7 +2689,19 @@
     "checkinOnlyEnable": "Check-in only (no credit spend; check-in and tasks keep running)",
     "checkinOnlyDisable": "Disable check-in only (restore normal routing)",
     "checkinOnlyOn": "Check-in only enabled: excluded from chat spend, check-in and tasks still run",
-    "checkinOnlyOff": "Check-in only disabled; account is back in normal routing"
+    "checkinOnlyOff": "Check-in only disabled; account is back in normal routing",
+    "overviewTitle": "Platform overview",
+    "overviewCreditsAt": "Credits recorded at {time}",
+    "overviewUnavailable": "Could not read the account list: {error}",
+    "overviewAccounts": "Accounts",
+    "overviewActive": "Routable",
+    "overviewCheckinOnly": "Check-in only",
+    "overviewDisabled": "Disabled",
+    "overviewCooling": "Cooling down",
+    "overviewCredits": "Recorded credits",
+    "overviewNoCredits": "None yet",
+    "overviewCreditsKnown": "{count} accounts",
+    "overviewNextExpire": "Next expiry"
   },
   "combos": {
     "title": "Model combos",
