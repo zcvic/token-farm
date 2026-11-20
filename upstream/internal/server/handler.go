@@ -1174,14 +1174,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
-			// 11133「Invalid request parameters」：上游对**请求本身**的拒绝（如 Kimi 系
-			// 模型要求工具 schema 里 enum 必须带 type，缺了整单 400）。同一 body 换任何
+			// 11133「Invalid request parameters」/ 11103「Backend [x] is not supported」：
+			// 上游对**请求本身**的拒绝（如 Kimi 系模型要求工具 schema 里 enum 必须带
+			// type，缺了整单 400；或客户端把生图模型当 chat 模型发）。同一 body 换任何
 			// 账号都会得到同一个 400 —— 轮转只会把无效请求放大 MaxRotate 倍，而
 			// ErrClient 默认策略里的 NoteFailures 还会把健康账号的连败计数喂高、临时
-			// 踢出池（现场实测：一次连续探测把 healthy 从 19 打到 7）。
+			// 踢出池（现场实测：一次连续探测把 healthy 从 19 打到 7；11103 真机 5 个号
+			// 轮转 25 次全是同一句）。
 			// 因此这里 fail-fast：400 + 上游原文，不轮转、不罚号（本分支不进
 			// applyErrorPolicy，ErrClient 的 NoteFailures 不会执行）。
-			if kind == upstream.ErrClient && strings.Contains(string(respBody), "11133") {
+			if kind == upstream.ErrClient && upstream.IsRequestParamRejected(string(respBody)) {
 				failKeepBinding()
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {

@@ -173,6 +173,7 @@ registry.register(FooAdapter())
 | `realm_of_prefix(head)` | `traecn` → `cn`、`traecom` → `global`（仅 `realm_aware` 平台） |
 | `supports_checkin` | 该平台是否有「每日签到」 |
 | `supports_web_login` | 能否在网页里直接发起登录（需要平台实现 `login_start` / `login_poll`） |
+| `supports_tasks()` | **可选**：是否有平台任务面板（签到之外的邀请码 / 兑换码等，见 §4.1） |
 | `list_accounts()` | 不含明文凭据的账号列表 |
 | `import_account(payload)` | 导入 / 更新一个账号 |
 | `delete_account(id)` | 删除 |
@@ -281,8 +282,10 @@ registry.register(FooAdapter())
 - **协议兼容开关**（Qoder）：内置网关的工具残片收尾 / Anthropic 思考块 /
   结构化工具历史 / 图片预处理 / 本地 Web 工具在同一张表单的「协议兼容」里，
   默认「网关默认」= 与改动前完全一致。网关每次请求现读，保存即生效，不用重启
-  内置网关；本地 Web 工具是唯一由模型驱动出网的能力，默认关闭。详见
-  [`docs/qoder.md`](qoder.md) 的「协议兼容开关」。
+  内置网关；本地 Web 工具是唯一由模型驱动出网的能力，默认关闭。这个开关只切
+  **总开关**——联网工具还支持「官方搜索接口」与「外部搜索 API」两种后端，切换
+  后端要改 `accounts/settings.json`（见 [`docs/qoder.md`](qoder.md) 的
+  「协议兼容开关」）。
 - **Loomy 的设置集**：与 Trae 同构的选号 / 缓存 / 冷却参数（`max_accounts_try`、
   `min_credits`、`session_affinity`、`catalog_*`、`credits_*`、`cooldown_*`）。
   其中 `min_credits`（保底积分，默认 5000）只属于 Loomy：余额低于阈值的账号只
@@ -458,6 +461,27 @@ Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBudd
   密钥会默认变成「仅全球版」，任务页也会误显示「国际版没有任务体系」。
 - 「从本机导入」把当前版本传给后端，只导入该版本客户端目录里的账号；手工导入会
   给没写 `realm` 的条目补上当前版本，避免在国际版视图里粘贴的账号落进国内版池。
+
+### 4.1 平台任务（可选能力）
+
+「任务」指该平台客户端里除对话之外的成长 / 福利动作——Loomy 是签到、绑定
+邀请码、兑换兑换码。与 `checkin` 的分工：`checkin` 是每日固定动作，调度器会
+自己跑；任务由用户**显式**触发，且需要按账号返回状态。
+
+| 成员 | 说明 |
+| --- | --- |
+| `supports_tasks()` | 返回 `True` 时 `/api/platforms` 带 `supports_tasks`，账号页出现「任务」分段 |
+| `task_status(id)` | **只读**：激活情况 + 最近一次同步的缓存。不得在这里替用户签到 |
+| `run_task(id, action, **params)` | 执行 `checkin` / `bind_invite` / `redeem` 等动作 |
+
+默认实现全部回 400（`tasks_unsupported`）。路由（`server/routers/platforms.py`）：
+
+- `GET /api/platforms/{name}/accounts/{uid}/tasks` —— `current_user` 可读；
+- `POST /api/platforms/{name}/accounts/{uid}/tasks/{action}` —— `require_admin`。
+
+任务里的 `checkin` 与账号页的 `/checkin` 共用同一把「平台 + 账号」锁，避免
+手动签到与批量签到同时命中同一个号、把当天的奖励记两遍。写操作一律审计
+（`run_platform_task`）。
 
 ---
 

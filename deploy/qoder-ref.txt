@@ -69,3 +69,41 @@
 #          （server/tests/test_qoder_vendor.py 守着重跑）。
 #        · 锚点提交：44b6f3377a68e20f0f6d2fb4a626ca616db2415f（v1.9.11）
 #          上一次基线：d0f4837c8f38c090f6d76baadc3da2c09f5c66c0（v1.9.9）
+
+# ---- 2026-11 第三批：1.9.11 (44b6f33) → 1.9.12 (25d0594)，7 个非 merge 提交
+#      整目录重新 vendor。这一批不是「一个文件的小修」：新增三个模块、改写了
+#      联网工具链与 Responses 回放层，所以按能力逐项确认，不是照抄提交。
+#      已取（副本里与上游逐字节一致，只有导入改写）：
+#        · 7c5ac531 联网工具后端可选 + Responses 托管工具：新增 qoder_web_response.py
+#          （请求级证据、引用渲染、Responses 事件回放）、qoder_external_web.py
+#          （SearXNG / Tavily / Brave / Serper / 自定义），qoder_webtools.py 从
+#          「本地引擎」扩成三种后端；/settings/web-tools 从布尔开关变成
+#          {enabled, backend, external} 配置，qoder_settings.py 新增
+#          web_tools_config / set_web_tools_config。
+#        · 09ee227f 官方搜索 / 抓取后端（qoder_official_web.py）：用调用方自己的
+#          CN / INTL 账号签名调 /algo/api/v1/webSearch/oneSearch 与 /webFetch；
+#          VPC 账号与跨区借用凭据都显式拒绝。为此 qoder_accounts.http_json 新增
+#          follow_redirects（官方请求不跟重定向，避免把签名 POST 转发到别处）。
+#        · 6c85790e / 7fc498d6 托管工具收尾加固：_chat_chunks 支持 reasoning 与
+#          tool_calls、aggregate_stream(require_terminal=) 拒绝「没有终止帧」的
+#          上游流、iter_inner_sse 在托管模式下拒绝内嵌 error 帧、预算用尽后补
+#          一轮总结（此前最后一轮工具结果会被丢掉）、token 明细按字段累加。
+#        · 2dff160c Responses 流式工具入参 + 终态：function_call_arguments
+#          的首个分片不再丢空白、custom 工具在收尾时一次性回放完整 input，
+#          finish_reason=content_filter 也归入 incomplete（此前只认 length）。
+#        · 5f9a8089 托管执行前拒绝内嵌上游错误：上游在同一响应里既给 stop 帧
+#          又给 error 帧时，不再把错误体当成正文回放、也不执行其中的工具调用。
+#        · 25d05944 调度器尊重「已暂停」：启动巡检改 wait(10) 可取消，暂停状态
+#          下不跑初次巡检；token-farm 不启动调度器（embedded.py 不创建
+#          Scheduler），取它是为了让副本与上游一致、避免以后接上时踩坑。
+#      未取（副本里没有，也不需要）：
+#        · dashboard.html / i18n/ / docs/official-web-tools.md / scripts/probe_* /
+#          tests/_test_* / Dockerfile / docker-compose.yml：面板与发布链是自己的。
+#        · 面板侧的 /settings/web-tools 表单（dashboard.html）：token-farm 的入口
+#          仍是平台设置的「本地 Web 工具」布尔开关，只切 enabled，不改 backend；
+#          要用官方 / 外部后端时在 accounts/settings.json 里配（文档已写明）。
+#        · 账号权重补丁仍由本仓维护，vendor 后已重新应用
+#          （server/tests/test_qoder_vendor.py 守着；本批新增两条清单守卫：
+#          副本里出现的每个 qoder_* 包内导入都必须在 MODULES 里）。
+#        · 锚点提交：25d05944cdc9b36cb69b162d9cba0d8e8989f4db（v1.9.12）
+#          上一次基线：44b6f3377a68e20f0f6d2fb4a626ca616db2415f（v1.9.11）

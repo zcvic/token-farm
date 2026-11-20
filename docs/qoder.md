@@ -187,9 +187,30 @@ token-farm 的账号页暂不提供编辑入口，需要时按上游文档改账
 | Anthropic 思考块 | 关闭 / 空签名 | 网关默认 | Claude Code 等客户端要求 thinking block 时是否输出（`off` 不输出，`empty` 输出空块） |
 | 结构化工具历史 | 自动 / 开启 / 关闭 | 网关默认 | 历史里的工具调用按原生结构回放；模型会复述历史调用时改回文本化 |
 | 图片预处理 | 自动 / 关闭 | 网关默认 | 大图先压缩再上传（需要装 Pillow）；关闭=原样透传，用于排查图片问题 |
-| 本地 Web 工具 | 开 / 关 | 关 | 由网关本机执行 `web_search` / `web_fetch`。**唯一由模型驱动出网的能力**，默认关闭 |
+| 本地 Web 工具 | 开 / 关 | 关 | 由网关执行 `web_search` / `web_fetch`。**唯一由模型驱动出网的能力**，默认关闭 |
 
 「网关默认」= 不设任何值，用网关自己的策略（与改动前完全一致）。
+
+> **联网工具现在有三种后端**（1.9.12 起）：`local`（网关本机抓，默认）、`qoder`
+> （用当前账号自己的 CN / INTL 登录态调官方搜索 / 抓取接口）、`external`
+> （SearXNG / Tavily / Brave / Serper / 自定义搜索 API）。面板上的「本地 Web 工具」
+> 开关只切**总开关**（`enabled`），不改后端；要换后端或填外部搜索的地址 / API Key，
+> 直接改 `<WB_DATA_DIR>/platforms/qoder/accounts/settings.json`：
+>
+> ```json
+> {
+>   "web_tools": true,
+>   "web_tools_backend": "external",
+>   "web_tools_external_provider": "searxng",
+>   "web_tools_external_profiles": {
+>     "searxng": {"endpoint": "http://127.0.0.1:8888/search"}
+>   }
+> }
+> ```
+>
+> 外部后端的配置写入会整包校验（协议 / 凭据 / 字段名），非法值直接拒绝而不是
+> 静默落一半。官方后端只支持 CN / INTL 普通账号，VPC 账号与跨区借用凭据都会被
+> 显式拒绝。
 
 保存后**立即生效，不用重启内置网关**：这些值在每次请求时现读，面板保存会同步
 刷新网关进程里的环境变量；网关启动时也会按库里的值灌一遍，所以重启后仍然是
@@ -217,11 +238,15 @@ python server/platforms/qoder/tools/vendor_qoder.py --check   # 无残留绝对�
 ```
 
 脚本会重新拷贝模块、改写导入、更新版本号与 commit，并校验没有残留的绝对导入。
+**模块清单必须覆盖副本里的每一条包内导入**：1.9.12 起 `qoder_proxy.py` 顶层就
+`from . import qoder_web_response`，清单漏一个文件不是「少个可选能力」，而是
+内置网关直接 ImportError、整个 Qoder 平台起不来。`server/tests/test_qoder_vendor.py`
+正向校验这一点，也校验三种联网后端各自的模块都在清单里。
+
 **重新 vendor 会覆盖账号权重补丁**，落点见 `_vendor/README.md` 的「与上游的
-差异」；`server/tests/test_qoder_vendor.py` 会直接守住这条补丁（离线断言，
-不联网）。升级后请一起核对 `server/platforms/qoder/embedded.py`：上游 `main()`
-里如果新增了必要的初始化步骤（例如 VPC 配置校验、usage 目录迁移、保温线程），
-这里也要补上（脚本会提醒）。
+差异」；同一份测试会直接守住这条补丁（离线断言，不联网）。升级后请一起核对
+`server/platforms/qoder/embedded.py`：上游 `main()` 里如果新增了必要的初始化
+步骤（例如 VPC 配置校验、usage 目录迁移、保温线程），这里也要补上（脚本会提醒）。
 
 来源、版本与收录清单见 `server/platforms/qoder/_vendor/README.md`。
 

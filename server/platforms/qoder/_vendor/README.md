@@ -6,8 +6,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 上游版本 | `1.9.11` |
-| 上游 commit | `44b6f3377a68e20f0f6d2fb4a626ca616db2415f` |
+| 上游版本 | `1.9.12` |
+| 上游 commit | `25d05944cdc9b36cb69b162d9cba0d8e8989f4db` |
 | 许可 | MIT（见 `LICENSE`） |
 | 第三方依赖 | 无必装依赖（Pillow 可选：缺失时图片原样透传，不做压缩） |
 
@@ -23,7 +23,10 @@
 | `qoder_tasks.py` | 签到 / 保活 |
 | `qoder_settings.py` | 账号目录下的 `settings.json`（护栏、面板会话、API Key） |
 | `qoder_pricing.py`、`qoder_session_cache.py`、`qoder_activity.py` | 计费 / 会话缓存 / 活动日志 |
-| `qoder_agents.py`、`qoder_anthropic.py`、`qoder_webtools.py` | Agent 配置、Anthropic 桥、联网工具 |
+| `qoder_agents.py`、`qoder_anthropic.py`、`qoder_webtools.py` | Agent 配置、Anthropic 桥、联网工具（本地 / 官方 / 外部三种后端） |
+| `qoder_web_response.py` | 联网工具的请求级证据与 Responses 事件回放（引用、工具调用） |
+| `qoder_official_web.py` | 官方搜索 / 抓取后端：用当前账号自己的 CN / INTL 登录态签名调用 |
+| `qoder_external_web.py` | 外部搜索后端：SearXNG / Tavily / Brave / Serper / 自定义，配置在 `accounts/settings.json` |
 | `qoder_images.py` | 内联图片预处理（Pillow 可选；缺失时原样透传） |
 | `qoder_cache.py` | 面板统计结果的有界缓存 |
 | `qoder_routing.py` | 分层路由 / 账号作用域（配置在 `accounts/admin/routing.json`） |

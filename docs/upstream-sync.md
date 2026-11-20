@@ -160,11 +160,26 @@ git remote add qoder-ref https://github.com/shuishuipingan/qoder2api-hub.git
 git fetch qoder-ref --no-tags
 ```
 
-已核对到 `44b6f33`（v1.9.11）。基线、取用范围与本地唯一补丁（账号权重）记录在
-`deploy/qoder-ref.txt`。升级方式是重跑
+已核对到 `44b6f33`（v1.9.11）→ `25d0594`（v1.9.12）。基线、取用范围与本地唯一
+补丁（账号权重）记录在 `deploy/qoder-ref.txt`。升级方式是重跑
 `python server/platforms/qoder/tools/vendor_qoder.py --source <clone>`，
 `--check` 校验一致性；重新 vendor 后必须重新应用那份补丁
 （`server/tests/test_qoder_vendor.py` 守着）。
+
+> **Qoder 批（2026-11-20，`44b6f33` → `25d0594`，v1.9.12）**：7 个非 merge 提交，
+> 整目录重 vendor。这一批是**联网工具链重写**：新增 `qoder_web_response.py`、
+> `qoder_external_web.py`、`qoder_official_web.py`，`qoder_webtools.py` 从单一
+> 本地引擎扩成「本地 / 官方 / 外部」三种后端，`/settings/web-tools` 从布尔开关
+> 变成 `{enabled, backend, external}`；同时修了托管工具的几个真 bug（预算用尽
+> 后最后一轮结果被丢、`function_call_arguments` 首个分片丢空白、
+> `content_filter` 未归入 incomplete、上游内嵌 error 帧被当正文回放）。
+> `qoder_accounts.http_json` 新增 `follow_redirects`（官方签名请求不跟重定向）。
+> 账号权重补丁已重新应用；`vendor_qoder.py` 的 `MODULES` 补了三个新模块，
+> 并新增「副本里每个 `qoder_*` 包内导入都必须在清单里」的守卫——1.9.12 起
+> `qoder_proxy.py` 顶层就 import `qoder_web_response`，漏一个文件是 ImportError
+> 而不是少个可选能力。面板侧的 `/settings/web-tools` 表单不取：token-farm 的入口
+> 仍是平台设置里的布尔开关，只切 enabled；要用官方 / 外部后端时改
+> `accounts/settings.json`（`docs/qoder.md` 已写明）。
 
 > **Qoder 批（2026-11-13 → 2026-11-19，`d0f4837` → `44b6f33`）**：4 个非 merge
 > 提交，只有 `qoder_proxy.py` 变动，按整目录重 vendor 吸收：持久排队诊断

@@ -13,9 +13,28 @@ package upstream
 
 import (
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// reuEscape 匹配 JS 正则里的 \uXXXX / \u{XXXX} 转义（RE2 只认 \x{...}）。
+var reuEscape = regexp.MustCompile(`\\u\{([0-9a-fA-F]{1,6})\}|\\u([0-9a-fA-F]{4})`)
+
+// re2Pattern 把 JS 正则里 RE2 不认的 \u 转义译成 \x{...}，并验证能编译。
+// 不含 \u 时原样返回（正常 pattern 零额外开销）；译后仍编不过返回 false，由调用方丢弃。
+func re2Pattern(p string) (string, bool) {
+	if !strings.Contains(p, `\u`) {
+		return p, true
+	}
+	q := reuEscape.ReplaceAllStringFunc(p, func(m string) string {
+		return `\x{` + strings.Trim(m[2:], "{}") + `}`
+	})
+	if _, err := regexp.Compile(q); err != nil {
+		return "", false
+	}
+	return q, true
+}
 
 // normalizeToolParameters 归一化工具顶层参数定义（补 type: object / properties: {}），
 // 并递归规整深层 Schema 树。nil 与非对象直接退化成无参 object。
@@ -290,8 +309,21 @@ func normalizeSchemaTree(node any) {
 		}
 
 		// 5. pattern 转义修复
-		if p, ok := n["pattern"].(string); ok && strings.Contains(p, `\_`) {
-			n["pattern"] = strings.ReplaceAll(p, `\_`, `_`)
+		//   - `\_`（JS 正则里非法的转义，上游 RE2 也不认）：去掉反斜杠；
+		//   - `\uXXXX` / `\u{XXXX}`（JS 合法、RE2 没有 \u 转义）：换成等价的 \x{XXXX}。
+		//     REA 6.9.0 给每个路径字段挂 ^[^\uD800-\uDFFF]*$，上游按 RE2 解析 →
+		//     400/11129「tools 不合规」，整个 tools 请求被拒，客户端所有工具都用不了。
+		//     译完仍编不过（混了别的 RE2 不认的语法）就丢掉这个 pattern：丢它只是
+		//     放宽一条本地正则，留着等于让整包工具被上游否掉。
+		if p, ok := n["pattern"].(string); ok {
+			if strings.Contains(p, `\_`) {
+				p = strings.ReplaceAll(p, `\_`, `_`)
+			}
+			if fixed, compiled := re2Pattern(p); compiled {
+				n["pattern"] = fixed
+			} else {
+				delete(n, "pattern")
+			}
 		}
 		if props, ok := n["patternProperties"].(map[string]any); ok {
 			rebuilt := false

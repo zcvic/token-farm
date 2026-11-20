@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"reflect"
+	"regexp"
 	"testing"
 )
 
@@ -206,5 +207,42 @@ func TestNormalizeSchemaLegacyFunctions(t *testing.T) {
 	}
 	if got := props["mode"].(map[string]any)["type"]; got != "string" {
 		t.Errorf("enum 缺 type 没补上: %v", got)
+	}
+}
+
+// TestNormalizeSchemaJsUnicodePattern issue #276：REA 6.9.0 的路径 pattern 是 JS 的
+// \u 转义形态（^[^\uD800-\uDFFF]*$）。上游按 RE2 解析没有 \u → 400/11129 整个
+// tools 被拒。出站前译成等价的 \x{...}；译不动就丢掉这条 pattern（放宽一条正则
+// 好过整包工具作废）。
+func TestNormalizeSchemaJsUnicodePattern(t *testing.T) {
+	params := normalizeParamsJSON(t, `{"type":"object","properties":{
+		"path":{"type":"string","pattern":"^[^\\uD800-\\uDFFF]*$"},
+		"plain":{"type":"string","pattern":"^[a-z]+$"},
+		"bro":{"type":"string","pattern":"a\\u{1F600}b"},
+		"bad":{"type":"string","pattern":"a\\uD800("}
+	}}`)
+
+	path := schemaPropOf(t, params, "path")
+	want := `^[^\x{D800}-\x{DFFF}]*$`
+	if got := path["pattern"]; got != want {
+		t.Errorf("pattern = %v, want %v", got, want)
+	}
+	if _, err := regexp.Compile(want); err != nil {
+		t.Errorf("译后的 pattern 必须能被 RE2 编译: %v", err)
+	}
+
+	if got := schemaPropOf(t, params, "plain")["pattern"]; got != "^[a-z]+$" {
+		t.Errorf("不含 \\u 的 pattern 被改写: %v", got)
+	}
+	if got := schemaPropOf(t, params, "bro")["pattern"]; got != `a\x{1F600}b` {
+		t.Errorf("\\u{...} 形态 = %v, want a\\x{1F600}b", got)
+	}
+
+	bad := schemaPropOf(t, params, "bad")
+	if _, ok := bad["pattern"]; ok {
+		t.Errorf("编不过的 pattern 应被丢弃，得到 %v", bad["pattern"])
+	}
+	if bad["type"] != "string" {
+		t.Errorf("sibling field disturbed: %v", bad)
 	}
 }

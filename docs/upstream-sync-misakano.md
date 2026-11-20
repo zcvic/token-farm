@@ -2993,3 +2993,97 @@ reorderEarly → repack → cleanup；Python 在 `convertInputItems` 收尾处�
 3. **E-3**：长任务回放一致性与上下文交接，可跟下一次 responses 改动合并做。
 4. **M-P2-7**：`96265d71` / `77ca3fe7` 只在该项里做；单独改版本号会得到混合指纹
    （见 D-12）。**已于 2026-11-18 与 D-12 一起落地**（E-1…E-3 与指纹组均已提交）。
+
+## 附录 F：`d40d4b8..937fef2` 增量评估（2026-11-20 扫）
+
+### F.1 范围与统计
+
+参考仓在第十三批（`d40d4b8`）之后又推了 **7 个非 merge 提交**，时间集中在
+2026-11-20 上午，围绕五个 issue：
+
+| issue | 提交 | 主题 |
+|---|---|---|
+| #276 | `abed8395`、`937fef2b` | 工具 schema 里 JS 的 `\u` 转义让上游 11129 整包拒收 |
+| #277 | `923dbec2`、`b902132c` | 官方语音端点 `/v1/audio/*` 与 README 说明 |
+| #278 | `6ef24501` | 加号登录本身也走代理，落盘后钉成固定绑定 |
+| #279 | `676f9da9` | DeepSeek 官方形状别名 `/v1/tools/{search,fetch}` |
+| #280 | `b35a8d03` | 11103 / fetch / 15021 / 15022 归请求级，不再轮转全池 |
+
+判定汇总：
+
+| 判定 | 提交数 | 归并后 |
+|---|---:|---|
+| 值得做 | 2 | **F-1 / F-2** |
+| 随项（同一修复的对照用例） | 1 | F-1 |
+| 不取（能力排期 / 落点不存在 / 纯文档） | 4 | F-3 逐条 |
+
+这批的共同形状：全部是**线上故障复盘**（11129、11103、托管工具丢结果），
+不是新功能铺开；因此「值不值得取」的判据是**本地是否也有这条链路**，
+而不是参考仓做了什么。
+
+### F.2 值得做（2 项）
+
+**F-1　工具 schema 的 JS `\u` 转义 → RE2 `\x{...}`（`abed8395` + `937fef2b`）**
+
+本地现状：pattern 修复只处理 `\_`（更早的 11129 实案）。REA 6.9.0 给每个路径
+字段挂 `^[^\uD800-\uDFFF]*$`，这个 pattern 在 JSON 里是**双层转义**
+（`"^[^\\uD800-\\uDFFF]*$"`），解码后仍是字面量 `\uD800`；上游按 RE2 解析没有
+`\u` 转义 → 400/11129，**整个 tools 数组被拒**，客户端所有工具都用不了。
+
+落点（`upstream/internal/upstream/schema_normalize.go`）：
+
+- 新增 `reuEscape`（`\u{1-6 hex}` 与 `\uXXXX` 两形态）与 `re2Pattern()`；
+- pattern 修复块从「只去 `\_`」改成三步：先去 `\_` → 再译 `\u` → 译完仍
+  `regexp.Compile` 不过就 `delete(n, "pattern")`。丢一条本地正则只是放宽校验，
+  留着等于让整包工具作废，取舍方向与上游一致；
+- 不含 `\u` 的 pattern 走 `strings.Contains` 快路径原样返回。
+
+测试：`TestNormalizeSchemaJsUnicodePattern` 覆盖双层转义、`\u{...}`、不可译丢弃、
+兄弟字段不受影响；`937fef2b` 的对照用例说明**单层**转义（JSON 里 `"\ud800"`）
+在解码阶段就被 Go 换成 U+FFFD，出站已是合法可编译正则，不需要修复——两条路径
+必须分开断言，否则后人会以为「所有 `\u` 都要改写」。
+
+**F-2　11103 归请求级，不再轮转全池（`b35a8d03` 的 11103 部分）**
+
+本地现状：`handler.go` 的 fail-fast 分支只认 `strings.Contains(respBody, "11133")`。
+11103「Backend [x] is not supported」是模型侧配置问题（该模型的后端没启用），
+同一 body 换任何账号都是同一句——现场 5 个号轮转 25 次全一样，还顺带把健康号的
+连败计数喂高。
+
+落点：
+
+- `hint.go` 新增 `IsRequestParamRejected()`（11133 家族 ∪ 11103）与
+  `isBackendUnsupported()`（`codeMarker` / `hasBusinessCode` 双形态）；
+- `GatewayHint` 顶部加 11103 文案，点明「换号无用、换模型」；
+- `handler.go` 的 11133 fail-fast 分支改判 `upstream.IsRequestParamRejected(...)`，
+  11103 自动走同一条 fail-fast；
+- 刻意**不**新增 `ErrModelParamInvalid` 枚举：11103 与 11133 的处置完全相同
+  （400 + 原文、不轮转、不罚号），多一个 Kind 只会让 `Classify` 与所有 switch
+  都要跟着改，收益为零。
+
+测试：`server/backend_unsupported_test.go`（11103 一次就停、账号连败不涨、
+透传上游原文、hint 里带「switching accounts will not help」）；
+`hint_test.go` 的 Kind 表补 11103 用例。
+
+**同一提交里未取的两个子项**：
+
+- `/v1/fetch`：本地没有这条路由（Go 侧只有 `/v1/tools/search`），没有可改的
+  错误处置点；
+- `15021` / `15022` 边缘级错误：本地没有对应的边缘网关链路，属于参考仓
+  独有的部署形态。
+
+### F.3 不取（4 项，逐条写原因）
+
+| 提交 | 主题 | 不取原因 |
+|---|---|---|
+| `923dbec2` | 官方语音端点 `/v1/audio/speech`、`/v1/audio/transcriptions` | 本地 Go 侧没有 audio 路由，面板也没有语音入口。这是「新增一条数据面 + `features.tts_enabled` / `asr_enabled` 两个开关」，属于排期能力；且上游 PCM 参数是静态反查、未做真机抓包，照抄等于把未验证的协议塞进发布包。要接先补面板入口与抓包对照。 |
+| `676f9da9` | DeepSeek 官方形状别名 `/v1/tools/search`、`/v1/tools/fetch` | 本地只有 `/v1/tools/search`，没有 `/v1/search` / `/v1/fetch`，所以「别名」没有第二条路径可指；「按路径而非 UA 判定 DeepSeek 形状」也不适用——本地该端点本来就原样透传，没有兼容层要门控。 |
+| `6ef24501` | 加号绑定号池出口（登录本身也走代理） | 参考仓的加号链路在 Go 侧（`proxypool` + `panel.loginRoute`）；本地加号在 Python 面板（`server/services/proxyroutes.py` + 各平台 adapter 的登录），Go 侧没有 auth/state → token → account 这条路由。协议事实（登录、注册激活动作、余额刷新都要钉在同一条出口）已读并记在这里，但落点完全不同，不能照搬；要做应在面板侧单独设计。 |
+| `b902132c` | README 补嵌入 / 语音两行端点说明 | 纯文档，且描述的两个端点本地都没有；写进 README 会指向不存在的路由。 |
+
+### F.4 与 Qoder 第三批的关系
+
+同一轮还评估了 qoder 参考仓的 `44b6f33..25d0594`（v1.9.12）。两项互不相干：
+misakano 这批全在 Go 出站管线与 README，qoder 那批全在 `_vendor/` 的协议层。
+两边都按「整目录 / 单点重写」各自落地，记录分别写在
+`deploy/workbuddy-panel-ref.txt` 第十五批与 `deploy/qoder-ref.txt` 第三批。

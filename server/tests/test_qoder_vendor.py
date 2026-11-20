@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 
@@ -147,6 +148,51 @@ class WeightRouteTest(unittest.TestCase):
             source = fh.read()
         self.assertIn('"/accounts/weight"', source)
         self.assertIn('POOL.set_weight(uid, payload.get("weight"))', source)
+
+
+class VendorManifestTest(unittest.TestCase):
+    """`tools/vendor_qoder.py` 的模块清单必须覆盖副本里的每一条包内导入。
+
+    1.9.12 起 `qoder_proxy.py` 在**顶层**就 `from . import qoder_web_response`，
+    清单漏一个文件不是「少个可选能力」，而是内置网关直接 ImportError、整个
+    Qoder 平台起不来。所以这里正向校验：副本里出现的每个 `qoder_*` 模块都
+    必须被清单收录、且文件真的在。
+    """
+
+    def _manifest(self) -> list[str]:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(qoder_accounts.__file__))), 'tools', 'vendor_qoder.py')
+        spec = importlib.util.spec_from_file_location('_vendor_qoder_manifest', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return list(module.MODULES)
+
+    def test_every_vendored_import_is_listed(self) -> None:
+        manifest = self._manifest()
+        listed = {name[:-3] if name.endswith('.py') else name for name in manifest}
+        vendor_dir = os.path.dirname(os.path.abspath(qoder_accounts.__file__))
+        referenced: set[str] = set()
+        pattern = re.compile(r'^\s*(?:from \. import (qoder_\w+)|from \.qoder_(\w+) import)',
+                             re.M)
+        for name in os.listdir(vendor_dir):
+            if not name.endswith('.py'):
+                continue
+            with open(os.path.join(vendor_dir, name), encoding='utf-8') as fh:
+                for match in pattern.finditer(fh.read()):
+                    referenced.add(match.group(1) or ('qoder_' + match.group(2)))
+        missing = sorted(referenced - listed)
+        self.assertEqual(missing, [], 'vendor_qoder.py 的 MODULES 漏了：%s' % missing)
+        for name in manifest:
+            self.assertTrue(os.path.isfile(os.path.join(vendor_dir, name)),
+                            '清单里的 %s 不在 _vendor/ 里' % name)
+
+    def test_web_tool_modules_are_shipped(self) -> None:
+        """1.9.12 的三种联网后端各自一个模块，缺一个就少一种后端。"""
+        manifest = self._manifest()
+        for name in ('qoder_webtools.py', 'qoder_web_response.py',
+                     'qoder_official_web.py', 'qoder_external_web.py'):
+            self.assertIn(name, manifest)
 
 
 if __name__ == '__main__':

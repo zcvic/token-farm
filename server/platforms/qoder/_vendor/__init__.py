@@ -1,7 +1,7 @@
 """qoder2api-hub 的内置副本（vendor）。
 
 上游：https://github.com/shuishuipingan/qoder2api-hub
-版本：1.9.9（commit d0f4837c8f38c090f6d76baadc3da2c09f5c66c0）
+版本：1.9.12（commit 25d05944cdc9b36cb69b162d9cba0d8e8989f4db）
 许可：MIT，见同目录 LICENSE。
 
 与上游的差异有两类：
@@ -19,8 +19,8 @@
 升级方式见 `README.md`。
 """
 
-VERSION = '1.9.9'
+VERSION = '1.9.12'
 UPSTREAM = 'https://github.com/shuishuipingan/qoder2api-hub'
-UPSTREAM_COMMIT = 'd0f4837c8f38c090f6d76baadc3da2c09f5c66c0'
+UPSTREAM_COMMIT = '25d05944cdc9b36cb69b162d9cba0d8e8989f4db'
 
 __all__ = ['VERSION', 'UPSTREAM', 'UPSTREAM_COMMIT']

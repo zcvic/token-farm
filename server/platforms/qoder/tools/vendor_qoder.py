@@ -49,6 +49,9 @@ MODULES = [
     'qoder_tasks.py',
     'qoder_updater.py',
     'qoder_webtools.py',
+    'qoder_web_response.py',
+    'qoder_official_web.py',
+    'qoder_external_web.py',
 ]
 DATA_FILES = [
     'baseprompt.json',
@@ -57,7 +60,7 @@ DATA_FILES = [
 ]
 EXTRA_FILES = ['LICENSE']
 
-_IMPORT_RE = re.compile(r'^([ \t]*)import qoder_(\w+)([ \t]*(?:#.*)?)$', re.M)
+_IMPORT_RE = re.compile(r'^([ \t]*)import qoder_(\w+)((?:[ \t]+as[ \t]+\w+)?)([ \t]*(?:#.*)?)$', re.M)
 _FROM_RE = re.compile(r'^([ \t]*)from qoder_(\w+) import', re.M)
 _LEFTOVER_RE = re.compile(r'^[ \t]*(?:import|from)[ \t]+qoder_\w+', re.M)
 _VERSION_RE = re.compile(r'^VERSION = "([^"]+)"', re.M)
@@ -65,7 +68,7 @@ _VERSION_RE = re.compile(r'^VERSION = "([^"]+)"', re.M)
 
 def rewrite_imports(text: str) -> str:
     text = _IMPORT_RE.sub(
-        lambda m: '%sfrom . import qoder_%s%s' % (m.group(1), m.group(2), m.group(3)),
+        lambda m: '%sfrom . import qoder_%s%s%s' % (m.group(1), m.group(2), m.group(3), m.group(4)),
         text)
     return _FROM_RE.sub(
         lambda m: '%sfrom .qoder_%s import' % (m.group(1), m.group(2)), text)
@@ -146,10 +149,12 @@ def _stamp(version: str, commit: str) -> None:
     init_path = os.path.join(VENDOR, '__init__.py')
     with open(init_path, encoding='utf-8', newline='') as fh:
         text = fh.read()
-    text = re.sub(r"^VERSION = '.*'$", "VERSION = '%s'" % version, text, flags=re.M)
+    text = re.sub(r"^VERSION = '.*?'[ \t\r]*$", "VERSION = '%s'" % version, text, flags=re.M)
     if commit:
-        text = re.sub(r"^UPSTREAM_COMMIT = '.*'$",
+        text = re.sub(r"^UPSTREAM_COMMIT = '.*?'[ \t\r]*$",
                       "UPSTREAM_COMMIT = '%s'" % commit, text, flags=re.M)
+        text = re.sub(r"^版本：.*?（commit .*?）[ \t\r]*$",
+                      "版本：%s（commit %s）" % (version, commit), text, flags=re.M)
     with open(init_path, 'w', encoding='utf-8', newline='') as fh:
         fh.write(text)
 

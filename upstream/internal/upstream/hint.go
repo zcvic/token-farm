@@ -30,6 +30,12 @@ import (
 // ErrBadParams 皆有可能（Classify 词表不含 11133），hint 层自带判定（hint 是补充
 // 说明非权威分类，误判代价只是多一条中性补充说明）；其余走 Kind 一对一映射。
 func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
+	// 11103「Backend [x] is not supported」：该模型的上游后端没启用/配置不全。
+	// 上游自带的 displayMsg 就是「请切换其他模型」，但客户端常常只看到一句英文；
+	// 这里点名「换号无用」，省掉一轮全池轮转与「账号是不是挂了」的误判。
+	if isBackendUnsupported(msg) {
+		return "this model's backend is not enabled upstream (11103); switching accounts will not help, switch model"
+	}
 	// 11133 model_param_invalid 家族（图片回归实测：不支持图片的模型传图，或任意
 	// 参数被模型供应商拒绝）。只有请求确实带图、且目录能对该模型做出「不支持图片」
 	// 的判定时才给「换模型」指向，否则退中性参数形态（可能是任意参数问题，不点名图片）。
@@ -171,6 +177,26 @@ func isModelParamInvalid(body string) bool {
 		strings.Contains(lower, "model_param_invalid") ||
 		strings.Contains(lower, "invalid request parameters") ||
 		strings.Contains(lower, "request parameters do not meet the current model requirements")
+}
+
+// IsRequestParamRejected 报告 body 是否属于「请求参数被上游拒绝」的请求级形态：
+// 11133 model_param_invalid 家族，以及 11103「Backend [x] is not supported」。
+//
+// 两者都是同一 body 换任何账号都会被同一处拒绝的确定性错误（11103 的真机形态：
+// 5 个号轮转 25 次全是同一句，上游自带 retry_policy.retry=false）。调用方据此
+// fail-fast 400 透传，不轮转、不罚号——否则健康号会被白打一遍并各喂一笔连败。
+func IsRequestParamRejected(body string) bool {
+	lower := strings.ToLower(body)
+	return isModelParamInvalid(body) || isBackendUnsupported(body) ||
+		codeMarker(lower, "11133") || hasBusinessCode(body, "11133")
+}
+
+// isBackendUnsupported 上游 11103「Backend [x] is not supported」body 判定。
+// 与 11102「该后端无此模型」不同：11103 是模型侧配置问题，不是账号权限问题，
+// 换遍全池结果一样，因此不能走 ErrModelBlocked 的 (账号,模型) 负缓存。
+func isBackendUnsupported(body string) bool {
+	lower := strings.ToLower(body)
+	return codeMarker(lower, "11103") || hasBusinessCode(body, "11103")
 }
 
 // isInvalidImageData 上游 11135 body 判定（code 11135 / invalid_image_data /
