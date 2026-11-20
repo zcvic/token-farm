@@ -19,10 +19,11 @@ from pathlib import Path
 
 # ── 网页端（cookie 鉴权）────────────────────────────────────
 WEB_BASE = 'https://www.dumate.cn'
-# 签 token 的候选域。两个域是同一签发服务的两条入口，token 与域无关：
+# 签 token 的候选域。三个域是同一签发服务的三条入口，token 与域无关：
 # 主域被墙 / 换域名时切另一条，不改变凭证语义。
 WEB_HOSTS = (
     'https://www.dumate.cn',
+    'https://dumate.baidu.com',
     'https://console.bce.baidu.com',
 )
 
@@ -65,6 +66,51 @@ CHAT_IDLE_TIMEOUT = 120.0
 
 # 账号里没有 BDUSS 时调任何接口都会 401，导入阶段就拒绝。
 REQUIRED_COOKIE = 'BDUSS'
+
+# ── 扫码登录（百度 Passport）─────────────────────────────────
+# DuMate 的网页登录就是百度账号登录；官方页走 passport 的二维码协议
+# （`qrloginfrom=pc` 会给同一套「百度 App / 百度智能云 App」二维码）。
+# 扫码确认后 `channel/unicast` 回一次性 bduss，再在 `qrbdusslogin` 换正式
+# BDUSS / STOKEN。所有请求都带同一份 cookie（BAIDUID 等由 passport 种下）。
+PASSPORT_BASE = 'https://passport.baidu.com'
+QRCODE_PATH = '/v2/api/getqrcode'
+QRCODE_QUERY = '?lp=pc&qrloginfrom=pc'
+QR_POLL_PATH = '/channel/unicast'
+QR_LOGIN_PATH = '/v3/login/main/qrbdusslogin'
+
+# 扫码确认后要落到 console 域才会种下 `bce-long-term-sessionid`：
+# `/api/dumate/*` 的鉴权依赖它，只拿 passport 的 BDUSS 会一直 401。
+# 与参考实现 `login-browser.js` 的 SETTLE_URLS 同口径。
+CONSOLE_BASE = 'https://console.bce.baidu.com'
+CONSOLE_SETTLE_URLS = (
+    'https://console.bce.baidu.com/',
+    'https://console.bce.baidu.com/ai/',
+    'https://dumate.baidu.com/app',
+)
+# 只带着 passport 的 BDUSS 直接打 console 不一定能拿到会话；官方登录页
+# 在拿到 passport 登录态后会走 `/postlogin/passport/wap` 做一次 SSO，
+# 由服务端种下 `.bce.baidu.com` 域下的 `bce-long-term-sessionid`。
+# 这两步都是普通 GET，用 httpx 就能复现（参考页面 bundle 的 ev()）。
+BCE_LOGIN_BASE = 'https://login.bce.baidu.com'
+BCE_LOGIN_REDIRECT = 'http://console.bce.baidu.com/'
+BCE_POSTLOGIN_PATH = '/postlogin/passport/wap'
+BCE_POSTLOGIN_QUERY = {
+    'activate': 'true',
+    'passportShared': 'true',
+    'redirect': BCE_LOGIN_REDIRECT,
+    'from': 'dumate',
+}
+# 落盘时只保留这些域下的 cookie（passport 自己的 PASSID / UBI 没有用）。
+COOKIE_DOMAINS = ('baidu.com', 'dumate.cn')
+
+# 扫码状态：unicast 是长轮询，但服务端也可能立刻回 `{errno:1}`；
+# 两次查询之间留一点间隔，避免空转打满上游。
+QR_WAIT_DELAY = 1.5
+QR_POLL_TIMEOUT = 40.0
+QR_CODE_TIMEOUT = 20.0
+QR_LOGIN_TIMEOUT = 30.0
+# 二维码有效期（百度页面约 5 分钟），登录会话按同一时长收尾。
+QR_TTL = 300
 
 # 业务码：登录态失效（网页接口 HTTP 200 也可能带这个码）。
 EXPIRED_CODES = {10001, 10006}

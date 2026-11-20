@@ -44,7 +44,29 @@
 #          避免上游 400。
 #
 #      有意不跟：
-#        · 不做自动化百度登录 / 扫码模拟；只支持手工粘贴 Cookie，因此
-#          supports_web_login = False。
+#        · 不跟参考仓的 playwright「浏览器登录器」：它要求服务端有图形界面、
+#          还要额外装 Edge/Chrome 或 playwright-core。本项目改用纯 HTTP 的
+#          百度 Passport 扫码（服务端取二维码，手机确认），不新增依赖。
 #        · 不做批量注册、验证码绕过、风控规避；仅限本人及亲属授权账号。
 #        · 不引入参考仓的 HTTP 服务与面板，也不把它的账号目录格式搬过来。
+#
+# ---- 2026-11-20 网页登录（百度 Passport 扫码）
+#      · 取码：GET passport.baidu.com/v2/api/getqrcode?lp=pc&qrloginfrom=pc
+#        → {sign, imgurl}；imgurl 交给面板内嵌，不自动开浏览器。
+#      · 状态：GET passport.baidu.com/channel/unicast?channel_id=<sign>
+#        是 30 秒长轮询。errno=1 = 还没事件；errno=0 且 channel_v.status=0
+#        时 channel_v.v 是一次性 bduss（status=1 是「已扫码待确认」）。
+#      · 兑换：GET passport.baidu.com/v3/login/main/qrbdusslogin?bduss=<v>
+#        响应是单/双引号混用的 JSON（也可能是 JSONP / Set-Cookie），逐字段
+#        抠 BDUSS / STOKEN / PTOKEN，不整体 json.loads。
+#      · 落域：带 BDUSS 先访问 login.bce.baidu.com/?redirect=…，再走
+#        /postlogin/passport/wap（官方登录页的 SSO 支线），最后落到
+#        console.bce.baidu.com 与 dumate.baidu.com/app，种下
+#        `bce-long-term-sessionid`。`/api/dumate/*` 的鉴权依赖 console
+#        会话，只有 passport BDUSS 时会回 10001。
+#      · 探活：用组装好的 Cookie 调一次 `/api/dumate/app/token/get`，
+#        401/403 判登录失败并提示改用「粘贴 Cookie」；网络 5xx 只标
+#        「待验证」，凭证仍然落盘。
+#      · 实现：server/platforms/dumate/login.py；适配器
+#        login_start / login_poll / login_cancel，supports_web_login = True。
+#        手工粘贴 Cookie 继续保留，作为扫码不可用时的兜底。

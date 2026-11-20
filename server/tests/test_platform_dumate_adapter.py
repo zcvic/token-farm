@@ -14,9 +14,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import httpx
+
 from server import config, db
 from server.platforms.base import PlatformError
-from server.platforms.dumate import catalog, client, constants as C, store
+from server.platforms.dumate import catalog, client, constants as C, login, store
 from server.platforms.dumate.adapter import DumateAdapter, _scan_sse
 
 _COOKIE = 'BDUSS=abc123efg; BAIDUID=deadbeef; STOKEN=xyz'
@@ -169,6 +171,18 @@ class DumateAdapterTest(unittest.TestCase):
     def test_import_requires_cookie(self) -> None:
         with self.assertRaises(PlatformError):
             self.adapter.import_account({'nickname': 'x'})
+
+    def test_import_keeps_login_state_from_web_login(self) -> None:
+        """扫码登录在探活失败时会带「待验证 + 原因」导入，不能被清掉。"""
+        public = self.adapter.import_account({
+            'cookie': 'BDUSS=abc123efg', 'source': 'web',
+            'loginState': '待验证', 'lastRefreshError': '上游 502',
+        })
+        raw = store.read_account(public['uid'])
+        self.assertEqual(raw['source'], 'web')
+        self.assertEqual(raw['loginState'], '待验证')
+        self.assertEqual(raw['lastRefreshError'], '上游 502')
+        self.assertEqual(public['login_state'], '待验证')
 
     # ── 模型目录 ──────────────────────────────────────────
     def test_list_models_adds_platform_prefix(self) -> None:
@@ -334,6 +348,149 @@ class DumateAdapterTest(unittest.TestCase):
             out = asyncio.run(self.adapter.usage('dm_1'))
         self.assertIsNone(out['session_usage'])
         self.assertEqual(out['errors'][0]['code'], 'login_expired')
+
+    # ── 网页登录 ──────────────────────────────────────────
+    def test_web_login_is_enabled_and_wired(self) -> None:
+        self.assertTrue(self.adapter.supports_web_login)
+        with mock.patch.object(login, 'start',
+                               return_value={'login_id': 'x',
+                                             'status': 'pending'}) as starter:
+            self.assertEqual(self.adapter.login_start()['login_id'], 'x')
+        starter.assert_called_once_with()
+
+
+class DumateLoginTest(unittest.TestCase):
+    """扫码登录的纯离线部分：事件解析、兑换解析、会话状态机。"""
+
+    def setUp(self) -> None:
+        self._sessions = dict(login._sessions)
+        login._sessions.clear()
+        self.addCleanup(login._sessions.update, self._sessions)
+        self.addCleanup(login._sessions.clear)
+
+    def test_parse_exchange_reads_mixed_quote_body(self) -> None:
+        body = ("{\"errInfo\":{\"no\":\"0\",\"msg\":\"\"},"
+                "\"data\":{\"session\":{'bduss':'BDUSS-1','stoken':'ST-1',"
+                "'ptoken':'PT-1'}}}")
+        out = login.parse_exchange(body)
+        self.assertEqual(out['bduss'], 'BDUSS-1')
+        self.assertEqual(out['stoken'], 'ST-1')
+        self.assertEqual(out['ptoken'], 'PT-1')
+
+    def test_parse_exchange_reports_upstream_error(self) -> None:
+        with self.assertRaises(PlatformError) as ctx:
+            login.parse_exchange('{"errInfo":{"no":"12","msg":"验证信息已过期"}}')
+        self.assertEqual(ctx.exception.code, 'qr_login_failed')
+        self.assertIn('验证信息已过期', ctx.exception.message)
+
+    def test_fetch_qrcode_inlines_png_for_csp(self) -> None:
+        """二维码必须内联：面板的 CSP 只允许 self/data/blob 的图片。"""
+        http = _QrHttp(json.dumps({'sign': 's1',
+                                   'imgurl': '//passport.baidu.com/x.png'}),
+                       b'\x89PNG\r\n\x1a\n')
+        out = login.fetch_qrcode(http)
+        self.assertEqual(out['sign'], 's1')
+        self.assertTrue(out['qr'].startswith('data:image/png;base64,'))
+
+    def test_fetch_qrcode_falls_back_to_url(self) -> None:
+        http = _QrHttp(json.dumps({'sign': 's2',
+                                   'imgurl': 'passport.baidu.com/x.png'}),
+                       b'', fail=True)
+        out = login.fetch_qrcode(http)
+        self.assertEqual(out['qr'], 'https://passport.baidu.com/x.png')
+
+    def test_exchange_falls_back_to_set_cookie(self) -> None:
+        """兑换响应只下发 Set-Cookie（没有 BDUSS 字段）时也要接住。"""
+        cookies = httpx.Cookies()
+        cookies.set('BDUSS', 'jar-bduss', domain='.baidu.com', path='/')
+        http = mock.Mock()
+        http.get.return_value = _FakeResponse('{"errInfo":{"no":"12"}}')
+        http.cookies = cookies
+        out = login.exchange(http, 'temp')
+        self.assertEqual(out['bduss'], 'jar-bduss')
+
+    def test_poll_qrcode_accepts_object_channel(self) -> None:
+        out = login.poll_qrcode(
+            _FakeHttp('{"errno":0,"channel_v":{"status":0,"v":"t"}}'), 'sign')
+        self.assertEqual(out, {'status': 'confirmed', 'token': 't'})
+
+    def test_poll_qrcode_states(self) -> None:
+        cases = [
+            ('{"errno":1}', 'waiting', ''),
+            ('{"errno":0,"channel_v":"{\\"status\\":1,\\"v\\":\\"t\\"}"}',
+             'waiting', ''),
+            ('{"errno":0,"channel_v":"{\\"status\\":0,\\"v\\":\\"temp-bduss\\"}"}',
+             'confirmed', 'temp-bduss'),
+            ('{"errno":0,"channel_v":"{\\"status\\":2}"}', 'expired', ''),
+            ('this_is_callback({"errno":1})', 'waiting', ''),
+        ]
+        for text, status, token in cases:
+            with self.subTest(text=text):
+                out = login.poll_qrcode(_FakeHttp(text), 'sign')
+                self.assertEqual(out['status'], status)
+                self.assertEqual(out['token'], token)
+
+    def test_cookie_header_prefers_more_specific_domain(self) -> None:
+        cookies = httpx.Cookies()
+        cookies.set('BDUSS', 'broad', domain='.baidu.com', path='/')
+        cookies.set('BDUSS', 'specific', domain='.console.bce.baidu.com', path='/')
+        cookies.set('bce-long-term-sessionid', 'session',
+                    domain='.bce.baidu.com', path='/')
+        header = login.cookie_header(cookies)
+        self.assertIn('bce-long-term-sessionid=session', header)
+        self.assertIn('BDUSS=specific', header)
+        self.assertNotIn('BDUSS=broad', header)
+
+    def test_session_lifecycle_without_network(self) -> None:
+        with mock.patch.object(login, '_run'):
+            view = login.start()
+            login_id = view['login_id']
+            self.assertEqual(view['status'], 'pending')
+            self.assertEqual(view['realm'], 'cn')
+            self.assertEqual(login.poll(login_id)['status'], 'pending')
+            self.assertTrue(login.cancel(login_id))
+        with self.assertRaises(PlatformError):
+            login.poll(login_id)
+
+
+class _FakeResponse:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.status_code = 200
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class _FakeHttp:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def get(self, *args, **kwargs) -> _FakeResponse:
+        return _FakeResponse(self._text)
+
+
+class _QrImageResponse:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.status_code = 200
+        self.headers = {'content-type': 'image/png'}
+
+
+class _QrHttp:
+    """第一次 GET 回二维码 JSON，第二次 GET 回图片（或抛错）。"""
+
+    def __init__(self, payload: str, image: bytes, *, fail: bool = False) -> None:
+        self._payload = payload
+        self._image = image
+        self._fail = fail
+
+    def get(self, url, *args, **kwargs):
+        if 'getqrcode' in str(url):
+            return _FakeResponse(self._payload)
+        if self._fail:
+            raise httpx.ConnectError('no route')
+        return _QrImageResponse(self._image)
 
 
 if __name__ == '__main__':

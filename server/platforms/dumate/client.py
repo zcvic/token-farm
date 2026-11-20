@@ -120,7 +120,7 @@ def _biz_failed(payload: object) -> bool:
 def _raise_web(payload: object, status: int, what: str) -> None:
     if _expired(payload, status):
         raise PlatformError(
-            _error_text(payload, 'DuMate 登录态已失效，请重新粘贴 Cookie'),
+            _error_text(payload, 'DuMate 登录态已失效，请重新登录（扫码或粘贴 Cookie）'),
             status=401, code='login_expired', payload=payload)
     if status >= 500:
         raise PlatformError(
@@ -202,7 +202,7 @@ async def fetch_token(cookie: str, *, proxy: str | None = None,
             # 200 但不是预期形状：登录态失效 / 被跳登录页。
             if _expired(payload, response.status_code):
                 raise PlatformError(
-                    _error_text(payload, 'DuMate 登录态已失效，请重新粘贴 Cookie'),
+                    _error_text(payload, 'DuMate 登录态已失效，请重新登录（扫码或粘贴 Cookie）'),
                     status=401, code='login_expired', payload=payload)
             last = (response.status_code, payload, 'token 字段缺失')
             continue
@@ -215,7 +215,7 @@ async def fetch_token(cookie: str, *, proxy: str | None = None,
     status, payload, detail = last or (0, None, '')
     if _expired(payload, status):
         raise PlatformError(
-            _error_text(payload, 'DuMate 登录态已失效，请重新粘贴 Cookie'),
+            _error_text(payload, 'DuMate 登录态已失效，请重新登录（扫码或粘贴 Cookie）'),
             status=401, code='login_expired', payload=payload)
     raise PlatformError(
         f'换取 DuMate token 失败：{_error_text(payload, detail or "网络错误")}',

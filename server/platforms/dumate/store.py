@@ -3,7 +3,7 @@
 位置：`<DATA_DIR>/platforms/dumate/accounts/<uid>.json`
 
 DuMate 的凭证是**网页 cookie**（核心字段 `BDUSS`），没有 refresh token：
-cookie 失效后只能重新登录网页再粘一次。因此：
+cookie 失效后只能重新登录（面板扫码或手工粘贴）。因此：
 
   · cookie 必须明文落盘（上游要原样取用），文件权限按高敏处理；
   · 对外结构一律走 `public_account`，只回 `cookie_summary` / 长度，不回明文；

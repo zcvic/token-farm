@@ -14,7 +14,7 @@ IP / 模型白名单、用量与日志。在此之上新增：
 | Trae 适配器 | `server/platforms/trae/` | 账号存储 / 令牌刷新 / 签到 / 额度 / 模型 / 对话（SSE → OpenAI chunk） |
 | Qoder 适配器 | `server/platforms/qoder/` | 账号 / 签到 / 额度 / 模型 / 对话；协议层内置在 `_vendor/`，无需额外部署 |
 | Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录（含手机号补绑）/ 手机验证码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
-| DuMate 适配器 | `server/platforms/dumate/` | 账号（网页 Cookie）/ token 兑换与缓存 / 签到 / 积分 / 模型（桌面端 → 缓存 → 快照）/ 对话；网关 OpenAI 兼容，单区域前缀 `dumate/` |
+| DuMate 适配器 | `server/platforms/dumate/` | 账号（网页 Cookie）/ 百度 Passport 扫码登录 / token 兑换与缓存 / 签到 / 积分 / 模型（桌面端 → 缓存 → 快照）/ 对话；网关 OpenAI 兼容，单区域前缀 `dumate/` |
 | MiniMax Code 适配器 | `server/platforms/minimax/` | 账号（OAuth 设备码 + 一次性 refresh token）/ 双区（`minimaxcn/`、`minimaxcom/`）/ 签到 / 积分 / M Plan 窗口 / 模型 / 对话；Anthropic Messages 端点由适配器内部翻译成 OpenAI 形状 |
 | 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
 | 多平台接口 | `server/routers/platforms.py` | `/api/platforms/*`：账号、导入、刷新、签到、额度、模型 |
@@ -358,8 +358,9 @@ Loomy 的协议参考是 [`xingluoyuankong/loomy2api`](https://github.com/xinglu
 DuMate（百度搭子）的协议参考是 [`wearetheone777/dumate2api`](https://github.com/wearetheone777/dumate2api)，
 同样是**原生重写**：网页接口换 gateway token、`dumate-svc.baidu.com` 的 OpenAI
 兼容对话、签到与积分都在 `server/platforms/dumate/` 里实现，没有引入参考仓
-的 HTTP 服务。端点、业务码与「有意不跟」（例如不做自动化百度登录、不批量注册）
-记在 `deploy/dumate-ref.txt`。
+的 HTTP 服务。端点、业务码与「有意不跟」（例如不引入参考仓的 playwright
+浏览器登录器、不批量注册）记在 `deploy/dumate-ref.txt`。网页登录用纯 HTTP
+的百度 Passport 扫码（服务端取码，手机确认），与手工粘贴 Cookie 并存。
 
 MiniMax Code 的协议参考是
 [`@magpie-community/opencode-minimax-auth`](https://www.npmjs.com/package/@magpie-community/opencode-minimax-auth)

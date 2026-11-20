@@ -537,7 +537,8 @@ export function PlatformAccountsPanel({
       if (mode === 'sms') return;      // 等用户填手机号，没有可轮询的后台任务
       // 扫码平台（Loomy）在面板内扫码；其它平台开浏览器授权页。二维码是后台
       // 线程去取的，`start` 返回时还给不出来，所以这里不能按 `qr` 判断。
-      if (platform !== 'loomy') {
+      // DuMate 走百度 Passport 扫码，`url` 为空，同样不需要开浏览器。
+      if (out.url && platform !== 'loomy') {
         window.open(out.url, '_blank', 'noopener,noreferrer');
       }
       void pollLogin(platform, out.login_id);
@@ -1042,7 +1043,9 @@ export function PlatformAccountsPanel({
                     className="h-7 rounded-full px-2.5 text-[11px]"
                     disabled={busyAny || loginStarting || login !== null}
                     onClick={() => void startWebLogin()}
-                    title={t('platforms.loginHint')}
+                    title={platform === 'dumate'
+                      ? t('platforms.loginHintDumate')
+                      : t('platforms.loginHint')}
                   >
                     {loginStarting ? <Loader2 className="animate-spin" /> : <LogIn />}
                     {t('platforms.login')}
@@ -1804,12 +1807,16 @@ export function PlatformAccountsPanel({
                 : login?.status === 'needs_bind'
                   ? t('platforms.loginBindDesc')
                   : loginQrVisible
-                    ? t('platforms.loginQrDesc')
+                    ? platform === 'dumate'
+                      ? t('platforms.loginDumateQrDesc')
+                      : t('platforms.loginQrDesc')
                     : platform === 'loomy'
                       ? t('platforms.loginDescLoomy')
-                      : loginNeedsLoopback
-                        ? t('platforms.loginDesc')
-                        : t('platforms.loginDeviceDesc')}
+                      : platform === 'dumate'
+                        ? t('platforms.loginDescDumate')
+                        : loginNeedsLoopback
+                          ? t('platforms.loginDesc')
+                          : t('platforms.loginDeviceDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
@@ -1845,7 +1852,9 @@ export function PlatformAccountsPanel({
                 <div className="flex justify-center">
                   <img
                     src={login.qr}
-                    alt={t('platforms.loginQrAlt')}
+                    alt={platform === 'dumate'
+                      ? t('platforms.loginQrAltDumate')
+                      : t('platforms.loginQrAlt')}
                     className="h-44 w-44 rounded-xl border border-border/60 bg-white p-1"
                   />
                 </div>
@@ -2006,7 +2015,9 @@ export function PlatformAccountsPanel({
             <DialogDescription>
               {platform === 'loomy'
                 ? t('platforms.importDescLoomy')
-                : t('platforms.importDesc')}
+                : platform === 'dumate'
+                  ? t('platforms.importDescDumate')
+                  : t('platforms.importDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
@@ -2016,7 +2027,9 @@ export function PlatformAccountsPanel({
                 onChange={(e) => setImportText(e.target.value)}
                 placeholder={platform === 'loomy'
                   ? t('platforms.importPlaceholderLoomy')
-                  : t('platforms.importPlaceholder')}
+                  : platform === 'dumate'
+                    ? t('platforms.importPlaceholderDumate')
+                    : t('platforms.importPlaceholder')}
                 className="min-h-40 font-mono text-[11px]"
                 spellCheck={false}
                 autoFocus

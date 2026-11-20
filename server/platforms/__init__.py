@@ -16,7 +16,8 @@
   · Loomy —— 原生实现（讯飞星火 Loomy），单区域平台，模型名以 `loomy/`
     为前缀。账号服务 `account.xfinfr.com`，模型网关 OpenAI 兼容。
   · DuMate —— 原生实现（百度搭子），单区域平台，模型名以 `dumate/` 为前缀。
-    凭证是网页 Cookie（`BDUSS`），模型网关 OpenAI 兼容。
+    凭证是网页 Cookie（`BDUSS`），登录支持百度 Passport 扫码或手工粘贴
+    Cookie，模型网关 OpenAI 兼容。
   · MiniMax Code —— 原生实现（mcode），分国内 / 国际两站，模型名以
     `minimaxcn/` / `minimaxcom/` 为前缀。凭证是 OAuth refresh token，
     对话端点是 Anthropic Messages 兼容（适配器内部翻译成 OpenAI 形状）。

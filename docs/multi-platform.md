@@ -9,8 +9,9 @@
 进程里（`platforms/qoder/_vendor/`），同样不需要额外部署。第四个平台是
 **Loomy**（讯飞星火），原生实现、单区域（`loomy/` 前缀），账号服务与模型网关
 都由进程内代码直接访问。随后又按同一契约原生实现了 **DuMate**（百度搭子，
-单区域 `dumate/` 前缀，网页 Cookie 凭证）与 **MiniMax Code**（双区域，
-`minimaxcn/` / `minimaxcom/` 前缀，OAuth 设备码 + 一次性 refresh token）。
+单区域 `dumate/` 前缀，百度 Passport 扫码或网页 Cookie 凭证）与
+**MiniMax Code**（双区域，`minimaxcn/` / `minimaxcom/` 前缀，OAuth 设备码 +
+一次性 refresh token）。
 
 ---
 
@@ -128,6 +129,7 @@ server/platforms/
     constants.py         # 站点 / 网关 / 业务路径 / 输出上限
     store.py             # 账号文件（原子写 + 文件锁 + 脱敏）
     client.py            # 网页接口换 token / 对话 / 签到 / 积分
+    login.py             # 网页登录：百度 Passport 扫码（取码 / 长轮询 / BDUSS 兑换）
     catalog.py           # 目录三层降级：桌面端配置 → 进程缓存 → 快照
     adapter.py           # 实现 PlatformAdapter：账号/签到/积分/模型/对话
   minimax/
@@ -287,9 +289,10 @@ registry.register(FooAdapter())
   不含 `desktop_sync` / `solo_max_tokens` / `credit_meter`。
   详见 [`docs/loomy.md`](loomy.md)。
 - **DuMate / MiniMax Code 的设置集**：直接复用 Loomy 那一组选号 / 缓存 / 冷却
-  参数（见 `server/platforms/settings.py` 的 `_DUMATE`、`_MINIMAX`）。MiniMax
-  Code 额外支持网页设备码登录；DuMate 的凭证是网页 Cookie，导入后**不联网**
-  校验，首次刷新或对话时才向上游换 token。
+  参数（见 `server/platforms/settings.py` 的 `_DUMATE`、`_MINIMAX`）。两边都支持
+  网页登录：MiniMax Code 走 OAuth 设备码，DuMate 走百度 Passport 扫码（见下节）。
+  DuMate 的凭证仍是网页 Cookie，手工导入后**不联网**校验，首次刷新或对话时才
+  向上游换 token。
 
 三种状态都只写平台自己的账号文件（`data/platforms/<平台>/accounts/*.json`），
 不会改动 WorkBuddy 的 `auths/`，也不会删除凭据。
@@ -404,6 +407,32 @@ MiniMax Code 用标准 OAuth 设备码 + PKCE，没有二维码，也没有回�
   `uid` 落盘（同一用户重新登录是覆盖，不会多出一条账号）；
 - refresh token 是一次性的：`adapter` 每次刷新都先落盘新的 refresh token，
   再拿去发请求；旧 token 再用会被上游判成 `invalid_grant`。
+
+### 网页登录（DuMate，百度 Passport 扫码）
+
+DuMate 的网页登录本质就是百度账号登录：官方登录页
+（`login.bce.baidu.com`）走 Passport 的二维码协议。这里不引入 playwright，
+也不要求面板和浏览器同机，服务端自己完成「取码 → 长轮询 → 兑换 → 落域」：
+
+- `login_start` 立刻返回 `pending`，后台线程去
+  `passport.baidu.com/v2/api/getqrcode` 取 `sign` + `imgurl`；`login_poll`
+  把 `imgurl` 作为 `qr` 回给前端，面板内嵌显示（`url` 为空，不自动开浏览器）；
+- `channel/unicast` 是 30 秒长轮询：`errno=1` 表示还没扫码；`errno=0` 且
+  `channel_v.status=0` 时 `channel_v.v` 是一次性 bduss，`status=1` 是
+  「已扫码待确认」，继续等；
+- 拿到一次性 bduss 后调 `v3/login/main/qrbdusslogin` 换正式 `BDUSS` /
+  `STOKEN`。响应是单/双引号混用的 JSON（也可能是 JSONP 或只靠
+  `Set-Cookie`），实现里逐字段抠，不整体 `json.loads`；
+- 带着 BDUSS 访问 `login.bce.baidu.com` → `/postlogin/passport/wap`，再落到
+  `console.bce.baidu.com` 与 `dumate.baidu.com/app`，让服务端种下
+  `bce-long-term-sessionid`。**这一步不能省**：`/api/dumate/*` 依赖 console
+  会话，只有 Passport 的 BDUSS 会一直回 `10001`；
+- 最后用组装好的整段 Cookie 调一次 `/api/dumate/app/token/get` 探活：
+  401/403 判登录失败，错误信息会提示改用「粘贴 Cookie」；网络 5xx 只把账号
+  标成「待验证」，凭证照常落盘；
+- 登录会话只在内存里，二维码 5 分钟有效；成功后 `login_id` 对应的会话保留
+  一段时间供前端轮询收尾。手工粘贴 Cookie 的导入路径不变，扫码不可用时仍可
+  使用。
 
 ### 前端：国内版 / 国际版切换（Trae）
 
@@ -936,7 +965,8 @@ Trae 事件 → OpenAI chunk：
 - `server/tests/test_platform_loomy_adapter.py`：Loomy 的签名 / RSA 原语、账号文件、
   模型别名与输出上限、`/no_think` 翻译、本机会话导入、微信扫码登录状态机。
 - `server/tests/test_platform_dumate_adapter.py`：DuMate 的 Cookie 归一与脱敏、
-  目录降级、选号、token 缓存与 401 重试、`max_tokens` 钳制、SSE 扫描、签到与积分。
+  目录降级、选号、token 缓存与 401 重试、`max_tokens` 钳制、SSE 扫描、签到与积分，
+  以及百度扫码登录的事件 / 兑换解析与会话状态机。
 - `server/tests/test_platform_minimax_adapter.py`：MiniMax Code 的账号脱敏、目录解析、
   双区选号、refresh token 轮换落盘、401 重试、签到 / 积分、OpenAI ↔ Anthropic
   请求 / 响应 / 流式翻译。

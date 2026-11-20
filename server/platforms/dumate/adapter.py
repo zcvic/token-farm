@@ -12,8 +12,10 @@ DuMate 是**单区域**平台（百度搭子国内站），`realm_aware=False`�
 统一记 `realm='cn'`。
 
 凭证是**网页 cookie**（必须含 `BDUSS`），没有 refresh token：cookie 失效后
-只能重新登录网页再粘一次。因此 `refresh_account` 做的是「用 cookie 换一次
-token 并探活」，不是续期；换不到就明确报 401。
+只能重新登录。登录两条路都支持——面板里的百度 Passport 扫码
+（`server/platforms/dumate/login.py`），以及手工粘贴整段 Cookie。
+因此 `refresh_account` 做的是「用 cookie 换一次 token 并探活」，不是续期；
+换不到就明确报 401。
 """
 from __future__ import annotations
 
@@ -152,8 +154,9 @@ class DumateAdapter(PlatformAdapter):
     label = 'DuMate（百度搭子）'
     # 每日签到（`POST /api/dumate/points/loginBonus`）。
     supports_checkin = True
-    # 凭证是网页 cookie，没有可由服务端代为完成的登录链路：手工粘贴 cookie。
-    supports_web_login = False
+    # 网页登录 = 百度 Passport 扫码：服务端取二维码，手机确认后换 cookie。
+    # 手工粘贴 Cookie 仍然保留（扫码不可用时的兜底）。
+    supports_web_login = True
     # 单区域平台（百度搭子国内站）。
     realm_aware = False
 
@@ -281,7 +284,11 @@ class DumateAdapter(PlatformAdapter):
             'proxy_session': _pick(raw, 'proxy_session', 'proxySession')
             or str(old.get('proxy_session') or ''),
             'source': _pick(raw, 'source') or str(old.get('source') or 'manual'),
-            'lastRefreshError': '',
+            # 扫码登录可能只拿到 cookie、探活遇到 5xx：这时落盘但标「待验证」，
+            # 让账号页能看出这份凭证还没真正换到 token。手工粘贴不带这两个字段，
+            # 相当于一次新的凭证，旧状态要清掉。
+            'loginState': _pick(raw, 'loginState', 'login_state'),
+            'lastRefreshError': _pick(raw, 'lastRefreshError', 'last_refresh_error'),
         }
         self._credits.pop(uid, None)
         self._drop_token(uid)
@@ -327,6 +334,19 @@ class DumateAdapter(PlatformAdapter):
             patch['nickname'] = nickname
         self._credits.pop(uid, None)
         return store.public_account(store.patch_account(uid, patch))
+
+    # ── 网页登录（百度 Passport 扫码）──────────────────────
+    def login_start(self, *, realm: str | None = None) -> dict:
+        from . import login as loginmod  # noqa: PLC0415 —— login 反向依赖 adapter
+        return loginmod.start()
+
+    def login_poll(self, login_id: str) -> dict:
+        from . import login as loginmod  # noqa: PLC0415
+        return loginmod.poll(login_id)
+
+    def login_cancel(self, login_id: str) -> bool:
+        from . import login as loginmod  # noqa: PLC0415
+        return loginmod.cancel(login_id)
 
     # ── 任务 ──────────────────────────────────────────────
     async def checkin(self, account_id: str) -> dict:
