@@ -59,6 +59,30 @@ check('转成 CreditExpiry 后字段是 at / amount', platformCreditExpiries(ent
 check('没有明细时返回空数组', platformCreditExpiries({uid: 'u1'}, NOW), []);
 check('条目为 null 也不抛', platformCreditExpiries(null, NOW), []);
 
+// 查询失败回退：余额已经是旧值，有效期也该用同一份快照，而不是整块消失。
+const stale = {
+  uid: 'u1',
+  error: '上游超时',
+  last_credits: 900,
+  last_registered_at: 1700000000,
+  last_expires: [
+    {amount: 900, expire_at: at(NOW + 3 * 86400_000), label: '每月登录'},
+  ],
+};
+check('失败回退时沿用快照的到期明细', platformCreditExpiries(stale, NOW), [
+  {at: at(NOW + 3 * 86400_000), amount: 900},
+]);
+
+// 实时成功但没有包（Loomy 只给快过期金额）时不能把旧包翻出来。
+check('实时成功但无包时不回退旧明细', platformCreditExpiries({
+  uid: 'u1',
+  credits: 1200,
+  registered_at: at(NOW),
+  last_expires: [
+    {amount: 900, expire_at: at(NOW + 3 * 86400_000), label: '每月登录'},
+  ],
+}, NOW), []);
+
 check('恰好在到期的包不算可见', creditExpiryVisible(
   {amount: 1, expire_at: at(NOW), label: ''}, NOW), false);
 check('未到期的包可见', creditExpiryVisible(

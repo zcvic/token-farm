@@ -502,8 +502,16 @@ class MinimaxAdapter(PlatformAdapter):
             rest = min(remaining, granted)
             left += rest
             if rest > 0:
-                expires.append({'credits': _round(rest),
-                                'expire_at': int(expire_ms)})
+                # 字段名与前端 `PlatformCreditsExpiry` 的契约一致：`amount` 是
+                # **该包当前剩余**（不是上限），`expire_at` 是 **epoch 秒**
+                # （不是上游的毫秒）。这里曾写成 `credits` + 毫秒，界面按
+                # `amount` / 秒读，于是 MiniMax 的「积分有效期」一直是空的。
+                #
+                # `label` 留空串而不是编一个：积分明细里没有经过核对的包名字段，
+                # 编出来的名字只会让用户拿它去问客服时对不上。
+                expires.append({'amount': _round(rest),
+                                'expire_at': int(expire_ms // 1000),
+                                'label': ''})
         expires.sort(key=lambda x: x['expire_at'])
         return {
             'total': _round(total),

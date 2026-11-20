@@ -51,12 +51,14 @@ class RecordPlatformBalanceTest(_DbCase):
         self.assertIsNotNone(at)
         self.assertGreaterEqual(at, before)
         self.assertEqual(creditsvc.platform_snapshot_entry('trae', 'u1'),
-                         {'uid': 'u1', 'credits': 4700, 'registered_at': at})
+                         {'uid': 'u1', 'credits': 4700, 'registered_at': at,
+                          'expires': [], 'next_expire_at': None})
         entries = creditsvc.platform_snapshot_entries('trae')
         self.assertEqual(entries['platform'], 'trae')
         self.assertEqual(entries['snapshot_at'], at)
         self.assertEqual(entries['accounts'],
-                         [{'uid': 'u1', 'credits': 4700, 'registered_at': at}])
+                         [{'uid': 'u1', 'credits': 4700, 'registered_at': at,
+                           'expires': [], 'next_expire_at': None}])
 
     def test_does_not_leak_into_workbuddy_snapshot(self) -> None:
         creditsvc.record_platform_balance('qoder', 'same-uid', 200)
@@ -98,11 +100,46 @@ class RecordPlatformBalanceTest(_DbCase):
             'trae', {'u1': 1, 'u2': 2.5, 'bad': None, '': 9})
         self.assertIsNotNone(at)
         self.assertEqual(creditsvc.platform_snapshot_entries('trae')['accounts'], [
-            {'uid': 'u1', 'credits': 1, 'registered_at': at},
-            {'uid': 'u2', 'credits': 2.5, 'registered_at': at},
+            {'uid': 'u1', 'credits': 1, 'registered_at': at,
+             'expires': [], 'next_expire_at': None},
+            {'uid': 'u2', 'credits': 2.5, 'registered_at': at,
+             'expires': [], 'next_expire_at': None},
         ])
         self.assertIsNone(creditsvc.record_platform_balances('trae', {}))
         self.assertIsNone(creditsvc.record_platform_balances('', {'u1': 1}))
+
+    def test_batch_records_expiry_details(self) -> None:
+        """快照不只要余额：查询失败回退旧值时，有效期也要跟着回来。"""
+        future = int(time.time()) + 7 * 86400
+        later = future + 86400
+        at = creditsvc.record_platform_balances('trae', {'u1': {
+            'uid': 'u1',
+            'credits': 4700,
+            'expires': [
+                {'amount': 500, 'expire_at': later, 'label': '每月登录'},
+                {'amount': 4200, 'expire_at': future, 'label': '新用户包'},
+                {'amount': 0, 'expire_at': later, 'label': '已用完'},
+                {'amount': 100, 'expire_at': 0, 'label': '没有到期时刻'},
+            ],
+        }})
+        entry = creditsvc.platform_snapshot_entry('trae', 'u1')
+        self.assertEqual(entry['credits'], 4700)
+        self.assertEqual(entry['registered_at'], at)
+        self.assertEqual(entry['expires'], [
+            {'amount': 4200, 'expire_at': future, 'label': '新用户包'},
+            {'amount': 500, 'expire_at': later, 'label': '每月登录'},
+        ])
+        self.assertEqual(entry['next_expire_at'], future)
+
+    def test_old_snapshot_without_expiry_still_reads(self) -> None:
+        """升级前的条目只有 {'credits','at'}，不能因此读不出余额。"""
+        snapshot = {'trae': {'u1': {'credits': 7, 'at': 1700000000}}}
+        with mock.patch.object(creditsvc, '_load_platform_snapshot',
+                               lambda: snapshot):
+            self.assertEqual(creditsvc.platform_snapshot_entry('trae', 'u1'), {
+                'uid': 'u1', 'credits': 7, 'registered_at': 1700000000,
+                'expires': [], 'next_expire_at': None,
+            })
 
 
 class _FakeAdapter:
@@ -175,6 +212,23 @@ class PlatformCreditsRouteTest(_DbCase):
         self.assertEqual(item['error'], '令牌过期')
         self.assertEqual(item['last_credits'], 300)
         self.assertIsInstance(item['last_registered_at'], int)
+
+    def test_failure_returns_last_expiry(self) -> None:
+        """失败回退时有效期不能消失：旧余额与旧到期出自同一份快照。"""
+        future = int(time.time()) + 3 * 86400
+        creditsvc.record_platform_balances('trae', {'u1': {
+            'uid': 'u1', 'credits': 300,
+            'expires': [{'amount': 300, 'expire_at': future, 'label': '每月登录'}],
+        }})
+        adapter = _FakeAdapter({'u1': PlatformError('令牌过期', status=401)})
+        with mock.patch.object(platforms_router, '_adapter', lambda name: adapter):
+            out = self._run(platforms_router.list_credits, 'trae', user={})
+        item = out['credits'][0]
+        self.assertEqual(item['last_credits'], 300)
+        self.assertEqual(item['last_expires'], [
+            {'amount': 300, 'expire_at': future, 'label': '每月登录'},
+        ])
+        self.assertEqual(item['last_next_expire_at'], future)
 
     def test_adapter_error_body_returns_last_recorded(self) -> None:
         """Qoder 没有网关侧快照时是「正常返回 + error」，同样要退到面板登记值。"""

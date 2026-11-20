@@ -358,7 +358,10 @@ class DumateAdapterTest(unittest.TestCase):
         self.assertEqual(out['limit'], 100)
         self.assertEqual(out['used'], 30)
         self.assertEqual(out['unit'], 'points')
-        self.assertEqual(out['next_expire_at'], 1765000000000)
+        # 上游给毫秒，对外契约是 epoch 秒；字段名是 amount（不是 credits）。
+        self.assertEqual(out['expires'], [
+            {'amount': 70, 'expire_at': 1765000000, 'label': 'monthly'}])
+        self.assertEqual(out['next_expire_at'], 1765000000)
         self.assertTrue(out['subscribed'])
 
     def test_usage_collects_errors_without_raising(self) -> None:

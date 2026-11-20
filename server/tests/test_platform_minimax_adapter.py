@@ -587,6 +587,14 @@ class MinimaxAdapterTest(unittest.TestCase):
         self.assertEqual(out['used'], 1240.5)
         self.assertEqual(out['unit'], 'credits')
         self.assertEqual(len(out['expires']), 1)
+        # 到期明细的字段名 / 单位必须与前端 `PlatformCreditsExpiry` 一致：
+        # `amount` = 该包剩余，`expire_at` = epoch 秒。写成 credits / 毫秒
+        # 时界面「积分有效期」整列为空。
+        pack = out['expires'][0]
+        self.assertEqual(pack['amount'], 60)
+        # epoch 秒（上游是毫秒）：与「一天后」相差不超过几秒，差 1000 倍会立刻暴露。
+        self.assertAlmostEqual(pack['expire_at'], time.time() + 86400, delta=5)
+        self.assertEqual(out['next_expire_at'], pack['expire_at'])
 
     def test_usage_collects_errors_without_raising(self) -> None:
         self._seed()

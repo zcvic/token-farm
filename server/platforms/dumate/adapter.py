@@ -481,15 +481,20 @@ class DumateAdapter(PlatformAdapter):
         for package in snapshot.get('packages') or []:
             if not isinstance(package, dict):
                 continue
-            expire_at = package.get('points_expire_at') \
-                or package.get('expire_at')
-            if not expire_at:
+            # 上游给的是**毫秒**；`PlatformCreditsExpiry.expire_at` 的契约是
+            # **epoch 秒**，差 1000 倍会让倒计时显示成几十万天。
+            expire_ms = _num(package.get('points_expire_at')) \
+                or _num(package.get('expire_at'))
+            rest = _num(package.get('left'))
+            if not expire_ms or rest is None or rest <= 0:
                 continue
             expires.append({
-                'credits': package.get('left'),
-                'expire_at': expire_at,
-                'source': package.get('source') or package.get('product') or '',
+                'amount': rest,
+                'expire_at': int(expire_ms // 1000),
+                'label': str(package.get('source')
+                             or package.get('product') or ''),
             })
+        expires.sort(key=lambda item: item['expire_at'])
         out = {
             'uid': uid,
             'realm': 'cn',

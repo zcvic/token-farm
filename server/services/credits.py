@@ -364,6 +364,50 @@ def _platform_value(raw: object) -> int | float | None:
     return int(number) if number.is_integer() else round(number, 2)
 
 
+# 快照里愿意保留的到期包字段：余额是**数字**，到期是**明细**，两者一起存才能
+# 在查询失败回退旧值时把「哪一笔、还有几天到期」一起交代清楚。
+def _platform_expiries(raw: object) -> list[dict]:
+    """从适配器的积分结果 / 快照条目里取可展示的到期包。
+
+    只留 `amount` / `expire_at` / `label` 三项：这是前端 `PlatformCreditsExpiry`
+    的全部字段，多存只会让这份 JSON 随着上游响应结构一起漂移。余额为 0 的包
+    （已用完）与没有到期时刻的包不存：前者永远不会再回到可花的余额，后者排不出
+    倒计时，留在快照里只会让「最近到期」算错。
+    """
+    if not isinstance(raw, dict):
+        return []
+    packs = raw.get('expires')
+    if not isinstance(packs, list):
+        return []
+    out: list[dict] = []
+    for pack in packs:
+        if not isinstance(pack, dict):
+            continue
+        amount = _platform_value(pack.get('amount'))
+        try:
+            expire_at = int(pack.get('expire_at'))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if amount is None or amount <= 0 or expire_at <= 0:
+            continue
+        out.append({'amount': amount, 'expire_at': expire_at,
+                    'label': str(pack.get('label') or '')[:120]})
+    out.sort(key=lambda item: item['expire_at'])
+    return out[:64]
+
+
+def _platform_next_expire(expiries: list[dict], raw: object) -> int | None:
+    """最早到期时刻：优先用适配器算好的 `next_expire_at`，否则从明细里取最小。"""
+    if isinstance(raw, dict):
+        try:
+            value = int(raw.get('next_expire_at'))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return min((item['expire_at'] for item in expiries), default=None)
+
+
 def record_platform_balance(platform: str, uid: str,
                             credits: int | float | None) -> int | None:
     """登记一次平台账号余额，返回登记时刻（epoch 秒）。
@@ -383,16 +427,23 @@ def record_platform_balances(platform: str, entries: dict[str, object]) -> int |
 
     批量查询是并发拿回 N 个账号的，逐个调用会让这份 JSON 被读改写 N 次；
     这里合并成一次，锁也只进一次。
+
+    `entries` 的值可以是纯数字，也可以是适配器 `credits()` 的整条结果
+    （`{credits, expires, next_expire_at}`）——后者让快照同时留下**到期明细**，
+    查询失败回退旧值时界面才不会突然「有效期消失」。
     """
     platform = _platform_key(platform)
     if not platform or not isinstance(entries, dict):
         return None
-    clean: dict[str, int | float] = {}
-    for uid, credits in entries.items():
+    clean: dict[str, dict] = {}
+    for uid, raw in entries.items():
         uid = str(uid or '').strip()
-        value = _platform_value(credits)
-        if uid and value is not None:
-            clean[uid] = value
+        value = _platform_value(raw)
+        if not uid or value is None:
+            continue
+        expiries = _platform_expiries(raw)
+        clean[uid] = {'credits': value, 'expires': expiries,
+                      'next_expire_at': _platform_next_expire(expiries, raw)}
     if not clean:
         return None
     now = int(time.time())
@@ -401,21 +452,29 @@ def record_platform_balances(platform: str, entries: dict[str, object]) -> int |
         bucket = snap.get(platform)
         if not isinstance(bucket, dict):
             bucket = {}
-        for uid, value in clean.items():
-            bucket[uid] = {'credits': value, 'at': now}
+        for uid, entry in clean.items():
+            bucket[uid] = {**entry, 'at': now}
         snap[platform] = bucket
         _save_platform_snapshot(snap)
     return now
 
 
 def platform_snapshot_entry(platform: str, uid: str) -> dict | None:
-    """单个平台账号的上次登记值（没有登记过返回 None）。"""
+    """单个平台账号的上次登记值（没有登记过返回 None）。
+
+    带上 `expires` / `next_expire_at`：回退旧值时界面照常显示有效期，而不是
+    把「这一笔什么时候到期」这一行整块吞掉。
+    """
     bucket = _load_platform_snapshot().get(_platform_key(platform)) or {}
     raw = bucket.get(str(uid or '').strip())
     value = _platform_value(raw)
     if value is None:
         return None
-    return {'uid': str(uid), 'credits': value, 'registered_at': _snapshot_time(raw)}
+    expiries = _platform_expiries(raw)
+    return {'uid': str(uid), 'credits': value,
+            'registered_at': _snapshot_time(raw),
+            'expires': expiries,
+            'next_expire_at': _platform_next_expire(expiries, raw)}
 
 
 def platform_snapshot_entries(platform: str) -> dict:
@@ -427,8 +486,11 @@ def platform_snapshot_entries(platform: str) -> dict:
         value = _platform_value(raw)
         if value is None:
             continue
+        expiries = _platform_expiries(raw)
         rows.append({'uid': str(uid), 'credits': value,
-                     'registered_at': _snapshot_time(raw)})
+                     'registered_at': _snapshot_time(raw),
+                     'expires': expiries,
+                     'next_expire_at': _platform_next_expire(expiries, raw)})
     rows.sort(key=lambda r: r['uid'])
     newest = max((r['registered_at'] or 0 for r in rows), default=0)
     return {'platform': key, 'snapshot_at': newest,

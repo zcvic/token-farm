@@ -35,6 +35,10 @@
 #        · 积分：GET /api/dumate/points/quota_overview?clientType=desktop&
 #          timezone=Asia%2FShanghai → totalPoints / usedPoints / subscription /
 #          incremental / isSubscribed / modelThrottleInfo。
+#          包级到期在 subscription[] / incremental[] 里：expireDate /
+#          pointsExpireDate（**epoch 秒 * 1000，即毫秒**）。client 先折成毫秒
+#          统一存放，adapter.credits 再归一成 {'amount', 'expire_at', 'label'}，
+#          amount 是包剩余、expire_at 是 epoch 秒（与前端契约一致）。
 #        · 模型目录三级降级：桌面端 opencode.json → 进程缓存 → 包内
 #          catalog.json 快照。对外模型名加 `dumate/` 前缀（参考仓是裸名）。
 #        · 业务码：HTTP 200 仍要读 `code`（code=0 且 success!=false 才成功）；

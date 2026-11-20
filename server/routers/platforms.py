@@ -625,11 +625,20 @@ async def account_usage(name: str, account_id: str,
 
 
 def _with_last_platform_credits(name: str, item: dict) -> dict:
-    """查询失败时附上「上次登记」的值与时刻，让界面能如实显示旧数据。"""
+    """查询失败时附上「上次登记」的值、时刻与到期明细，让界面能如实显示旧数据。
+
+    只回余额会让「有效期」这一列在失败的一瞬间整块消失，用户会以为是上游
+    把到期的包清零了；把登记时的 `expires` / `next_expire_at` 一起带回来，
+    界面照常画倒计时，只是标注成「上次登记」。
+    """
     last = creditsvc.platform_snapshot_entry(name, str(item.get('uid') or ''))
     if last:
         item['last_credits'] = last['credits']
         item['last_registered_at'] = last['registered_at']
+        if last.get('expires'):
+            item['last_expires'] = last['expires']
+        if last.get('next_expire_at'):
+            item['last_next_expire_at'] = last['next_expire_at']
     return item
 
 
@@ -669,8 +678,10 @@ async def list_credits(name: str,
 
     items = list(await asyncio.gather(*(run(str(a.get('uid') or '')) for a in accounts)))
     # 一批查询只读改写快照一次：逐个登记会让这份 JSON 被读改写 N 次。
+    # 传整条结果（而不只是 credits），快照才会同时留下到期明细；纯数字的旧调用
+    # 仍然兼容（`record_platform_balances` 会当成没有到期信息）。
     at = creditsvc.record_platform_balances(
-        name, {str(item.get('uid') or ''): item.get('credits') for item in items})
+        name, {str(item.get('uid') or ''): item for item in items})
     for item in items:
         value = item.get('credits')
         if at is not None and isinstance(value, (int, float)) \

@@ -2554,6 +2554,10 @@ export interface PlatformCredits {
   last_credits?: number;
   /** 上一次成功登记的时刻（epoch 秒） */
   last_registered_at?: number | null;
+  /** 上一次成功登记时的到期明细（失败回退时照常画有效期） */
+  last_expires?: PlatformCreditsExpiry[];
+  /** 上一次成功登记时的最早到期时刻（epoch 秒） */
+  last_next_expire_at?: number | null;
   error?: string;
   code?: string;
   /** 部分接口失败但仍有可用数字时的明细 */

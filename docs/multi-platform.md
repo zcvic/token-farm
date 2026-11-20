@@ -584,10 +584,15 @@ Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBudd
   平台没有 WorkBuddy 那样的活跃 / 旅行流水。**支出**（`usage.credit`）与 token
   用量照常按平台统计。
 - 每次平台余额查询成功都会登记一份快照（存在 `credits_snapshot_platforms`，
-  与 WorkBuddy 的 `credits_snapshot` 分开），可用
-  `GET /api/platforms/{name}/credits-snapshot` 只读对账。查询失败时账号列表会
-  带回 `last_credits` / `last_registered_at`，界面以 `~` 标成上次登记值，而不是
-  把旧数字伪装成实时余额。
+  与 WorkBuddy 的 `credits_snapshot` 分开），余额之外**同时记下到期明细**
+  （`expires` / `next_expire_at`）；可用 `GET /api/platforms/{name}/credits-snapshot`
+  只读对账。查询失败时账号列表会带回 `last_credits` / `last_registered_at`，以及
+  同一份快照里的 `last_expires` / `last_next_expire_at`，界面以 `~` 标成上次登记值，
+  有效期照常显示，而不是把旧数字伪装成实时余额或让到期时间整块消失。
+  到期明细的契约固定为 `{'amount', 'expire_at', 'label'}`：`amount` 是该包
+  **当前剩余**（不是包上限），`expire_at` 是 **epoch 秒**。上游给毫秒的平台
+  （MiniMax / DuMate）在适配器里折回秒，字段名也在适配器里归一——这两处不一致
+  不会报错，只会让界面的有效期整列静默变空，新增平台时注意对齐 `trae`。
 - **版本的统计口径按平台分两类**。WorkBuddy 的版本是账号池划分，看客户端传的
   `global:` 前缀；Trae 这类分版本的平台，模型名是 `trae/<model>`、本身不含
   版本，版本由**实际选中的账号**决定。适配器在 `PlatformChat.realm` 里回报

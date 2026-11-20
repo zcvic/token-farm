@@ -26,13 +26,31 @@ export function creditExpiryVisible(
   return pack.expire_at * 1000 > now;
 }
 
+/**
+ * 可见权益包的来源：实时查询失败时后端会附上上次登记的快照
+ * （`last_expires`），这时照常画有效期，只是余额已由 `~` 标成旧值。
+ * 实时成功但确实没有包（Loomy 只给快过期金额）时**不**回退，
+ * 否则会把上一次查询的旧包当成现在的。
+ */
+function sourcePacks(
+  entry: PlatformCredits | undefined | null,
+): PlatformCreditsExpiry[] {
+  const live = Array.isArray(entry?.expires) ? entry.expires : [];
+  if (live.length) return live;
+  const stale = entry
+    && (entry.error || typeof entry.last_credits === 'number')
+    && Array.isArray(entry.last_expires)
+    ? entry.last_expires
+    : [];
+  return stale.length ? stale : live;
+}
+
 /** 平台账号的可见权益包，按到期时间升序（最早的排最前）。 */
 export function platformCreditPacks(
   entry: PlatformCredits | undefined | null,
   now: number = Date.now(),
 ): PlatformCreditsExpiry[] {
-  const packs = entry?.expires;
-  if (!Array.isArray(packs)) return [];
+  const packs = sourcePacks(entry);
   return packs
     .filter((pack) => creditExpiryVisible(pack, now))
     .sort((a, b) => a.expire_at - b.expire_at);
