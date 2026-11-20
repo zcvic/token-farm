@@ -99,7 +99,7 @@ git commit -m "upstream: 说清这次改了什么"
 除 misakano 面板仓外，2026-11 还有三个参考源。
 
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
-已核对的范围是 `80b4b21`（v2.11.10）→ `7d5b163`（v2.11.20）：
+已核对的范围是 `80b4b21`（v2.11.10）→ `eb76ab8b`（v2.11.21）：
 
 | 区间 | 取到的能力 |
 |---|---|
@@ -109,11 +109,12 @@ git commit -m "upstream: 说清这次改了什么"
 | `f32521fd` → `d780cab` | Responses 透传 `parallel_tool_calls`；统计页顶部实时并发 / RPM 指标条；账号保护预警移到「设置 → 上游」；`/v1/usage` 积分按小数返回；「限时免费」判定统一；自定义密钥形态（`WB_KEY_CUSTOM_ENABLED`） |
 | `d780cab` → `2b6b386` | PG 备份按字节预算装批 + 失败退避 + keepalive；实时指标口径纠错（区间方向 / 桶内最大重叠 / 按 realm 取上限 / `/status` 短缓存）；客户端在途计数与 1 秒刷新；密钥 hash 唯一索引 + 并发 409；弹窗模型浮层碰撞边界；Docker 时区修正 |
 | `2b6b386` → `7d5b163`（v2.11.20） | 模型中心剔除视频 / 音频生成模型（含 `-video` / `-tts` / `-audio` 后缀，多模态对话模型保留）；统计页范围选择器补「昨日」 |
+| `7d5b163` → `eb76ab8b`（v2.11.21） | 字体改为随仓库分发（`next/font/local`，构建不再依赖 Google Fonts）；`.env.example` 数据卷默认改为命名卷，补首次部署防呆 |
 
-这六批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
+这七批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
 国际版 agenttool 搜索、上游自己的 CI / 发版提交同样未取。逐项清单与
 「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批、第五批、
-第七批、第十二批、第十四批段落里；Web 搜索的协议与错误语义单独写在
+第七批、第十二批、第十四批、第十六批段落里；Web 搜索的协议与错误语义单独写在
 [web-search-passthrough.md](web-search-passthrough.md)。
 
 > **面板批（2026-11-19，`d780cab` → `2b6b386`）**：这一批是 panel / Web /
@@ -149,6 +150,21 @@ git commit -m "upstream: 说清这次改了什么"
 >   上游的 `hourlyTargetFor()` 重构，未取。
 > - `7d5b163` 是发版提交（只改 `CHANGELOG.md` 与上游 `server/main.py` 版本号），
 >   本地版本线不同，不取。
+>
+> 本批没有 Go `upstream/` 改动。
+
+> **字体 / 部署批（2026-11-20，`7d5b163` → `eb76ab8b`）**：2 个提交里取 1 个。
+>
+> - `8e6f22f2` 把字体改为随仓库分发：`web/app/layout.tsx` 从 `next/font/google`
+>   换成 `next/font/local`，新增 `web/app/fonts/Inter-variable.woff2` 与
+>   `NotoSansSC-variable.woff2`（与 Google 版同源、同 latin 子集），外观不变，
+>   `next build` 不再需要访问 `fonts.googleapis.com`。本地 CI / 国内 Docker
+>   构建同样会踩这个坑，所以照取。
+> - 同一提交的部署防呆：`.env.example` 的 `WB_DATA_VOLUME` 默认值从空改为
+>   `token-farm-data`，并补上「已有 `./data` 数据时先备份」与取文件的命令。
+>   `docker-compose.yml` 早已支持这个变量，本次只翻转模板默认值；老部署的
+>   `.env` 不受影响，留空仍是原来的 bind mount。
+> - `eb76ab8b` 是发版提交（只改上游 `CHANGELOG` 与版本号），不取。
 >
 > 本批没有 Go `upstream/` 改动。
 
@@ -277,6 +293,22 @@ CN 专发的 `X-Client-*` 三头、小程序口径撤头、global UA 品牌段�
 - **不取 `1fafb14`**：`/v1/search` / `/v1/fetch` / `/v1/embeddings` 进请求台账——
   这三个入口在本地是 Python 面板侧，Go 侧没有对应路由。
 - 两个未取提交都已在上面写明；本批没有其他增量。
+
+### 已评估：misakano `d40d4b8..be99749d`
+
+扫描边界之后参考仓又推了两批（2026-11-20）：
+
+- **`d40d4b8..937fef2`（附录 F，7 个非 merge）**：取 2 项 + 1 条对照用例——
+  `abed8395` + `937fef2` 把工具 schema 里的 JS `\u` 转义转成 RE2，`b35a8d03`
+  的 11103 归请求级；不取语音端点 `923dbec2`、DeepSeek 别名 `676f9da9`、
+  加号出口 `6ef24501` 与 README `b902132c`。逐条见
+  [upstream-sync-misakano.md](upstream-sync-misakano.md) 附录 F；落地项已登记在
+  `deploy/workbuddy-panel-ref.txt` 第十五批。
+- **`937fef2..be99749d`（附录 G，7 个非 merge）**：**0 取**。全部是语音链路
+  （issue #277）的修复、测试与探针，本地 Go 侧没有 `/v1/audio/*`、面板也没有
+  语音入口，没有可接的落点；`be99749d` 的 crossacct 探针结论「上游前缀缓存按
+  账号隔离」与本地会话粘性一致，仅作参考。逐条见附录 G，来源号同时记在
+  `deploy/workbuddy-panel-ref.txt` 第十七批。
 
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）

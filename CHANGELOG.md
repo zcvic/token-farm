@@ -20,6 +20,20 @@
 
 ---
 
+## [未发布]
+
+### 修复
+
+- **构建不再依赖 Google Fonts**：前端字体改为随发布包分发，GitHub Actions 与
+  国内 Docker 构建不会再因为连不上 `fonts.googleapis.com` 而失败（以前只报一句
+  含糊的 TypeError），界面外观不变。
+- **首次用 Docker Compose 部署不再因数据目录权限失败**：`.env.example` 默认把
+  数据目录设为命名卷 `token-farm-data`，容器首次启动即可写入，不再报
+  `unable to open database file` 或「目录不可写」。已有部署不受影响；若沿用原来的
+  `./data` 目录，按 `.env.example` 的说明备份或调整属主即可。
+
+---
+
 ## [1.1.10] - 2026-11-20
 
 ### 新增

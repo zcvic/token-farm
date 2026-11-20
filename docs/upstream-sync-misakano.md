@@ -3087,3 +3087,43 @@ reorderEarly → repack → cleanup；Python 在 `convertInputItems` 收尾处�
 misakano 这批全在 Go 出站管线与 README，qoder 那批全在 `_vendor/` 的协议层。
 两边都按「整目录 / 单点重写」各自落地，记录分别写在
 `deploy/workbuddy-panel-ref.txt` 第十五批与 `deploy/qoder-ref.txt` 第三批。
+
+## 附录 G：`937fef2..be99749d` 增量评估（2026-11-20 扫）
+
+### G.1 范围与统计
+
+参考仓在第十五批（`937fef2`）之后又推了 **7 个非 merge 提交**，全部在
+2026-11-20，围绕 issue #277 的语音链路（TTS / ASR）与一个探针：
+
+| 提交 | 主题 |
+|---|---|
+| `e1280ca5` | ASR 的 multipart Content-Type 被 CommonHeaders 覆盖成 `application/json` |
+| `d582d709` | README 标注语音端点已真号跑通 TTS→ASR 闭环 |
+| `269b92e2` | 未配置的音色归请求级，不再轮转全池 |
+| `56c826c1` | 流式 ASR 探针加海外域对照（CN 素材 → global WS 同样通） |
+| `b8a704b0` | 流式 ASR 探针补边界（分片大小 / 长语音推流 / 噪声抑制 / 空 final） |
+| `08cb9351` | ASR 3MB 上限在入口挡掉；15053 归请求级；TTS 认 SSE 错误帧 |
+| `be99749d` | crossacct 探针：判定上游前缀缓存是否跨账号共享 |
+
+判定汇总：**0 取、7 不取**。理由与 F.3 对 `923dbec2` 的判定同源——本地 Go 侧
+没有 `/v1/audio/speech`、`/v1/audio/transcriptions`，面板也没有语音入口；这一批
+全是对那条尚未存在的数据面做 bug 修复、测试与探针，**没有可接的落点**。
+
+### G.2 逐条判定
+
+| 提交 | 判定 | 说明 |
+|---|---|---|
+| `e1280ca5` | 不取 | 修的是参考仓 `Transcribe` 里 `ChatHeaders` 覆盖 multipart boundary 的顺序问题；本地没有 `Transcribe`。 |
+| `d582d709` | 不取 | 纯 README，描述的两个端点本地都不存在。 |
+| `269b92e2` | 不取 | TTS 音色未配置时把 500 + 10000 归请求级，避免全池轮转；本地没有 speech 调用链，也没有 `TTSDefaultVoice`。 |
+| `56c826c1` | 不取 | 流式 ASR 的海外域探针，依赖参考仓的 live WebSocket 夹具与真实凭据。 |
+| `b8a704b0` | 不取 | 同上，流式 ASR 边界探针。 |
+| `08cb9351` | 不取 | 四个子项（3MB 入口 413、15053 归请求级、TTS `Accept` 顺序、SSE error 帧）全在 audio 路由里；本地没有 audio 路由。 |
+| `be99749d` | 不取（结论可参考） | `internal/probe/crossacct.go` 是 `//go:build ignore` 的实号探针，本地不引入；但结论「上游前缀缓存**按账号隔离**，换号等于从零重吃」与本地会话粘性策略一致（同一会话钉在同一账号），无需额外改动。 |
+
+### G.3 何时再考虑
+
+这批的门槛不是「代码复不复杂」，而是**本地要不要提供语音数据面**。要接时应先
+在面板侧补入口与开关，再用真号对 TTS→ASR 抓包核对容器格式、PCM 参数与错误码，
+最后才把 `08cb9351` 的入口限额与请求级分类一起移植；单独抄这几个补丁只会得到
+一条没有调用方的死路由。记录同步写进 `deploy/workbuddy-panel-ref.txt` 第十七批。

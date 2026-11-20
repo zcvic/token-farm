@@ -691,3 +691,29 @@ f0ffbe18051680d0248cecbabdec294b890de669
 937fef2b72da8dfbc8c49b52f992ed324290c8ce
 b35a8d039c35cb52d37d23094efcf915a4be6cb7
 abed839572c786cecead9c422e1114639e3244f8
+
+# ---- 2026-11 第十六批：面板仓 7d5b163 → eb76ab8b（v2.11.21，2 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 1 项（Web / 部署），发版提交不取：
+#        · 8e6f22f2 本地分发字体 + 数据卷防呆（两处部署失败的根治）：
+#          ① web/app/layout.tsx 从 next/font/google 改为 next/font/local，
+#          新增 web/app/fonts/Inter-variable.woff2 与 NotoSansSC-variable.woff2
+#          （与 Google 版同源、同 latin 子集），构建不再依赖 fonts.googleapis.com；
+#          ② .env.example 的 WB_DATA_VOLUME 默认改为命名卷 token-farm-data，
+#          并补上已有 ./data 数据的备份 / 回退说明。docker-compose.yml 早已支持
+#          该变量，本地只翻转模板默认值，老部署的 .env 不受影响。
+#        · eb76ab8b 发版提交（只改上游 CHANGELOG 与版本号）不取。
+8e6f22f2ac138a313be9f06e93654152f393eb43
+
+# ---- 2026-11 第十七批：misakano 937fef2 → be99749d（7 个非 merge 提交）----
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      本批 0 取：7 个提交全部落在语音链路（issue #277）或探针上，本地 Go 侧
+#      没有 /v1/audio/*，面板也没有语音入口，没有可接的落点。逐条：
+#        · e1280ca5 ASR multipart Content-Type 被 CommonHeaders 覆盖
+#        · d582d709 README 标注 TTS→ASR 闭环已真号跑通
+#        · 269b92e2 未配置音色归请求级（TTS 500 + 10000）
+#        · 56c826c1 / b8a704b0 流式 ASR 探针（海外域对照 / 边界）
+#        · 08cb9351 ASR 3MB 入口拦截、15053 请求级、TTS 认 SSE 错误帧
+#        · be99749d crossacct 探针（前缀缓存按账号隔离）
+#      结论与 F.3 一致：等本地真的接语音端点时，再按「面板入口 + 真机抓包」
+#      一起做。详见 docs/upstream-sync-misakano.md 附录 G。

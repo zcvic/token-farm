@@ -1,5 +1,5 @@
 import type {Metadata} from 'next';
-import {Inter, Noto_Sans_SC} from 'next/font/google';
+import localFont from 'next/font/local';
 import {Toaster} from '@/components/ui/sonner';
 import {ThemeProvider} from '@/components/common/layout/ThemeProvider';
 import {AuthProvider} from '@/lib/auth-context';
@@ -7,25 +7,32 @@ import {I18nProvider} from '@/lib/i18n/provider';
 import {withBasePath} from '@/lib/base-path';
 import './globals.css';
 
-const inter = Inter({
+// 字体改为随仓库分发的本地文件（`next/font/local`）：原来用 `next/font/google`
+// 时，构建期必须联网访问 fonts.googleapis.com 拉 CSS 与 woff2。GitHub Actions、
+// 国内 Docker 构建经常连不上（next/font 只报一句含糊的 TypeError），整个
+// `next build` 直接失败、镜像建不出来。两份字体与原先 Google 版本同源、同 latin
+// 子集，外观不变，但构建不再依赖外网。
+const inter = localFont({
+  src: './fonts/Inter-variable.woff2',
   variable: '--font-inter',
-  subsets: ['latin'],
   display: 'swap',
+  weight: '100 900',
 });
 
-// Noto Sans SC 是**可变字体**：不写 `weight` 时 Next 只声明一条
-// `font-weight: 100 900`，浏览器按需插值出 300/400/500/600/700 全部字重。
+// Noto Sans SC 是**可变字体**：用 `weight` 区间只声明一条
+// `font-weight: 300 700`，浏览器按需插值出 300/400/500/600/700 全部字重。
 //
-// 之前写了 `weight: ['300','400','500','600','700']`，Next 会为**每个字重**
+// 早先写过 `weight: ['300','400','500','600','700']`，Next 会为**每个字重**
 // 各生成 101 条 @font-face —— 共 506 条，而其中 5 个字重引用的是**同一批
 // woff2 文件**（实测：101 段 unicode-range 全部「5 个字重 → 同一个文件」，
 // 0 段指向不同文件）。所以那 4 份重复声明既不增加可用的字形，也不减少下载量，
 // 只是把 CSS 从约 93KB 撑到 464KB（gzip 31KB → 158KB），首屏白白多传 127KB。
-// 去掉之后字体渲染结果不变（同一份字体文件、同样的 unicode-range 切片）。
-const notoSansSC = Noto_Sans_SC({
+// 区间写法与之前的渲染结果一致（同一份字体文件、同样的 unicode-range 切片）。
+const notoSansSC = localFont({
+  src: './fonts/NotoSansSC-variable.woff2',
   variable: '--font-noto-sans-sc',
-  subsets: ['latin'],
   display: 'swap',
+  weight: '300 700',
 });
 
 export const metadata: Metadata = {
