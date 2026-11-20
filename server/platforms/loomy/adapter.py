@@ -23,6 +23,7 @@ import time
 from typing import Any, AsyncIterator, Callable
 
 from ... import config, db
+from ...services import credits as creditsvc
 from ...services.session_affinity import SessionAffinity, affinity_key
 from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
@@ -575,6 +576,12 @@ class LoomyAdapter(PlatformAdapter):
             earned = int(round(after - before))
 
         self._credits.pop(uid, None)
+        # 顺手更新「最近一次登记的余额」：保底积分（`platforms.loomy.min_credits`）
+        # 的选号判断读的就是这份快照；签到是每天都会发生的余额变化，不在这里
+        # 登记的话，只有用户手动打开账号页刷新积分后保底才会看到新值。
+        credits_balance = after if after is not None else before
+        if credits_balance is not None:
+            creditsvc.record_platform_balance(self.name, uid, credits_balance)
         description = str(payload.get('desc') or payload.get('message') or '')
         if not description:
             description = '今日已签到' if already else ('签到成功' if ok else '签到失败')
@@ -889,11 +896,18 @@ class LoomyAdapter(PlatformAdapter):
         self._limiter.invalidate()
 
     # ── 选号 ──────────────────────────────────────────────
-    def _candidates(self, affinity: str | None = None) -> list[dict]:
+    def _candidates(self, affinity: str | None = None,
+                    floor: int | None = None) -> list[dict]:
         """本次请求的账号顺序：权重 SWRR 决定首选，权重相同按 LRU。
 
         命中会话绑定时沿用上次的账号，且**不推进** SWRR 游标（长会话会把全局
         比例带偏）；绑定账号被冻结 / 冷却 / 删除后重新选路。
+
+        保底积分（`platforms.loomy.min_credits`，默认 5000）与 WorkBuddy 同
+        语义：余额低于阈值的账号只作**最后候选**——池里还有别的号就先跳过它，
+        全部低于保底时照常使用。余额取「最近一次登记的积分快照」；从未登记过
+        的账号不参与判断，避免把新导入的号误判成 0 积分。低于保底的粘性号也
+        会让位（否则会一直把同一个号吃穿），全部低于保底时粘性照常生效。
         """
         accounts = [a for a in store.list_accounts()
                     if str(a.get('uid') or '').strip()
@@ -906,6 +920,31 @@ class LoomyAdapter(PlatformAdapter):
         def uid_of(account: dict) -> str:
             return str(account.get('uid') or '')
 
+        limit = runtime_settings.min_credits(self.name) if floor is None \
+            else int(floor)
+        low: list[dict] = []
+        if limit > 0:
+            balances = {
+                str(row.get('uid') or ''): row.get('credits')
+                for row in creditsvc.platform_snapshot_entries(self.name)['accounts']
+            }
+            above: list[dict] = []
+            for account in accounts:
+                value = balances.get(uid_of(account))
+                if isinstance(value, (int, float)) and not isinstance(value, bool) \
+                        and value < limit:
+                    low.append(account)
+                else:
+                    above.append(account)
+            if above:
+                # 有余额充足（或余额未知）的号时，低余额号排到队尾；全低于保底
+                # 时保持原样（`low` 清空），不让保底把可用池变成 503。
+                accounts = above
+                low.sort(key=lambda a: (-_account_weight(a),
+                                        self._last_used.get(uid_of(a), 0.0)))
+            else:
+                low = []
+
         accounts.sort(key=lambda a: self._last_used.get(uid_of(a), 0.0))
 
         if affinity:
@@ -916,7 +955,7 @@ class LoomyAdapter(PlatformAdapter):
                     rest = [a for a in accounts if a is not bound]
                     rest.sort(key=lambda a: (-_account_weight(a),
                                              self._last_used.get(uid_of(a), 0.0)))
-                    return [bound, *rest]
+                    return [bound, *rest, *low]
                 self._affinity.unbind(affinity)
 
         total = sum(_account_weight(a) for a in accounts)
@@ -930,7 +969,7 @@ class LoomyAdapter(PlatformAdapter):
                                  self._last_used.get(uid_of(a), 0.0)))
         if affinity:
             self._affinity.bind(affinity, first_uid)
-        return [first, *rest]
+        return [first, *rest, *low]
 
     def _cool_down(self, uid: str, exc: PlatformError) -> bool:
         """按设置把出错的账号冻结一段时间；返回 True = 应换下一个账号。"""
@@ -970,7 +1009,7 @@ class LoomyAdapter(PlatformAdapter):
                 f'模型 {model} 是 {model_type} 类型，不支持 /v1/chat/completions',
                 status=400, code='unsupported_model')
 
-        candidates = self._candidates(affinity)
+        candidates = self._candidates(affinity, runtime.get('min_credits'))
         if not candidates:
             raise PlatformError('没有可用的 Loomy 账号（请先导入账号）',
                                 status=503, code='no_account')

@@ -2314,6 +2314,8 @@
     "configCooldown429Hint": "上游返回 429 时冻结该账号的秒数，0 = 不冻结（默认）。",
     "configCooldown5xx": "上游错误冷却",
     "configCooldown5xxHint": "上游返回 5xx 时冻结该账号的秒数，0 = 不冻结（默认）。模型不存在（4023）不冻结。",
+    "configMinCredits": "保底积分",
+    "configMinCreditsHint": "账号可用积分低于该值时只作为最后候选：池里还有别的号就先跳过它，全都低于保底时继续用。余额未登记过的账号不参与判断。0 = 关闭（默认 5000）。",
     "configSectionMeter": "输出与计量",
     "configSoloMaxTokens": "SOLO 输出上限",
     "configSoloMaxTokensHint": "SOLO 通道客户端未传 max_tokens 时的输出预算（token，含思考）。",

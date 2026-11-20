@@ -2559,6 +2559,8 @@
     "configCooldown429Hint": "429 を受けたアカウントを凍結する秒数。0 = 凍結しない（既定）。",
     "configCooldown5xx": "上流エラーの冷却",
     "configCooldown5xxHint": "5xx を受けたアカウントを凍結する秒数。0 = 凍結しない（既定）。モデル不明（4023）は凍結しない。",
+    "configMinCredits": "最低クレジット",
+    "configMinCreditsHint": "利用可能クレジットがこの値を下回るアカウントは最後の候補になります。他のアカウントが使える間はスキップされ、すべてが下回る場合だけ使用します。残高が未登録のアカウントは判定対象外です。0 = 無効（既定 5000）。",
     "configSectionMeter": "出力と計量",
     "configSoloMaxTokens": "SOLO 出力上限",
     "configSoloMaxTokensHint": "SOLO 経路でクライアントが max_tokens を送らない場合の出力予算（トークン、思考込み）。",

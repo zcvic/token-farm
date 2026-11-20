@@ -2559,6 +2559,8 @@
     "configCooldown429Hint": "上游回傳 429 時凍結該帳號的秒數，0 = 不凍結（預設）。",
     "configCooldown5xx": "上游錯誤冷卻",
     "configCooldown5xxHint": "上游回傳 5xx 時凍結該帳號的秒數，0 = 不凍結（預設）。模型不存在（4023）不凍結。",
+    "configMinCredits": "保底積分",
+    "configMinCreditsHint": "帳號可用積分低於該值時只作為最後候選：池裡還有別的號就先跳過它，全部都低於保底時繼續使用。餘額未曾登記的帳號不參與判斷。0 = 關閉（預設 5000）。",
     "configSectionMeter": "輸出與計量",
     "configSoloMaxTokens": "SOLO 輸出上限",
     "configSoloMaxTokensHint": "SOLO 通道用戶端未傳 max_tokens 時的輸出預算（token，含思考）。",

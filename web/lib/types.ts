@@ -2295,6 +2295,8 @@ export interface PlatformUsage {
 export type PlatformNumericField =
   | 'request_timeout' | 'idle_timeout' | 'max_accounts_try'
   | 'session_affinity_ttl'
+  // Loomy：保底积分（低于该值的账号只作最后候选）
+  | 'min_credits'
   // Trae：模型目录缓存 / 刷新退避
   | 'catalog_ttl' | 'catalog_retry_ttl' | 'catalog_timeout'
   | 'catalog_backoff_base' | 'catalog_backoff_max'
@@ -2344,6 +2346,8 @@ export interface PlatformSettings {
   idle_timeout: number;
   /** 单次对话最多尝试几个账号（仅部分平台支持，默认 3） */
   max_accounts_try: number;
+  /** 保底积分（仅 Loomy，默认 5000）：低于该值的账号只作最后候选；0 = 关闭 */
+  min_credits: number;
   /** 同一会话是否固定到同一账号（仅 Trae，默认开启） */
   session_affinity: boolean;
   /** 会话亲和的滑动 TTL（秒，默认 30 分钟） */

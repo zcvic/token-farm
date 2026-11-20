@@ -48,11 +48,14 @@ DEFAULT_MAX_ACCOUNTS_TRY = 3
 DEFAULT_SESSION_AFFINITY = True
 DEFAULT_SESSION_AFFINITY_TTL = 30 * 60
 DEFAULT_DESKTOP_SYNC = True
+# Loomy 保底积分：低于该值的账号只作最后候选。默认 5000，0 = 关闭。
+DEFAULT_MIN_CREDITS = 5000
 
 REQUEST_TIMEOUT_MIN, REQUEST_TIMEOUT_MAX = 10, 900
 IDLE_TIMEOUT_MIN, IDLE_TIMEOUT_MAX = 10, 600
 MAX_ACCOUNTS_TRY_MIN, MAX_ACCOUNTS_TRY_MAX = 1, 10
 SESSION_AFFINITY_TTL_MIN, SESSION_AFFINITY_TTL_MAX = 60, 12 * 3600
+MIN_CREDITS_MIN, MIN_CREDITS_MAX = 0, 10_000_000
 
 # name -> (默认值 / 默认值工厂, 下限, 上限, 界面文案用的中文名)
 # 工厂只用于「默认值来自环境变量」的项（`solo_max_tokens` 的 TF_TRAE_*）：每次
@@ -66,6 +69,13 @@ _INT_FIELDS: dict[str, tuple[_IntDefault, int, int, str]] = {
         DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_MIN, IDLE_TIMEOUT_MAX, '流空闲超时'),
     'max_accounts_try': (
         DEFAULT_MAX_ACCOUNTS_TRY, MAX_ACCOUNTS_TRY_MIN, MAX_ACCOUNTS_TRY_MAX, '换号次数'),
+    # ── Loomy：保底积分 ──
+    # 与 WorkBuddy 的「保底积分」（上游 0048）同语义：低于阈值的账号只是**最后
+    # 候选**，池里还有别的号就先跳过它；全部低于保底时照常使用，不会因此报错。
+    # 余额来自 `credits_snapshot_platforms` 里最近一次登记的积分（账号页刷新积分
+    # / 批量查询时写入），从未登记过的账号不参与判断。
+    'min_credits': (
+        DEFAULT_MIN_CREDITS, MIN_CREDITS_MIN, MIN_CREDITS_MAX, '保底积分'),
     'session_affinity_ttl': (
         DEFAULT_SESSION_AFFINITY_TTL, SESSION_AFFINITY_TTL_MIN,
         SESSION_AFFINITY_TTL_MAX, '会话亲和时长'),
@@ -156,18 +166,21 @@ _QODER = frozenset({
 })
 # Loomy 是原生实现（与 Trae 同构的选号 / 缓存 / 冷却策略），但没有桌面端会话
 # 回写与协议兼容开关：不含 `desktop_sync` / `solo_max_tokens` / `credit_meter`。
+# `min_credits` 只有 Loomy 有：余额低于阈值的号只作最后候选（见 `_INT_FIELDS`）。
 _LOOMY = frozenset({
     'request_timeout', 'idle_timeout', 'max_accounts_try',
+    'min_credits',
     'session_affinity', 'session_affinity_ttl',
     'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout',
     'credits_ttl', 'credits_timeout',
     'cooldown_429', 'cooldown_5xx',
 })
 # DuMate 与 Loomy 同一组策略（原生选号 / 目录缓存 / 冷却），也没有桌面端回写。
-_DUMATE = _LOOMY
+# 保底积分目前只在 Loomy 的选号里实现，不要顺手开给同构的 DuMate / MiniMax。
+_DUMATE = _LOOMY - {'min_credits'}
 # MiniMax Code 同为原生选号 / 目录缓存 / 冷却；额外支持网页设备码登录（路由
 # 不按能力表过滤登录，这里只是保持与适配器声明一致）。
-_MINIMAX = _LOOMY
+_MINIMAX = _LOOMY - {'min_credits'}
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -372,6 +385,11 @@ def idle_timeout(platform: str) -> int:
 
 def max_accounts_try(platform: str) -> int:
     return _read_int(platform, 'max_accounts_try')
+
+
+def min_credits(platform: str) -> int:
+    """保底积分（0 = 关闭）；仅 Loomy 的选号会读。"""
+    return _read_int(platform, 'min_credits')
 
 
 def session_affinity(platform: str) -> bool:

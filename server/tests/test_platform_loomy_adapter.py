@@ -28,6 +28,7 @@ from server.platforms.loomy import (client, constants as C, crypto, desktop, log
 from server.platforms.loomy.adapter import (LoomyAdapter, _multiplier_of,
                                             _no_think_messages, _points_of,
                                             _scan_sse)
+from server.services import credits as creditsvc
 
 
 # ── 测试用 DER 构造 ────────────────────────────────────────
@@ -447,6 +448,42 @@ class LoomyAdapterTest(unittest.TestCase):
         self.adapter._affinity.bind('k', 'u-2')
         self.assertEqual(self.adapter._candidates('k')[0]['uid'], 'u-2')
 
+    # ── 保底积分（默认 5000，只对 Loomy）──────────────────
+    def test_floor_pushes_low_balance_accounts_to_the_end(self) -> None:
+        self._seed(uid='u-1')
+        self._seed(uid='u-2')
+        creditsvc.record_platform_balance('loomy', 'u-1', 100)
+        creditsvc.record_platform_balance('loomy', 'u-2', 9000)
+        ids = [a['uid'] for a in self.adapter._candidates()]
+        self.assertEqual(ids, ['u-2', 'u-1'])
+        # 0 = 关闭：恢复成原来的 SWRR 顺序（u-1 先）
+        self.assertEqual(self.adapter._candidates(floor=0)[0]['uid'], 'u-1')
+
+    def test_floor_still_uses_accounts_when_everyone_is_below(self) -> None:
+        """全池都低于保底时必须退化到原候选，而不是没有账号可用。"""
+        self._seed(uid='u-1')
+        self._seed(uid='u-2')
+        creditsvc.record_platform_balance('loomy', 'u-1', 100)
+        creditsvc.record_platform_balance('loomy', 'u-2', 200)
+        ids = {a['uid'] for a in self.adapter._candidates()}
+        self.assertEqual(ids, {'u-1', 'u-2'})
+
+    def test_floor_ignores_accounts_without_registered_balance(self) -> None:
+        """余额从没登记过（新导入的号）不参与判断，不能被当成 0 分。"""
+        self._seed(uid='u-1')
+        self._seed(uid='u-2')
+        creditsvc.record_platform_balance('loomy', 'u-1', 100)
+        ids = [a['uid'] for a in self.adapter._candidates()]
+        self.assertEqual(ids, ['u-2', 'u-1'])
+
+    def test_affinity_yields_when_bound_account_is_below_floor(self) -> None:
+        self._seed(uid='u-1')
+        self._seed(uid='u-2')
+        creditsvc.record_platform_balance('loomy', 'u-1', 100)
+        creditsvc.record_platform_balance('loomy', 'u-2', 9000)
+        self.adapter._affinity.bind('k', 'u-1')
+        self.assertEqual(self.adapter._candidates('k')[0]['uid'], 'u-2')
+
     # ── 对话 ──────────────────────────────────────────────
     def test_chat_nonstream_translates_model_and_credit(self) -> None:
         self._seed()
@@ -574,6 +611,9 @@ class LoomyAdapterTest(unittest.TestCase):
         self.assertFalse(result['already'])
         self.assertEqual(result['earned_credit'], 50)
         self.assertEqual(result['credits'], 150)
+        # 签到会顺手登记余额，保底积分不必等用户再打开账号页刷新
+        self.assertEqual(
+            creditsvc.platform_snapshot_entry('loomy', 'u-1')['credits'], 150)
 
     def test_checkin_already_processed_earns_zero(self) -> None:
         self._seed()

@@ -75,7 +75,8 @@ const GATEWAY_DEFAULT = '__gateway_default__';
 
 const NUMERIC_KEYS: readonly NumericKey[] = [
   'max_in_flight', 'checkin_concurrency', 'checkin_delay_min', 'checkin_delay_max',
-  'request_timeout', 'idle_timeout', 'max_accounts_try', 'session_affinity_ttl',
+  'request_timeout', 'idle_timeout', 'max_accounts_try', 'min_credits',
+  'session_affinity_ttl',
   'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout',
   'catalog_backoff_base', 'catalog_backoff_max',
   'credits_ttl', 'credits_timeout', 'cooldown_429', 'cooldown_5xx',
@@ -100,6 +101,7 @@ const NUMERIC_LABEL: Record<PlatformNumericField, string> = {
   request_timeout: 'configRequestTimeout',
   idle_timeout: 'configIdleTimeout',
   max_accounts_try: 'configMaxAccountsTry',
+  min_credits: 'configMinCredits',
   session_affinity_ttl: 'configAffinityTtl',
   catalog_ttl: 'configCatalogTtl',
   catalog_retry_ttl: 'configCatalogRetryTtl',
@@ -411,6 +413,10 @@ export function PlatformConfigPanel({
         <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
           {input('max_in_flight', settings.limits, t('platforms.poolLimit'),
                  t('platforms.poolHint'))}
+          {caps?.min_credits && limits
+            && input('min_credits', limits.min_credits,
+                     t('platforms.configMinCredits'),
+                     t('platforms.configMinCreditsHint'))}
           <div className="rounded-2xl bg-background/60 px-3 py-2">
             <div className="flex items-center gap-1.5">
               <CalendarClock className="h-3.5 w-3.5 text-muted-foreground" />

@@ -284,10 +284,11 @@ registry.register(FooAdapter())
   内置网关；本地 Web 工具是唯一由模型驱动出网的能力，默认关闭。详见
   [`docs/qoder.md`](qoder.md) 的「协议兼容开关」。
 - **Loomy 的设置集**：与 Trae 同构的选号 / 缓存 / 冷却参数（`max_accounts_try`、
-  `session_affinity`、`catalog_*`、`credits_*`、`cooldown_*`）。它支持「从本机
-  导入」，但客户端文件是**只读**的（没有会话回写），也没有协议兼容开关，因此
-  不含 `desktop_sync` / `solo_max_tokens` / `credit_meter`。
-  详见 [`docs/loomy.md`](loomy.md)。
+  `min_credits`、`session_affinity`、`catalog_*`、`credits_*`、`cooldown_*`）。
+  其中 `min_credits`（保底积分，默认 5000）只属于 Loomy：余额低于阈值的账号只
+  作最后候选。它支持「从本机导入」，但客户端文件是**只读**的（没有会话回写），
+  也没有协议兼容开关，因此不含 `desktop_sync` / `solo_max_tokens` /
+  `credit_meter`。详见 [`docs/loomy.md`](loomy.md)。
 - **DuMate / MiniMax Code 的设置集**：直接复用 Loomy 那一组选号 / 缓存 / 冷却
   参数（见 `server/platforms/settings.py` 的 `_DUMATE`、`_MINIMAX`）。两边都支持
   网页登录：MiniMax Code 走 OAuth 设备码，DuMate 走百度 Passport 扫码（见下节）。

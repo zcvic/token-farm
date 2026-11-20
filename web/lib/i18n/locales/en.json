@@ -2586,6 +2586,8 @@
     "configCooldown429Hint": "Seconds to freeze an account after a 429; 0 = no freeze (default).",
     "configCooldown5xx": "Upstream error cooldown",
     "configCooldown5xxHint": "Seconds to freeze an account after a 5xx; 0 = no freeze (default). Unknown model (4023) is never frozen.",
+    "configMinCredits": "Credit floor",
+    "configMinCreditsHint": "Accounts with available credits below this value become last-resort candidates: they are skipped while other accounts qualify, and still used when every account is below the floor. Accounts with no recorded balance are ignored. 0 = off (default 5000).",
     "configSectionMeter": "Output & metering",
     "configSoloMaxTokens": "SOLO output budget",
     "configSoloMaxTokensHint": "Output budget (tokens, thinking included) when the client sends no max_tokens on the SOLO channel.",

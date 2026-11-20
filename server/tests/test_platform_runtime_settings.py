@@ -91,11 +91,21 @@ class DefaultsTest(_DbCase):
     def test_capabilities_are_per_platform(self) -> None:
         trae = runtime_settings.capabilities('trae')
         qoder = runtime_settings.capabilities('qoder')
+        loomy = runtime_settings.capabilities('loomy')
         self.assertTrue(trae['max_accounts_try'])
         self.assertTrue(trae['session_affinity'])
         self.assertFalse(qoder['max_accounts_try'])
         self.assertFalse(qoder['session_affinity'])
         self.assertTrue(qoder['request_timeout'])
+        # 保底积分只属于 Loomy：同构的 DuMate / MiniMax 没有实现选号时的阈值。
+        self.assertTrue(loomy['min_credits'])
+        self.assertFalse(runtime_settings.capabilities('dumate')['min_credits'])
+        self.assertFalse(runtime_settings.capabilities('minimax')['min_credits'])
+        self.assertFalse(trae['min_credits'])
+        self.assertFalse(qoder['min_credits'])
+        self.assertEqual(runtime_settings.load('loomy')['min_credits'], 5000)
+        self.assertEqual(runtime_settings.load('loomy')['runtime_limits']['min_credits'],
+                         {'min': 0, 'max': 10_000_000})
         # 协议兼容开关只属于 Qoder：Trae 没有对应的网关开关，不能显示成可改。
         self.assertTrue(qoder['tool_echo_mode'])
         self.assertTrue(qoder['anthropic_thinking'])
