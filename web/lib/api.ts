@@ -68,6 +68,7 @@ import type {
   PlatformTaskStatus,
   PlatformUsage,
   Combo,
+  ComboLogsResponse,
   PlaygroundModels,
   ProbeModelsResponse,
   RedPacket,
@@ -964,6 +965,14 @@ export const logApi = {
   clear: () => post<{ok: boolean}>('/api/logs/clear'),
   /** 账号列的自诊断：日志从哪读、读到几行、为什么可能是空的（issue #232） */
   accountBackfill: () => get<AccountBackfillInfo>('/api/logs/account-backfill'),
+  /**
+   * 某一个组合的请求日志（按 `combo/<name>` 精确匹配，不是 LIKE）。
+   *
+   * 组合卡片看的是「这个组合实际把请求发给了谁」，日志页的模型模糊筛选
+   * 会把 `combo/fast` 与 `combo/fast2` 混在一起。
+   */
+  comboLogs: (name: string, params?: {days?: number; limit?: number}) =>
+    get<ComboLogsResponse>(`/api/logs/combo/${encodeURIComponent(name)}`, params),
 };
 
 /* ── 用量统计 ───────────────────────────────────────── */

@@ -744,6 +744,33 @@ export interface RequestLog {
    * 跟随顶部平台下拉过滤后，这一列仍如实返回，便于排查归属。
    */
   platform: string;
+  /**
+   * 本次实际走的版本（db 口径 `cn` / `global`，由实际账号或模型前缀判定）。
+   * 组合卡片用它区分「同一个模型两版都有」时这次落到了哪一版。
+   */
+  realm: string;
+}
+
+/** 组合卡片的日志汇总（`/api/logs/combo/{name}`）。 */
+export interface ComboLogSummary {
+  total: number;
+  success: number;
+  failed: number;
+  /** 0–1；0 条记录时为 null（不是 0，避免被读成「全部失败」） */
+  success_rate: number | null;
+  /** 只统计成功请求的平均总耗时；没有成功请求时为 null */
+  avg_latency_ms: number | null;
+  total_tokens: number;
+  total_credit: number;
+}
+
+export interface ComboLogsResponse {
+  /** 实际查询的组合名（`combo/<name>`） */
+  model: string;
+  total: number;
+  /** 最近 N 条，按时间倒序 */
+  items: RequestLog[];
+  summary: ComboLogSummary;
 }
 
 export interface UsagePoint {
@@ -2418,6 +2445,14 @@ export interface PlatformCatalogPlatform {
   name: string;
   label: string;
   models: PlatformModel[];
+  /**
+   * 该平台是否分版本（Trae / MiniMax / Qoder 的 `traecn` / `traecom`）。
+   *
+   * 分版本平台的同一个裸模型可能在两个版本都存在；组合编辑页据此显示
+   * 「版本」选择器。非分版本平台（WorkBuddy）的版本写在模型名前缀里，
+   * 不需要也不接受额外的 realm。
+   */
+  realm_aware?: boolean;
   /** 该平台取目录失败时的原因；此时 `models` 为空，其余平台照常可用 */
   error?: string;
   /**
@@ -2440,6 +2475,14 @@ export interface PlatformCatalog {
 export interface ComboMember {
   platform: string;
   model: string;
+  /**
+   * 成员固定走的版本（`cn` / `global`）。
+   *
+   * 分版本平台的同一个裸模型可能在两个版本都存在（MiniMax / Trae / Qoder），
+   * 只有裸名时请求会由平台在账号池里自行分摊。留空 = 不指定，沿用平台原有
+   * 的自动判断；选了版本则该成员只走对应版本的账号池。
+   */
+  realm?: 'cn' | 'global';
   /** 相对权重（0.1–100）：3:1 表示长期大约 3/4 的请求走第一个 */
   weight: number;
   enabled: boolean;

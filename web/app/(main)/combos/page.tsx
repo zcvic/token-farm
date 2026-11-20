@@ -28,11 +28,13 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  ScrollText,
   SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
 
 import {ComboAffinityDialog} from '@/components/common/combos/ComboAffinityDialog';
+import {ComboLogsDialog} from '@/components/common/combos/ComboLogsDialog';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {PageSectionTabs} from '@/components/common/layout/PageSectionTabs';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -55,7 +57,7 @@ import {useAuth} from '@/lib/auth-context';
 import {useT} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
 import {cn} from '@/lib/utils';
-import type {Combo, ComboMember, PlatformCatalogPlatform} from '@/lib/types';
+import type {Combo, ComboMember, PlatformCatalogPlatform, PlatformModel} from '@/lib/types';
 
 /** 组合名会成为 `combo/<name>` 的后半段，与后端 `combo.NAME_RE` 同一口径。 */
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
@@ -63,9 +65,14 @@ const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const WEIGHT_MIN = 0.1;
 const WEIGHT_MAX = 100;
 
+/** Radix Select 不接受空串作为选项值，用哨兵表示「不指定版本」。 */
+const AUTO_REALM = '__auto__';
+
 type DraftMember = {
   platform: string;
   model: string;
+  /** `''` = 自动（平台按账号池自行判断）；只对分版本平台有意义 */
+  realm: string;
   /** 保留用户输入的原始文本，提交前才转数字（中间态 `0.`、空串都合法） */
   weight: string;
   enabled: boolean;
@@ -87,14 +94,71 @@ function toDraft(combo: Combo): Draft {
     members: combo.members.map((m) => ({
       platform: m.platform,
       model: m.model,
+      realm: normalizeRealm(m.realm) || '',
       weight: String(m.weight),
       enabled: m.enabled,
     })),
   };
 }
 
+/**
+ * 目录里的版本口径不统一：Trae / Qoder 用 `intl`，MiniMax 用 `global`，
+ * 而组合成员与 `ctx.realm` 用的是统计口径 `cn` / `global`。界面统一成后者。
+ */
+function normalizeRealm(realm: string | null | undefined): 'cn' | 'global' | '' {
+  const text = String(realm ?? '').trim().toLowerCase();
+  if (text === 'intl' || text === 'global' || text === 'com') return 'global';
+  if (text === 'cn') return 'cn';
+  return '';
+}
+
+/** 分版本平台目录里实际出现过的版本；国内版在前，便于默认选择。 */
+function realmsOf(platform: PlatformCatalogPlatform | undefined): ('cn' | 'global')[] {
+  if (!platform?.realm_aware) return [];
+  const found = new Set<'cn' | 'global'>();
+  for (const model of platform.models) {
+    const list = Array.isArray(model.realms) && model.realms.length
+      ? model.realms
+      : [model.realm];
+    for (const raw of list) {
+      const realm = normalizeRealm(raw);
+      if (realm) found.add(realm);
+    }
+  }
+  return (['cn', 'global'] as const).filter((realm) => found.has(realm));
+}
+
+/**
+ * 某个版本下可选的模型。
+ *
+ * 未指定版本（自动）时按裸名去重：这时同一个模型走哪一版由平台决定，
+ * 下拉里列两次没有意义。指定版本后只保留该版本的条目——这正是本轮要修的
+ * 「同一个模型两个版本都有，组合里选不到」问题。
+ */
+function modelsFor(
+  platform: PlatformCatalogPlatform | undefined,
+  realm: string,
+): PlatformModel[] {
+  const models = platform?.models ?? [];
+  if (!realm) {
+    const seen = new Set<string>();
+    return models.filter((model) => {
+      const name = model.model_name || model.id;
+      if (!name || seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
+  }
+  return models.filter((model) => {
+    const list = Array.isArray(model.realms) && model.realms.length
+      ? model.realms
+      : [model.realm];
+    return list.some((raw) => normalizeRealm(raw) === realm);
+  });
+}
+
 function draftMemberKey(member: DraftMember): string {
-  return `${member.platform}/${member.model}`;
+  return `${member.platform}/${member.realm ? `${member.realm}:` : ''}${member.model}`;
 }
 
 export default function CombosPage() {
@@ -109,6 +173,8 @@ export default function CombosPage() {
   const [busy, setBusy] = useState('');
   const [draft, setDraft] = useState<Draft | null>(null);
   const [affinityOpen, setAffinityOpen] = useState(false);
+  /** 正在查看请求日志的组合名；null = 弹窗关闭 */
+  const [logCombo, setLogCombo] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -152,12 +218,12 @@ export default function CombosPage() {
       return;
     }
     const platform = firstPlatform;
-    const model = modelsOf(platform)?.models[0]?.model_name ?? '';
+    const model = modelsFor(modelsOf(platform), '')[0]?.model_name ?? '';
     setDraft({
       originalName: null,
       name: '',
       enabled: true,
-      members: [{platform, model, weight: '1', enabled: true}],
+      members: [{platform, model, realm: '', weight: '1', enabled: true}],
     });
   }
 
@@ -171,17 +237,33 @@ export default function CombosPage() {
   function changeMemberPlatform(index: number, platform: string) {
     // 换平台就换模型：旧模型名在新平台大概率不存在，留着会让保存后的成员
     // 指向一个调不通的名字（后端只校验平台存在，不会替我们查模型目录）。
-    const model = modelsOf(platform)?.models[0]?.model_name ?? '';
-    updateMember(index, {platform, model});
+    // 版本也一起清零：不同平台支持的版本不一定相同，旧值直接带过去可能无效。
+    const model = modelsFor(modelsOf(platform), '')[0]?.model_name ?? '';
+    updateMember(index, {platform, realm: '', model});
+  }
+
+  function changeMemberRealm(index: number, realm: string) {
+    setDraft((prev) => prev && {
+      ...prev,
+      members: prev.members.map((m, i) => {
+        if (i !== index) return m;
+        const options = modelsFor(modelsOf(m.platform), realm);
+        // 当前模型在该版本不存在时换成第一项；目录取不到时保留手填值。
+        const model = options.some((x) => x.model_name === m.model)
+          ? m.model
+          : (options[0]?.model_name ?? m.model);
+        return {...m, realm, model};
+      }),
+    });
   }
 
   function addMember() {
     if (!catalog.length) return;
     const platform = firstPlatform;
-    const model = modelsOf(platform)?.models[0]?.model_name ?? '';
+    const model = modelsFor(modelsOf(platform), '')[0]?.model_name ?? '';
     setDraft((prev) => prev && {
       ...prev,
-      members: [...prev.members, {platform, model, weight: '1', enabled: true}],
+      members: [...prev.members, {platform, model, realm: '', weight: '1', enabled: true}],
     });
   }
 
@@ -221,9 +303,11 @@ export default function CombosPage() {
         notify.err(t('combos.weightInvalid', {min: WEIGHT_MIN, max: WEIGHT_MAX}));
         return null;
       }
+      const realm = normalizeRealm(member.realm);
       members.push({
         platform: member.platform,
         model: member.model.trim(),
+        ...(realm ? {realm} : {}),
         weight,
         enabled: member.enabled,
       });
@@ -354,6 +438,7 @@ export default function CombosPage() {
               onChange={setDraft}
               onMemberChange={updateMember}
               onMemberPlatformChange={changeMemberPlatform}
+              onMemberRealmChange={changeMemberRealm}
               onAddMember={addMember}
               onRemoveMember={removeMember}
               onCancel={() => setDraft(null)}
@@ -388,6 +473,7 @@ export default function CombosPage() {
                   deleteDisabled={!isAdmin || busy !== ''}
                   onEdit={() => setDraft(toDraft(combo))}
                   onDelete={() => void removeCombo(combo)}
+                  onViewLogs={() => setLogCombo(combo.name)}
                 />
               ))}
               {combos.length > 0 && (
@@ -401,6 +487,14 @@ export default function CombosPage() {
       )}
 
       <ComboAffinityDialog open={affinityOpen} onOpenChange={setAffinityOpen} />
+
+      <ComboLogsDialog
+        name={logCombo ?? ''}
+        open={logCombo !== null}
+        onOpenChange={(v) => {
+          if (!v) setLogCombo(null);
+        }}
+      />
 
       <p className="text-[11px] leading-4 text-muted-foreground">
         {t('combos.footnote')}
@@ -417,6 +511,7 @@ function ComboCard({
   deleteDisabled,
   onEdit,
   onDelete,
+  onViewLogs,
 }: {
   combo: Combo;
   busy: boolean;
@@ -424,6 +519,7 @@ function ComboCard({
   deleteDisabled: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  onViewLogs: () => void;
 }) {
   const t = useT();
   const enabledMembers = combo.members.filter((m) => m.enabled).length;
@@ -450,6 +546,16 @@ function ComboCard({
           </span>
         </div>
         <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 rounded-md"
+            title={t('combos.logButton')}
+            aria-label={t('combos.logButton')}
+            onClick={onViewLogs}
+          >
+            <ScrollText className="h-3.5 w-3.5" />
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -484,7 +590,7 @@ function ComboCard({
       <div className="flex flex-wrap items-center gap-1.5 px-3.5 py-3">
         {combo.members.map((m) => (
           <span
-            key={`${m.platform}/${m.model}`}
+            key={`${m.platform}/${m.realm ?? ''}/${m.model}`}
             className={cn(
               'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]',
               m.enabled
@@ -493,6 +599,11 @@ function ComboCard({
             )}
           >
             <span className="font-mono">{m.platform}/{m.model}</span>
+            {m.realm ? (
+              <span className="rounded-full border border-border/70 bg-muted/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                {t(`realm.${m.realm}`)}
+              </span>
+            ) : null}
             <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
               ×{m.weight}
             </span>
@@ -510,6 +621,7 @@ function DraftEditor({
   onChange,
   onMemberChange,
   onMemberPlatformChange,
+  onMemberRealmChange,
   onAddMember,
   onRemoveMember,
   onCancel,
@@ -521,6 +633,7 @@ function DraftEditor({
   onChange: (next: Draft) => void;
   onMemberChange: (index: number, patch: Partial<DraftMember>) => void;
   onMemberPlatformChange: (index: number, platform: string) => void;
+  onMemberRealmChange: (index: number, realm: string) => void;
   onAddMember: () => void;
   onRemoveMember: (index: number) => void;
   onCancel: () => void;
@@ -574,6 +687,7 @@ function DraftEditor({
               catalog={catalog}
               onChange={(patch) => onMemberChange(index, patch)}
               onPlatformChange={(platform) => onMemberPlatformChange(index, platform)}
+              onRealmChange={(realm) => onMemberRealmChange(index, realm)}
               onRemove={() => onRemoveMember(index)}
             />
           ))}
@@ -616,17 +730,20 @@ function MemberRow({
   catalog,
   onChange,
   onPlatformChange,
+  onRealmChange,
   onRemove,
 }: {
   member: DraftMember;
   catalog: PlatformCatalogPlatform[];
   onChange: (patch: Partial<DraftMember>) => void;
   onPlatformChange: (platform: string) => void;
+  onRealmChange: (realm: string) => void;
   onRemove: () => void;
 }) {
   const t = useT();
   const platform = catalog.find((p) => p.name === member.platform);
-  const models = platform?.models ?? [];
+  const realms = realmsOf(platform);
+  const models = modelsFor(platform, member.realm);
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-[12px] border border-border/60 bg-background/60 px-2.5 py-2">
@@ -646,6 +763,31 @@ function MemberRow({
           ))}
         </SelectContent>
       </Select>
+
+      {realms.length > 1 ? (
+        // 同一模型在国内外两版都有时，只给平台 + 裸名无法区分；这里让成员
+        // 显式选版本。留空（自动）保持改造前的行为：由平台按账号池自己判断。
+        <Select
+          value={member.realm || AUTO_REALM}
+          onValueChange={(value) => onRealmChange(value === AUTO_REALM ? '' : value)}
+        >
+          <SelectTrigger
+            size="sm"
+            className="w-[140px]"
+            aria-label={t('combos.realmLabel')}
+          >
+            <SelectValue placeholder={t('combos.realmLabel')} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={AUTO_REALM}>{t('combos.realmAuto')}</SelectItem>
+            {realms.map((realm) => (
+              <SelectItem key={realm} value={realm}>
+                {t(`realm.${realm}`)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : null}
 
       {models.length > 0 ? (
         <Select

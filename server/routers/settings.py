@@ -265,6 +265,15 @@ def save_combos(body: object = Body(...),
                     status_code=400,
                     detail=f'未知平台 {member["platform"]}（组合「{item["name"]}」）',
                 )
+            # 版本只对分版本平台有意义（Trae / MiniMax / Qoder）。WorkBuddy
+            # 的版本写在模型名前缀里（`global:x`），不在账号池维度上区分；
+            # 给它存一个 realm 只会让配置看起来生效、实际被适配器忽略。
+            if member.get('realm') and not getattr(adapter, 'realm_aware', False):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f'平台 {member["platform"]} 不支持按版本选择组合成员'
+                            f'（组合「{item["name"]}」）'),
+                )
     db.set_setting('model_combos', clean)
     security.audit(user, 'update_model_combos', '', f'{len(clean)} 个组合')
     return {'combos': clean}

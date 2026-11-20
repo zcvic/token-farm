@@ -22,6 +22,57 @@ def account_backfill(user: dict = Depends(security.require_admin)) -> dict:
     return accountlog.status()
 
 
+def _log_item(r) -> dict:
+    """把一行 `request_logs` 映射成接口的 item 形状。
+
+    日志页与组合卡片共用：两边要展示的字段一致，分成两份映射迟早会漂移
+    （例如新加一列只改了一边）。
+    """
+    return {
+        'id': r['id'],
+        'ts': r['ts'],
+        'key_id': r['key_id'],
+        'key_name': r['key_name'],
+        'ip': r['ip'],
+        'model': r['model'],
+        'mapped_model': r['mapped_model'],
+        'status': r['status'],
+        'realm': r['realm'] or 'cn',
+        # 平台归属（'' = WorkBuddy）。日志页按当前平台过滤后，这里仍如实
+        # 返回，便于排查「为什么这条不在我选的平台里」。
+        'platform': r['platform'] or '',
+        'prompt_tokens': r['prompt_tokens'],
+        'completion_tokens': r['completion_tokens'],
+        'latency_ms': r['latency_ms'],
+        # 首字延迟：NULL 表示未采集（非流式请求或旧记录）
+        'first_token_ms': r['first_token_ms'],
+        # 提示词缓存三段（issue #69）：NULL = 上游没给这三个字段（老上游），
+        # 与「给了 0」不同 —— 界面据此显示「—」而不是 0%。
+        'cache_hit_tokens': r['cache_hit_tokens'],
+        'cache_miss_tokens': r['cache_miss_tokens'],
+        'cache_write_tokens': r['cache_write_tokens'],
+        'ua': r['ua'],
+        'error': r['error'],
+        'stream': bool(r['stream']),
+        'credit': r['credit'],
+        # 本次实际用了哪个上游账号（issue #69）。NULL = 尚未回填 ——
+        # 账号是采集上游日志后按时间对回来的，比请求本身晚几秒，
+        # 所以刚打完的请求这一列可能是空的（界面显示「—」，刷新即可）。
+        'account': r['account'],
+        # 思考强度（reasoning_effort）：客户端显式传的档位；NULL=没传/旧记录。
+        'effort': r['effort'],
+        # 客户端渠道（issue #233）：UA 归类；NULL=该列上线前的旧记录。
+        'channel': r['channel'],
+        # 响应头 `X-Request-Id` 的值（同步自 workbuddy2api-panel）。
+        # NULL = 该功能上线前的记录，或后台任务产生的日志。
+        'request_id': r['request_id'] if 'request_id' in r.keys() else None,
+        # 按 DeepSeek 官方价估算的费用（元，issue #380）。
+        # NULL = 这个模型没收录价目（glm / kimi / minimax …）或该行在功能上线前
+        # 写入 —— 界面显示「—」。绝不能兜成 0：那会被读成「这次调用免费」。
+        'cost': r['cost'],
+    }
+
+
 @router.get('')
 def list_logs(
     page: int = 1,
@@ -105,56 +156,70 @@ def list_logs(
         f'ORDER BY l.id DESC LIMIT ? OFFSET ?',
         (*args, size, (page - 1) * size),
     )
-    items = [
-        {
-            'id': r['id'],
-            'ts': r['ts'],
-            'key_id': r['key_id'],
-            'key_name': r['key_name'],
-            'ip': r['ip'],
-            'model': r['model'],
-            'mapped_model': r['mapped_model'],
-            'status': r['status'],
-            'realm': r['realm'] or 'cn',
-            # 平台归属（'' = WorkBuddy）。日志页按当前平台过滤后，这里仍如实
-            # 返回，便于排查「为什么这条不在我选的平台里」。
-            'platform': r['platform'] or '',
-            'prompt_tokens': r['prompt_tokens'],
-            'completion_tokens': r['completion_tokens'],
-            'latency_ms': r['latency_ms'],
-            # 首字延迟：NULL 表示未采集（非流式请求或旧记录）
-            'first_token_ms': r['first_token_ms'],
-            # 提示词缓存三段（issue #69）：NULL = 上游没给这三个字段（老上游），
-            # 与「给了 0」不同 —— 界面据此显示「—」而不是 0%。
-            'cache_hit_tokens': r['cache_hit_tokens'],
-            'cache_miss_tokens': r['cache_miss_tokens'],
-            'cache_write_tokens': r['cache_write_tokens'],
-            'ua': r['ua'],
-            'error': r['error'],
-            'stream': bool(r['stream']),
-            'credit': r['credit'],
-            # 本次实际用了哪个上游账号（issue #69）。NULL = 尚未回填 ——
-            # 账号是采集上游日志后按时间对回来的，比请求本身晚几秒，
-            # 所以刚打完的请求这一列可能是空的（界面显示「—」，刷新即可）。
-            'account': r['account'],
-            # 思考强度（reasoning_effort）：客户端显式传的档位；NULL=没传/旧记录。
-            'effort': r['effort'],
-            # 客户端渠道（issue #233）：UA 归类；NULL=该列上线前的旧记录。
-            'channel': r['channel'],
-            # 响应头 `X-Request-Id` 的值（同步自 workbuddy2api-panel）。
-            # NULL = 该功能上线前的记录，或后台任务产生的日志。
-            'request_id': r['request_id'] if 'request_id' in r.keys() else None,
-            # 输入侧命中缓存的 token 数。NULL 与 0 含义不同：
-            # NULL = 上游没给这个字段，0 = 这次确实没命中（见 db 的列说明）。
-            'cache_hit_tokens': r['cache_hit_tokens'],
-            # 按 DeepSeek 官方价估算的费用（元，issue #380）。
-            # NULL = 这个模型没收录价目（glm / kimi / minimax …）或该行在功能上线前
-            # 写入 —— 界面显示「—」。绝不能兜成 0：那会被读成「这次调用免费」。
-            'cost': r['cost'],
-        }
-        for r in rows
-    ]
-    return {'total': total, 'items': items}
+    return {'total': total, 'items': [_log_item(r) for r in rows]}
+
+
+@router.get('/combo/{name}')
+def combo_logs(
+    name: str,
+    days: int = 7,
+    limit: int = 50,
+    user: dict = Depends(security.current_user),
+) -> dict:
+    """某个组合的请求日志（按 `combo/<name>` **精确匹配**）。
+
+    日志页的 `model` 筛选用的是 LIKE（会连带 `combo/foo2`），而组合卡片要看的
+    是「这一个组合实际把请求发给了谁」，所以这里用等值查询。
+
+    汇总（成功率 / 平均耗时 / token）按**整个时间范围**算，不是只算返回的那
+    一屏：只算前 N 条的话，刷新或换个数就会变，用户没法用它判断这个组合稳不稳。
+    平均耗时只取成功请求——429 / 上游 5xx 往往几毫秒就返回，混进去会把均值
+    拉低，看起来比实际更快。
+    """
+    combination = f'combo/{str(name or "").strip()}'
+    limit = max(1, min(int(limit), 200))
+    where = ['l.model = ?']
+    args: list[object] = [combination]
+    if days:
+        d = min(3650, max(1, int(days)))
+        where.append('l.ts >= ?')
+        args.append(int(time.time()) - d * 86400)
+    clause = 'WHERE ' + ' AND '.join(where)
+
+    stats = db.query_one(
+        f'SELECT COUNT(*) AS total, '
+        f'COALESCE(SUM(CASE WHEN l.status >= 200 AND l.status < 300 '
+        f'THEN 1 ELSE 0 END), 0) AS success, '
+        f'COALESCE(SUM(CASE WHEN l.status >= 200 AND l.status < 300 '
+        f'THEN l.latency_ms ELSE 0 END), 0) AS ok_latency, '
+        f'COALESCE(SUM(l.prompt_tokens + l.completion_tokens), 0) AS tokens, '
+        f'COALESCE(SUM(l.credit), 0) AS credit '
+        f'FROM request_logs l {clause}',
+        args,
+    )
+    total = int(stats['total'] or 0)
+    success = int(stats['success'] or 0)
+    rows = db.query(
+        f'SELECT l.*, k.name AS key_name FROM request_logs l '
+        f'LEFT JOIN api_keys k ON k.id = l.key_id {clause} '
+        f'ORDER BY l.id DESC LIMIT ?',
+        (*args, limit),
+    )
+    return {
+        'model': combination,
+        'total': total,
+        'items': [_log_item(r) for r in rows],
+        'summary': {
+            'total': total,
+            'success': success,
+            'failed': total - success,
+            'success_rate': (success / total) if total else None,
+            'avg_latency_ms': round(int(stats['ok_latency'] or 0) / success)
+                              if success else None,
+            'total_tokens': int(stats['tokens'] or 0),
+            'total_credit': stats['credit'] or 0,
+        },
+    }
 
 
 @router.post('/clear')

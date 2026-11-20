@@ -164,19 +164,30 @@ async def model_catalog(user: dict = Depends(security.current_user)) -> dict:
                                 'label': adapter.label, 'models': [],
                                 # 池级权重：WorkBuddy 的账号权重在上游池里整池
                                 # 生效，成员权重与它不是一个口径，前端据此提示。
-                                'pool_weight': bool(getattr(adapter, 'pool_weight', False))}
+                                'pool_weight': bool(getattr(adapter, 'pool_weight', False)),
+                                # 是否分版本（`traecn/x` / `traecom/x`）。组合编辑页
+                                # 据此决定要不要显示「版本」选择器：非分版本平台
+                                # 的模型名本身就是唯一名字，多一个下拉只会误导。
+                                'realm_aware': bool(getattr(adapter, 'realm_aware', False))}
         try:
             models = await adapter.list_models()
-            # 组合成员按 `平台 + 裸模型名` 保存：双区同名模型（Qoder）在目录里
-            # 是两条区域化 ID，但组合只能选到裸名，重复列出只会让下拉出现
-            # 两个一模一样的选项。保留第一条即可。
-            seen: set[str] = set()
+            # 组合成员按 `平台 + 裸模型名 + 版本` 保存：双区同名模型（MiniMax /
+            # Qoder）在目录里是两条区域化 ID，组合要能分别选中，所以去重键必须
+            # 带上版本；早先只按裸名去重会把国际版那条直接丢掉，用户无法指定
+            # 成员走哪个版本。非分版本平台仍按裸名去重，保持原有清单不变。
+            realm_aware = item['realm_aware']
+            seen: set[tuple[str, str]] = set()
             unique: list[dict] = []
             for m in models:
                 bare = str(m.get('model_name') or m.get('id') or '').strip()
-                if not bare or bare in seen:
+                if not bare:
                     continue
-                seen.add(bare)
+                realm = (str(m.get('realm') or '').strip().lower()
+                         if realm_aware else '')
+                dedupe = (realm, bare)
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
                 unique.append(m)
             item['models'] = unique
         except PlatformError as exc:

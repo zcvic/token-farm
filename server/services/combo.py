@@ -42,6 +42,17 @@ DEFAULT_WEIGHT = 1.0
 # `owner/model` 写法，同时挡住能把日志/统计撑大的超长字符串。
 MODEL_MAX = 128
 
+# 成员版本（db 口径 `cn` / `global`）。分版本平台的同一个裸模型可能在两个版本
+# 都存在（MiniMax 尤其明显），只靠裸名无法区分；成员带上版本后，调用时透传成
+# 适配器的 `ctx.realm`，与客户端直接发 `traecn/...` / `traecom/...` 等价。
+# 兼容 `intl` / `com` 两种历史写法：Trae / Qoder 的账号口径叫 `intl`。
+_REALM_ALIASES = {'cn': 'cn', 'global': 'global', 'intl': 'global', 'com': 'global'}
+
+
+def clean_realm(value: object) -> str:
+    """任意版本写法 → db 口径；认不出返回空串（= 不指定，按平台自动判断）。"""
+    return _REALM_ALIASES.get(str(value or '').strip().lower(), '')
+
 
 def weight_of(value: object, default: float = DEFAULT_WEIGHT) -> float:
     """把任意输入归一成一个可用的权重。
@@ -59,11 +70,16 @@ def weight_of(value: object, default: float = DEFAULT_WEIGHT) -> float:
 
 
 def _member_key(member: dict) -> str:
-    return f"{member['platform']}/{member['model']}"
+    base = f"{member['platform']}/{member['model']}"
+    realm = str(member.get('realm') or '')
+    # 带版本的成员必须与同名但不同版本的成员区分开：选路游标、会话绑定与
+    # 冷却表都以这个键归档，否则两个成员会互相覆盖。不带版本时保持旧键，
+    # 存量配置的绑定与日志不受影响。
+    return f"{member['platform']}/{realm}/{member['model']}" if realm else base
 
 
 def member_key(member: dict) -> str:
-    """成员在选路游标里的稳定键（`平台/模型`）。"""
+    """成员在选路游标里的稳定键（`平台/模型`，指定版本时为 `平台/版本/模型`）。"""
     return _member_key(member)
 
 
@@ -79,6 +95,8 @@ def _clean_member(raw: object) -> dict | None:
     return {
         'platform': platform,
         'model': model,
+        # 空串 = 不指定：非分版本平台忽略它，分版本平台照旧按账号池 / 目录推断。
+        'realm': clean_realm(raw.get('realm')),
         'weight': weight_of(raw.get('weight')),
         'enabled': raw.get('enabled') is not False,
     }
@@ -150,6 +168,12 @@ def validate(raw: object) -> list[dict]:
                 raise ValueError(
                     f'组合「{name}」里有成员的平台或模型名不合法'
                     '（平台不能含斜杠，模型名不能以斜杠开头）')
+            requested = (str(raw_member.get('realm') or '').strip()
+                         if isinstance(raw_member, dict) else '')
+            if requested and not member['realm']:
+                raise ValueError(
+                    f'组合「{name}」里有成员的版本不合法：{requested!r}'
+                    '（只支持 cn / global，也接受 intl / com）')
             key = _member_key(member)
             if key in keys:
                 raise ValueError(f'组合「{name}」里重复的成员：{key}')

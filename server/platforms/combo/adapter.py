@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 
 from ... import db, keysvc
 from ...services import combo as combo_svc
@@ -326,10 +327,22 @@ class ComboAdapter(PlatformAdapter):
                     raise PlatformError(
                         str(reject), status=getattr(reject, 'status', 403),
                         code=getattr(reject, 'code', 'realm_mismatch'))
+            # 成员可以指定版本（`cn` / `global`）。组合入口 `combo/<name>` 自身
+            # 不属于任何版本，网关传来的 `ctx.realm` 是 None；若不在这里补上，
+            # 双区同名模型只能由平台自己猜（MiniMax 会在两版之间按账号分摊，
+            # Trae 会按目录推一个），用户无法指定「这个成员走国际版」。
+            # 只对 `realm_aware` 平台透传：WorkBuddy 的版本写在模型名前缀里，
+            # 不是在账号池维度上区分的。
+            member_ctx = ctx
+            member_realm = str(member.get('realm') or '').strip()
+            if member_realm and getattr(adapter, 'realm_aware', False):
+                member_ctx = (replace(ctx, realm=member_realm)
+                              if ctx is not None
+                              else ChatContext(realm=member_realm))
             try:
                 # `ctx` 原样透传：WorkBuddy 成员要靠它拿到调用方的密钥与来源 IP
                 # （分组绑定 / 粘性会话都在这两条上）。真实平台忽略这个参数。
-                outcome = await adapter.chat(member['model'], body, ctx)
+                outcome = await adapter.chat(member['model'], body, member_ctx)
             except PlatformError as exc:
                 failures.append(f'{key}: {exc.message}')
                 if not _switchable(exc):

@@ -32,9 +32,12 @@ combo_module = importlib.import_module('server.platforms.combo.adapter')
 
 
 def _member(platform: str, model: str, weight: float = 1.0,
-            enabled: bool = True) -> dict:
-    return {'platform': platform, 'model': model,
-            'weight': weight, 'enabled': enabled}
+            enabled: bool = True, realm: str | None = None) -> dict:
+    member = {'platform': platform, 'model': model,
+              'weight': weight, 'enabled': enabled}
+    if realm is not None:
+        member['realm'] = realm
+    return member
 
 
 def _combo(name: str = 'fast', members: list[dict] | None = None,
@@ -69,6 +72,35 @@ class ComboValidateTest(unittest.TestCase):
     def test_rejects_duplicate_members(self) -> None:
         with self.assertRaises(ValueError):
             combo.validate([_combo(members=[_member('p', 'm'), _member('p', 'm')])])
+
+    def test_member_realm_is_normalized(self) -> None:
+        out = combo.validate([_combo(members=[
+            _member('trae', 'x', realm='intl'),
+            _member('minimax', 'x', realm='global'),
+            _member('qoder', 'x', realm='cn'),
+        ])])
+        self.assertEqual([m['realm'] for m in out[0]['members']],
+                         ['global', 'global', 'cn'])
+
+    def test_same_model_different_realm_is_not_duplicate(self) -> None:
+        """双区同名模型：成员必须能分别指向两版，且选路键不能相撞。"""
+        out = combo.validate([_combo(members=[
+            _member('minimax', 'x', realm='cn'),
+            _member('minimax', 'x', realm='global'),
+            _member('minimax', 'x'),
+        ])])
+        members = out[0]['members']
+        self.assertEqual([m['realm'] for m in members], ['cn', 'global', ''])
+        self.assertEqual(len({combo.member_key(m) for m in members}), 3)
+
+    def test_rejects_invalid_member_realm(self) -> None:
+        with self.assertRaises(ValueError):
+            combo.validate([_combo(members=[_member('p', 'm', realm='nope')])])
+
+    def test_load_tolerates_bad_member_realm(self) -> None:
+        """读路径宽容：坏版本当作「未指定」，不让整份配置不可用。"""
+        out = combo.load([_combo(members=[_member('p', 'm', realm='nope')])])
+        self.assertEqual(out[0]['members'][0]['realm'], '')
 
     def test_rejects_all_members_disabled(self) -> None:
         with self.assertRaises(ValueError):
@@ -202,6 +234,34 @@ class ComboChatTest(unittest.TestCase):
         outcome = self._run({'p2': p2})   # p1 没注册
         self.assertEqual(p2.calls, ['m2'])
         self.assertEqual(outcome.model, 'p2/m2')
+
+    def _run_with_ctx(self, fake_map: dict[str, _FakeAdapter],
+                      raw: list[dict], ctx: object):
+        with mock.patch.object(db, 'get_setting',
+                               lambda key, default=None: raw
+                               if key == 'model_combos' else default):
+            with mock.patch.object(combo_module, 'get_platform',
+                                   fake_map.get):
+                return asyncio.run(combo_adapter.chat('fast', {}, ctx))
+
+    def test_member_realm_is_passed_as_ctx_realm(self) -> None:
+        """成员指定版本时必须透传给分版本平台，而不是让它在账号池里自己猜。"""
+        p1 = _FakeAdapter(PlatformChat(payload={'ok': True}))
+        p1.realm_aware = True
+        raw = [_combo(members=[_member('p1', 'm1', realm='global')])]
+        ctx = combo_module.ChatContext(key={'id': 'k'}, ip='10.0.0.1')
+        outcome = self._run_with_ctx({'p1': p1}, raw, ctx)
+        self.assertEqual(outcome.model, 'p1/m1')
+        self.assertEqual(p1.contexts[0].realm, 'global')
+        self.assertIsNone(ctx.realm, '不能改动调用方传入的 ctx（frozen dataclass 也不允许）')
+
+    def test_member_realm_is_ignored_for_non_realm_aware(self) -> None:
+        """非分版本平台（WorkBuddy）的版本写在模型名里，不该被额外覆盖。"""
+        p1 = _FakeAdapter(PlatformChat(payload={'ok': True}))
+        raw = [_combo(members=[_member('p1', 'm1', realm='global')])]
+        ctx = combo_module.ChatContext(key={'id': 'k'}, ip='10.0.0.1')
+        self._run_with_ctx({'p1': p1}, raw, ctx)
+        self.assertIs(p1.contexts[0], ctx)
 
     # ── 会话粘性（prompt cache 亲和）────────────────────────
     def test_same_session_sticks_to_one_member(self) -> None:
@@ -343,6 +403,52 @@ class ComboModelsTest(unittest.TestCase):
         names = [p['name'] for p in platforms_router.list_platforms({})['platforms']]
         self.assertNotIn('combo', names)
         self.assertIn('trae', names)
+
+
+class ComboCatalogTest(unittest.TestCase):
+    """组合成员目录：双区同名模型必须两条都在，才能分别选版本。"""
+
+    class _FakePlatform:
+        name = 'trae'
+        label = 'Trae'
+        ui_visible = True
+        combo_member = False
+        realm_aware = True
+
+        async def list_models(self) -> list[dict]:
+            return [
+                {'id': 'traecn/x', 'model_name': 'x', 'realm': 'cn'},
+                {'id': 'traecom/x', 'model_name': 'x', 'realm': 'intl'},
+                {'id': 'traecn/y', 'model_name': 'y', 'realm': 'cn'},
+            ]
+
+    def test_catalog_keeps_realm_variants(self) -> None:
+        with mock.patch.object(platforms_router, 'all_adapters',
+                               lambda: [self._FakePlatform()]):
+            out = asyncio.run(platforms_router.model_catalog({}))
+        entry = out['platforms'][0]
+        self.assertTrue(entry['realm_aware'])
+        self.assertEqual([(m['model_name'], m['realm']) for m in entry['models']],
+                         [('x', 'cn'), ('x', 'intl'), ('y', 'cn')])
+
+    def test_non_realm_aware_still_dedupes_by_bare_name(self) -> None:
+        """非分版本平台保持旧行为：同名条目只列一次，避免下拉出现重复项。"""
+
+        class Fake(self._FakePlatform):
+            name = 'workbuddy'
+            realm_aware = False
+
+            async def list_models(self) -> list[dict]:
+                return [
+                    {'id': 'workbuddy/m', 'model_name': 'm', 'realm': 'cn'},
+                    {'id': 'workbuddy/m2', 'model_name': 'm', 'realm': 'global'},
+                ]
+
+        with mock.patch.object(platforms_router, 'all_adapters',
+                               lambda: [Fake()]):
+            out = asyncio.run(platforms_router.model_catalog({}))
+        self.assertEqual([m['model_name'] for m in out['platforms'][0]['models']],
+                         ['m'])
 
 
 if __name__ == '__main__':

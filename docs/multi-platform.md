@@ -1042,6 +1042,15 @@ Trae 事件 → OpenAI chunk：
   为它加分支。它没有账号，所以 `ui_visible=False`，不出现在平台下拉与账号页。
 - **命名**：对外 `combo/<name>`；成员是 `platform/model`，**不要求同名**——不同
   平台对同一个模型叫法不同，要求同名会把最常见的情况挡在门外。
+- **版本**：分版本平台（Trae / MiniMax / Qoder）的同一个裸模型可能在国内外两版
+  都存在，只靠裸名无法区分。成员因此可以带一个可选的 `realm`（统计口径
+  `cn` / `global`，也接受 Trae / Qoder 的 `intl` 与 `com`）：调用成员时透传成
+  `ctx.realm`，与客户端直接发 `traecn/x` / `traecom/x` 是同一个提示。留空 =
+  不指定，沿用平台原来的自动判断（Trae 按目录、MiniMax 按账号池、Qoder 按
+  前缀/目录/密钥）。成员键包含版本（`trae/cn/x` 与 `trae/global/x` 不同），
+  因此两版同名模型可以同时挂进一个组合，也可以各给不同权重。组合编辑页在
+  目录出现多个版本时显示「版本」下拉；非分版本平台（WorkBuddy）不接受
+  `realm`，它的版本写在模型名前缀里。
 - **权重**：0.1–100（与账号权重同一口径），相对比例而不是优先级。选路用平滑加权
   轮询（SWRR）：只推进**被选中**成员的游标，否则没被用到的成员游标也会漂移，
   实际比例会偏离配置值。
@@ -1073,6 +1082,12 @@ Trae 事件 → OpenAI chunk：
   如 `trae/deepseek-V3`）作为 `mapped_model`，日志的 `platform` 列因此反映**实际
   去向**，而不是每次都记在虚拟平台名下。没有平台前缀的成员（WorkBuddy）记裸名，
   `platform` 列为空串、`realm` 由 `global:` 前缀判定，与直连一致。
+- **请求日志**：组合卡片上的「请求日志」走 `GET /api/logs/combo/<name>`，按
+  `request_logs.model = 'combo/<name>'` **等值**筛选（日志页的模型筛是 LIKE，
+  会把 `combo/fast` 与 `combo/fast2` 混在一起）。返回最近 N 条明细 +
+  整段时间范围的汇总（请求数、成功率、成功请求平均耗时、token、积分）。
+  汇总不受 `limit` 影响；平均耗时只统计成功请求，避免 429 / 5xx 的毫秒级
+  失败把均值拉低。明细里的「实际成员」取 `mapped_model`，版本取该行的 `realm`。
 - **配置存储**：`settings.model_combos`，已加入 PG 同步白名单（`pgsync`），否则
   多实例部署时组合配置会丢。
 
