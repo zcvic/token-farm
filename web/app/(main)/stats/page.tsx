@@ -31,6 +31,7 @@ import {
   dailySeries,
   hourlySeries,
   todayKeyLocal,
+  yesterdayKeyLocal,
   type ChartPoint,
 } from '@/lib/usage-chart';
 import {fmtCompact, fmtNumber, fmtCredit, fmtMoney} from '@/lib/format';
@@ -141,9 +142,16 @@ export default function StatsPage() {
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const isCustom = days === 'custom';
+  const isYesterday = days === 'yesterday';
+  const yesterday = yesterdayKeyLocal();
   const range: StatsRange | undefined =
-    isCustom && customStart && customEnd ? {start: customStart, end: customEnd} : undefined;
+    isCustom && customStart && customEnd
+      ? {start: customStart, end: customEnd}
+      : isYesterday
+        ? {start: yesterday, end: yesterday}
+        : undefined;
   const spanDays = (() => {
+    if (isYesterday) return 1;
     if (!isCustom || !customStart || !customEnd) return Number(days) || 1;
     const a = Date.parse(customStart), b = Date.parse(customEnd);
     if (!Number.isFinite(a) || !Number.isFinite(b)) return 30;
@@ -173,7 +181,8 @@ export default function StatsPage() {
       // 小时数据，其它范围直接给空数组，省一次请求。自定义范围也可能只有一天，
       // 这时必须把那一天传给后端，否则图会拿今天的桶去配旧的按天数据。
       hourly: () => (d === 1
-        ? statsApi.hourly(isCustom ? customStart || undefined : undefined,
+        ? statsApi.hourly(isYesterday ? yesterday
+                          : isCustom ? customStart || undefined : undefined,
                           statsRealm, platform)
         : Promise.resolve([] as UsageHourPoint[])),
       byModel: () => statsApi.byModel(d, statsRealm, platform, range),
@@ -244,7 +253,9 @@ export default function StatsPage() {
    */
   // 自定义区间的锚点是**用户选的止日**，不是今天：按今天兜底会把整段历史
   // 数据丢出窗口（dailySeries 只保留窗口内的点），图上变成一片空。
-  const chartEnd = isCustom && customEnd ? customEnd : todayKeyLocal();
+  const chartEnd = isCustom && customEnd
+    ? customEnd
+    : isYesterday ? yesterday : todayKeyLocal();
   // 历史日期不标「现在这一小时」；只有看今天时才给 isNow 标记。
   const nowHour = chartEnd === todayKeyLocal() ? new Date().getHours() : -1;
   const chartData: ChartPoint[] = spec.granularity === 'hour'
@@ -272,6 +283,7 @@ export default function StatsPage() {
             <SelectContent>
               {/* 「今日」排在第一位并作为默认：与上方卡片的「今日」口径对齐 */}
               <SelectItem value="1">{t('stats.today')}</SelectItem>
+              <SelectItem value="yesterday">{t('stats.yesterday')}</SelectItem>
               <SelectItem value="7">{t('stats.last7')}</SelectItem>
               <SelectItem value="30">{t('stats.last30')}</SelectItem>
               <SelectItem value="90">{t('stats.last90')}</SelectItem>

@@ -343,6 +343,7 @@
     "description": "按时间、模型与密钥维度统计 Token 消耗与请求量（每 60 秒自动刷新；当前只统计{realm}）",
     "descriptionPlatform": "{platform} 平台调用统计：按时间、模型与密钥维度统计 Token 消耗与请求量（每 60 秒自动刷新）",
     "today": "今日",
+    "yesterday": "昨天",
     "last7": "近 7 天",
     "last30": "近 30 天",
     "last3": "近 3 天",

@@ -14,7 +14,9 @@ import {
   chartSpecFor,
   dailySeries,
   hourlySeries,
+  shiftDayKey,
   todayKeyLocal,
+  yesterdayKeyLocal,
 } from './usage-chart.ts';
 
 let pass = 0;
@@ -109,6 +111,15 @@ console.log('todayKeyLocal：本地时区，不是 UTC');
 {
   const d = new Date(2026, 8, 29, 0, 30, 0);      // 本地 2026-09-29 00:30
   ok(todayKeyLocal(d) === '2026-09-29', '本地日期（UTC 会退到 09-28）', todayKeyLocal(d));
+}
+
+console.log('yesterdayKeyLocal / shiftDayKey：纯日期加减');
+{
+  const d = new Date(2026, 10, 18, 0, 30, 0);     // 本地 2026-11-18
+  ok(yesterdayKeyLocal(d) === '2026-11-17', '昨天按本地日期算', yesterdayKeyLocal(d));
+  ok(shiftDayKey('2026-03-01', -1) === '2026-02-28', 'shiftDayKey 跨月');
+  ok(shiftDayKey('2026-01-01', -1) === '2025-12-31', 'shiftDayKey 跨年');
+  ok(shiftDayKey('2024-02-28', 1) === '2024-02-29', 'shiftDayKey 闰年二月');
 }
 
 if (process.exitCode) {

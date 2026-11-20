@@ -70,13 +70,14 @@ class UsageChartInvariantTest(unittest.TestCase):
         code = self.PAGE.read_text(encoding='utf-8')
         self.assertIn('statsApi.hourly(', code, '没有请求小时端点')
         self.assertRegex(
-            code, r"d === 1[\s\S]{0,200}statsApi\.hourly\(",
+            code, r"d === 1[\s\S]{0,260}statsApi\.hourly\(",
             '小时端点不是在单日分支里取的（要么永远在取、要么从不取）',
         )
         self.assertRegex(
-            code, r"statsApi\.hourly\(\s*isCustom\s*\?\s*customStart",
-            '自定义单日没有把所选日期传给后端（图会拿今天的桶去配旧数据）',
+            code, r"statsApi\.hourly\(\s*isYesterday\s*\?\s*yesterday[\s\S]{0,120}isCustom\s*\?\s*customStart",
+            '自定义单日 / 昨日没有把所选日期传给后端（图会拿今天的桶去配旧数据）',
         )
+        self.assertIn('value="yesterday"', code, '范围选择器没有「昨日」选项')
 
     def test_lib_stays_runnable_without_node_modules(self) -> None:
         code = self.LIB.read_text(encoding='utf-8')

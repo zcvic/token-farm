@@ -132,3 +132,13 @@ function utcMidnightToDayKey(ms: number): string {
 export function todayKeyLocal(now: Date = new Date()): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
+
+/** `YYYY-MM-DD` 加减天数（纯日期运算，走 UTC 零点，不受夏令时影响） */
+export function shiftDayKey(key: string, delta: number): string {
+  return utcMidnightToDayKey(dayKeyToUtcMidnight(key) + delta * 86400000);
+}
+
+/** 昨天的本地日期（`YYYY-MM-DD`） */
+export function yesterdayKeyLocal(now: Date = new Date()): string {
+  return shiftDayKey(todayKeyLocal(now), -1);
+}
