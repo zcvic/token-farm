@@ -708,15 +708,17 @@ export const platformApi = {
   } & Partial<Record<PlatformSettingField, number | boolean | string>>) =>
     put<PlatformSettings>(`${platformPath(name)}/settings`, body),
   /**
-   * 账号调度参数：权重（0 = 恢复默认）与临时冻结（`disabled`）。
+   * 账号调度参数：权重（0 = 恢复默认）、临时冻结（`disabled`）与仅签到
+   * （`checkin_only`）。
    *
    * 与 WorkBuddy 账号的 `weight` 同一口径；平台账号的选号在适配器内部完成，
-   * 不经过上游账号池。冻结只影响调度与批量任务，不动凭据。
+   * 不经过上游账号池。冻结只影响调度与批量任务，不动凭据；仅签到只退出
+   * 推理选号，签到与平台任务照常。
    */
   updateAccount: (
     name: string,
     uid: string,
-    body: {weight?: number; disabled?: boolean; reason?: string},
+    body: {weight?: number; disabled?: boolean; checkin_only?: boolean; reason?: string},
   ) =>
     patch<{platform: string; account: PlatformAccount}>(
       `${platformPath(name)}/accounts/${encodeURIComponent(uid)}`, body),

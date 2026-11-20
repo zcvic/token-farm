@@ -630,6 +630,17 @@ class DumateAdapter(PlatformAdapter):
             raise PlatformError(str(exc), status=400,
                                 code='invalid_account_state') from exc
 
+    def set_account_checkin_only(self, account_id: str, enabled: bool) -> dict:
+        """只把账号从推理选号池里摘出去，签到与平台任务照常。"""
+        try:
+            return store.set_checkin_only(account_id, bool(enabled))
+        except FileNotFoundError as exc:
+            raise PlatformError('账号不存在', status=404,
+                                code='account_not_found') from exc
+        except ValueError as exc:
+            raise PlatformError(str(exc), status=400,
+                                code='invalid_account_state') from exc
+
     def set_account_cooling(self, account_id: str, until: float,
                             reason: str = '') -> dict:
         try:
@@ -661,6 +672,7 @@ class DumateAdapter(PlatformAdapter):
                     if str(a.get('uid') or '').strip()
                     and str(a.get('cookie') or '').strip()
                     and not store.is_disabled(a)
+                    and not store.is_checkin_only(a)
                     and not store.is_cooling(a)]
         if not accounts:
             return []

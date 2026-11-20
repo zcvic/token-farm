@@ -307,6 +307,19 @@ class QoderClient:
         account = data.get('account')
         return account if isinstance(account, dict) else {}
 
+    def set_checkin_when_disabled(self, uid: str, value: bool) -> dict:
+        """设置「禁用期间仍签到」位（Qoder 的「仅签到」语义）。
+
+        网关返回的是整份账号列表，这里只挑出目标 uid，保持与 `set_enabled`
+        一致的返回形状。
+        """
+        data = self._request('POST', '/accounts/checkin-when-disabled',
+                             json_body={'uid': uid, 'value': bool(value)})
+        accounts = [a for a in (data.get('accounts') or [])
+                    if isinstance(a, dict)]
+        return next((a for a in accounts
+                     if str(a.get('uid') or '') == uid), {})
+
     def _find_account(self, uid: str) -> dict | None:
         for account in self.list_accounts('all'):
             if str(account.get('uid') or '') == uid:

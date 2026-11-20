@@ -128,6 +128,13 @@ export interface Account {
   manual_disabled?: boolean | null;
   /** 手动停用的原因文案（仅 `manual_disabled` 为真时有值） */
   manual_reason?: string;
+  /**
+   * 「仅签到」：不参与对话转发（不消耗积分），但签到 / 保活 / 平台任务照常。
+   *
+   * WorkBuddy 侧由上游的 `manual_disabled` 承担，后端已折算成这个字段；
+   * 多平台账号由各自账号文件里的 `checkinOnly` 位承担。
+   */
+  checkin_only?: boolean;
   /** 账号所属版本（cn / global）；存量账号按域名回退，无该字段时视为 cn */
   realm?: 'cn' | 'global';
   /** 该版本是否支持签到体系（国际版没有） */
@@ -2172,6 +2179,11 @@ export interface PlatformInfo {
    */
   supports_cooling?: boolean;
   /**
+   * 能否「仅签到」：把账号从推理选号池里摘出去（不消耗积分），但保留
+   * 签到与平台任务。缺省按 false 处理，旧后端没有这个能力。
+   */
+  supports_checkin_only?: boolean;
+  /**
    * 网页登录是否需要「粘贴回调地址」。Trae 的本机回环回调需要，Qoder 的
    * 设备授权轮询不需要（为 false）。
    */
@@ -2230,6 +2242,8 @@ export interface PlatformAccount {
   disabled_reason: string;
   /** 冻结时刻（epoch 秒；0 = 没有记录） */
   disabled_at: number;
+  /** 仅签到：退出推理选号（不消耗积分），签到与平台任务照常 */
+  checkin_only: boolean;
   /** 强制冷却：期间不会被选号，到期自动恢复 */
   cooling: boolean;
   /** 冷却截止时刻（epoch 秒；0 = 未冷却） */

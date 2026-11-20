@@ -118,6 +118,11 @@ def is_disabled(account: dict) -> bool:
     return bool(account.get('disabled'))
 
 
+def is_checkin_only(account: dict) -> bool:
+    """「仅签到」位：不参与对话（不消耗积分），签到与平台任务照常。"""
+    return bool(account.get('checkinOnly'))
+
+
 def _update(account_id: object, mutate) -> dict:
     path = account_path(account_id)
     with file_lock(path):
@@ -246,10 +251,29 @@ def set_disabled(account_id: object, disabled: bool, reason: str = '') -> dict:
             raw['disabled'] = True
             raw['disabledReason'] = str(reason or '').strip()[:200]
             raw['disabledAt'] = int(time.time())
+            # 完全停用压过「仅签到」：两个位同时为真会让界面说不清停到哪一步。
+            raw.pop('checkinOnly', None)
         else:
             raw.pop('disabled', None)
             raw.pop('disabledReason', None)
             raw.pop('disabledAt', None)
+
+    try:
+        return _update(account_id, mutate)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError('账号不存在') from exc
+
+
+def set_checkin_only(account_id: object, enabled: bool) -> dict:
+    """开启 / 关闭「仅签到」：只摘推理流量，签到与平台任务照常。"""
+    def mutate(raw: dict) -> None:
+        if enabled:
+            raw['checkinOnly'] = True
+            raw.pop('disabled', None)
+            raw.pop('disabledReason', None)
+            raw.pop('disabledAt', None)
+        else:
+            raw.pop('checkinOnly', None)
 
     try:
         return _update(account_id, mutate)
@@ -324,6 +348,7 @@ def public_account(account: dict) -> dict:
         'disabled': is_disabled(account),
         'disabled_reason': str(account.get('disabledReason') or ''),
         'disabled_at': int(account.get('disabledAt') or 0),
+        'checkin_only': is_checkin_only(account),
         'cooling': cool_until > 0,
         'cooling_until': int(cool_until) if cool_until else 0,
         'cool_remaining_sec': cool_remaining,

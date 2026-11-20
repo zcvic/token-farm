@@ -86,6 +86,20 @@ class AccountAddedTimeTest(unittest.TestCase):
         db._conn.close();db._conn=None
         self.assertEqual(self.listing()[0]['added_at'],at)
 
+    def test_checkin_only_derived_from_manual_disabled(self):
+        """仅签到 = 上游手动摘流量，且没有同时被系统自动禁用。"""
+        rows = [
+            {'uid': 'only', 'file': 'only.json', 'manual_disabled': True},
+            {'uid': 'both', 'file': 'both.json', 'manual_disabled': True,
+             'disabled': True},
+            {'uid': 'normal', 'file': 'normal.json'},
+        ]
+        with mock.patch.object(wb2api, 'list_auth_accounts', return_value=rows):
+            listed = {a['uid']: a for a in self.listing()}
+        self.assertTrue(listed['only']['checkin_only'])
+        self.assertFalse(listed['both']['checkin_only'])
+        self.assertFalse(listed['normal']['checkin_only'])
+
     def test_upload_records_new_account_but_not_overwrite(self):
         app=FastAPI();app.include_router(accounts.router)
         app.dependency_overrides[security.require_session_admin]=lambda:{'username':'admin','role':'admin'}

@@ -215,7 +215,7 @@ registry.register(FooAdapter())
 | POST | `/api/platforms/{name}/checkin-all` | 批量签到（并发与账号间隔按平台设置，默认并发 2、间隔 2–5 秒；单条失败不中断；跳过已冻结账号） |
 | GET | `/api/platforms/{name}/settings` | 平台设置：单账号在途上限（总吞吐按可用账号数折算）+ 批量签到节奏 + 请求超时 / 换号次数 / 平台专属开关（会话亲和、桌面端回写） |
 | PUT | `/api/platforms/{name}/settings` | 改上述设置（可只提交要改的字段；不支持的字段会 400） |
-| PATCH | `/api/platforms/{name}/accounts/{id}` | 账号调度参数（`weight` / `disabled`） |
+| PATCH | `/api/platforms/{name}/accounts/{id}` | 账号调度参数（`weight` / `disabled` / `checkin_only`） |
 | POST | `/api/platforms/{name}/accounts/{id}/cooling` | 强制冷却（定时 / 永久） |
 | DELETE | `/api/platforms/{name}/accounts/{id}/cooling` | 立即解除冷却 |
 | POST | `/api/platforms/{name}/login/start` | 发起网页登录，返回授权 URL |
@@ -249,9 +249,13 @@ registry.register(FooAdapter())
 - **强制冷却**（`coolingUntil` + `coolingReason`）：只暂停**选号**，到期自动恢复，
   也可随时手动解除；令牌刷新、积分查询、批量签到照常可用。永久冷却的截止时刻是
   2099-12-31，与 WorkBuddy 的口径一致。
+- **仅签到**（`checkinOnly`）：退出推理选号（对话不再消耗它的积分），但签到、
+  批量签到与平台任务照常执行；随时可以关掉并恢复选号。它解决的是「这个号只用来
+  攒签到 / 做任务」，而不是「先别用了」——所以不要用 `disabled` 代替它。
 - **临时冻结**（`disabled` + `disabledReason`）：退出选号**与批量任务**（批量签到
   会跳过它），凭据仍保留，随时可以恢复。它解决的是「这个号先别用了」而不是
-  「这个号坏了」——所以界面把它归进「已停用」，而不是「需处理」。
+  「这个号坏了」——所以界面把它归进「已停用」，而不是「需处理」。它与「仅签到」
+  互斥：设冻结会清掉 `checkinOnly`，设仅签到也会清掉冻结。
 - **会话粘性（提示词缓存亲和）**：上游 prompt cache 按账号隔离，同一段对话每轮
   换号会让前缀缓存作废。第一个请求按权重选出账号后，按会话键（`prompt_cache_key`
   → 会话 id → 首条 user 消息哈希，见 `services/session_affinity.py`）钉住

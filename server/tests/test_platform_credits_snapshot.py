@@ -207,6 +207,23 @@ class PlatformCreditsRouteTest(_DbCase):
         self.assertEqual([r['uid'] for r in all_rows['accounts']], ['a', 'b'])
         self.assertFalse(all_rows['accounts'][1]['active'])
 
+    def test_snapshot_endpoint_treats_checkin_only_as_inactive(self) -> None:
+        """仅签到账号仍可查余额，但默认不算「可调度」，与 disabled 同档。"""
+        creditsvc.record_platform_balance('trae', 'a', 1)
+        creditsvc.record_platform_balance('trae', 'b', 2)
+        adapter = _FakeAdapter({}, accounts=[
+            {'uid': 'a', 'disabled': False, 'checkin_only': False},
+            {'uid': 'b', 'disabled': False, 'checkin_only': True},
+        ])
+        with mock.patch.object(platforms_router, '_adapter', lambda name: adapter):
+            body = platforms_router.platform_credits_snapshot(
+                'trae', include_inactive=False, user={})
+            all_rows = platforms_router.platform_credits_snapshot(
+                'trae', include_inactive=True, user={})
+        self.assertEqual([r['uid'] for r in body['accounts']], ['a'])
+        self.assertEqual([r['uid'] for r in all_rows['accounts']], ['a', 'b'])
+        self.assertFalse(all_rows['accounts'][1]['active'])
+
     def test_snapshot_endpoint_survives_account_store_outage(self) -> None:
         """账号列表读不到时保留旧值（对账脚本正在这时候需要它），不报 500。"""
         creditsvc.record_platform_balance('qoder', 'a', 66)

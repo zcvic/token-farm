@@ -95,6 +95,14 @@ def public_account(raw: dict, *, now: float | None = None) -> dict:
     if weight != weight or weight in (float('inf'), float('-inf')) or weight <= 0:
         weight = 0.0
 
+    # Qoder 用「enabled=false」表示不接推理流量；它自己的
+    # `checkinWhenDisabled` 恰好就是「仅签到」：禁用期间仍参与签到 / 福利。
+    # 两个位合起来才能区分「仅签到」与「完全停用」——只把 enabled 暴露成
+    # `disabled` 会让前者的批量签到被误伤。
+    enabled = bool(raw.get('enabled', True))
+    checkin_when_disabled = bool(raw.get('checkinWhenDisabled'))
+    checkin_only = (not enabled) and checkin_when_disabled
+
     return {
         'platform': PLATFORM,
         'uid': uid,
@@ -104,9 +112,10 @@ def public_account(raw: dict, *, now: float | None = None) -> dict:
         'realm_label': REALM_LABEL[realm],
         'proxy': '',
         'weight': weight,
-        'disabled': not bool(raw.get('enabled', True)),
+        'disabled': not enabled and not checkin_when_disabled,
         'disabled_reason': '',
         'disabled_at': 0,
+        'checkin_only': checkin_only,
         'cooling': cooling,
         'cooling_until': cool_until,
         'cool_remaining_sec': cool_seconds if cooling else 0,

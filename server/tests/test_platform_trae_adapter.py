@@ -371,6 +371,14 @@ class CandidateTest(_Base):
         store.save_account({'uid': 'empty', 'realm': 'cn'})
         self.assertEqual(self.adapter._candidates('glm-5.2'), [])
 
+    def test_candidates_skip_checkin_only_accounts(self) -> None:
+        """仅签到账号只做任务，绝不能出现在推理候选里（不消耗积分）。"""
+        store.save_account({'uid': 'checkin-only', 'realm': 'cn', 'token': 't',
+                            'checkinOnly': True})
+        store.save_account({'uid': 'usable', 'realm': 'cn', 'token': 't'})
+        self.assertEqual([a['uid'] for a in self.adapter._candidates('glm-5.2')],
+                         ['usable'])
+
     def test_candidates_skip_disabled_and_cooling_accounts(self) -> None:
         store.save_account({'uid': 'frozen', 'realm': 'cn', 'token': 't',
                             'disabled': True})

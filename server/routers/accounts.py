@@ -556,6 +556,10 @@ async def list_accounts(upstream_id: int | None = Query(None),
         a['note'] = notes.get(uid, '')
         a['added_at'] = added_times.get(uid)
         a['checkin_today'] = done_today.get(uid)
+        # 上游的 `manual_disabled` 就是「仅签到」：不参与转发，签到 / 保活 /
+        # 任务照常。单独给一个语义化字段，前端不必自己拼两位状态。
+        a['checkin_only'] = bool(a.get('manual_disabled')) \
+            and not bool(a.get('disabled'))
     synced = sum(1 for a in accounts if a.get('credits') is not None)
     return {
         'total': len(accounts),

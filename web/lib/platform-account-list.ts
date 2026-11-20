@@ -40,6 +40,9 @@ export function platformAvailabilityOf(
   now: number = Date.now(),
 ): PlatformGroup {
   if (account.disabled) return 'stopped';
+  // 「仅签到」同样不参与推理调度，归到「已停用」组（但徽章文案不同：
+  // 它不是故障也不是全停，签到与平台任务照常）。
+  if (account.checkin_only) return 'stopped';
   if (account.cooling && account.cooling_until * 1000 > now) return 'cooling';
   const expiredAt = Date.parse(account.expiredAt);
   const tokenBad = !account.has_token

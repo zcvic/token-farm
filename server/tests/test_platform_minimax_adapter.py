@@ -344,6 +344,30 @@ class MinimaxAdapterTest(unittest.TestCase):
         self.assertEqual([a['uid'] for a in self.adapter._candidates('global')],
                          ['mm_2'])
 
+    def test_candidates_skip_checkin_only(self) -> None:
+        self._seed(uid='mm_1', realm='cn')
+        self._seed(uid='mm_2', realm='cn', checkinOnly=True)
+        self.assertEqual([a['uid'] for a in self.adapter._candidates('cn')],
+                         ['mm_1'])
+
+    def test_checkin_only_state_roundtrip(self) -> None:
+        """仅签到与完全停用互斥：开一个必须清掉另一个。"""
+        self._seed(uid='mm_1', realm='cn')
+        only = store.set_checkin_only('mm_1', True)
+        self.assertTrue(only['checkin_only'])
+        self.assertFalse(only['disabled'])
+
+        frozen = store.set_disabled('mm_1', True, '完全停用')
+        self.assertTrue(frozen['disabled'])
+        self.assertFalse(frozen['checkin_only'])
+
+        only_again = store.set_checkin_only('mm_1', True)
+        self.assertTrue(only_again['checkin_only'])
+        self.assertFalse(only_again['disabled'])
+
+        off = store.set_checkin_only('mm_1', False)
+        self.assertFalse(off['checkin_only'])
+
     def test_weights_rotate_first_choice(self) -> None:
         self._seed(uid='mm_1')
         self._seed(uid='mm_2')

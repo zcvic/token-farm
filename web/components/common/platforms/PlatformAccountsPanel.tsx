@@ -11,6 +11,7 @@ import {
   CircleCheck,
   ExternalLink,
   FileJson,
+  Gift,
   KeyRound,
   Loader2,
   LogIn,
@@ -771,6 +772,22 @@ export function PlatformAccountsPanel({
     }
   }
 
+  /** 仅签到：退出推理选号（不消耗积分），签到与平台任务照常。 */
+  async function toggleCheckinOnly(account: PlatformAccount) {
+    if (busy) return;
+    const next = !account.checkin_only;
+    setBusy(account.uid);
+    try {
+      await platformApi.updateAccount(platform, account.uid, {checkin_only: next});
+      notify.ok(next ? t('platforms.checkinOnlyOn') : t('platforms.checkinOnlyOff'));
+      await reloadAll();
+    } catch (e) {
+      notify.err(errText(e));
+    } finally {
+      setBusy('');
+    }
+  }
+
   async function clearCooling(account: PlatformAccount) {
     if (busy) return;
     setBusy(account.uid);
@@ -880,6 +897,8 @@ export function PlatformAccountsPanel({
   // 缺省按「支持」处理，保持 Trae / WorkBuddy 的现有界面不变。
   const supportsWeight = info?.supports_weight !== false;
   const supportsCooling = info?.supports_cooling !== false;
+  // 仅签到：旧后端没有这个字段，按「不支持」处理（不显示点了必然 400 的按钮）。
+  const supportsCheckinOnly = info?.supports_checkin_only === true;
   const supportsLoginCallback = info?.supports_login_callback !== false;
   // 短信验证码登录（Loomy）：验证码直接登录 + 微信未绑手机号时的补绑。
   const supportsLoginCode = !!info?.supports_login_code;
@@ -1386,15 +1405,17 @@ export function PlatformAccountsPanel({
                               group === 'cooling' && 'text-amber-700 dark:text-amber-400',
                             )}
                             title={
-                              group === 'stopped'
-                                ? (a.disabled_reason
-                                  ? `${t('platforms.frozenHint')} · ${a.disabled_reason}`
-                                  : t('platforms.frozenHint'))
-                                : group === 'cooling'
-                                  ? t('platforms.coolingHint', {
-                                    until: fmtDateTime(a.cooling_until * 1000),
-                                  }) + (a.cooling_reason ? ` · ${a.cooling_reason}` : '')
-                                  : undefined
+                              a.checkin_only
+                                ? t('platforms.checkinOnlyHint')
+                                : group === 'stopped'
+                                  ? (a.disabled_reason
+                                    ? `${t('platforms.frozenHint')} · ${a.disabled_reason}`
+                                    : t('platforms.frozenHint'))
+                                  : group === 'cooling'
+                                    ? t('platforms.coolingHint', {
+                                      until: fmtDateTime(a.cooling_until * 1000),
+                                    }) + (a.cooling_reason ? ` · ${a.cooling_reason}` : '')
+                                    : undefined
                             }
                           >
                             {group === 'usable'
@@ -1402,7 +1423,9 @@ export function PlatformAccountsPanel({
                               : group === 'cooling'
                                 ? t('accounts.badgeCooling')
                                 : group === 'stopped'
-                                  ? t('accounts.badgeDisabledByPanel')
+                                  ? (a.checkin_only
+                                    ? t('platforms.checkinOnlyBadge')
+                                    : t('accounts.badgeDisabledByPanel'))
                                   : !a.has_token || expired
                                     ? t('accounts.badgeExpired')
                                     : t('accounts.groupAttention')}
@@ -1590,6 +1613,25 @@ export function PlatformAccountsPanel({
                               >
                                 {rowBusy ? <Loader2 className="animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                               </Button>
+                              {supportsCheckinOnly && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className={cn(
+                                    'h-7 w-7 rounded-md',
+                                    a.checkin_only
+                                      ? 'text-amber-600 hover:text-amber-700 dark:text-amber-400'
+                                      : 'text-muted-foreground hover:text-amber-600',
+                                  )}
+                                  title={a.checkin_only
+                                    ? t('platforms.checkinOnlyDisable')
+                                    : t('platforms.checkinOnlyEnable')}
+                                  disabled={rowBusy || busyAny}
+                                  onClick={() => void toggleCheckinOnly(a)}
+                                >
+                                  <Gift className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
                               <Button
                                 variant="ghost"
                                 size="icon"

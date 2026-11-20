@@ -74,6 +74,8 @@ class _FakeClient:
         self.stream_lines: list[str] = []
         self.stream_response: _FakeResponse | None = None
         self.login_poll_result: dict = {'status': 'pending'}
+        self.enabled: dict[str, bool] = {}
+        self.checkin_when_disabled: dict[str, bool] = {}
 
     # 账号
     def list_accounts(self, realm: str = 'all') -> list[dict]:
@@ -109,7 +111,15 @@ class _FakeClient:
 
     def set_enabled(self, uid: str, enabled: bool) -> dict:
         self.calls.append(('set_enabled', uid, enabled))
-        return _raw_account(uid=uid, enabled=enabled)
+        self.enabled[uid] = bool(enabled)
+        return _raw_account(uid=uid, enabled=enabled,
+                            checkinWhenDisabled=self.checkin_when_disabled.get(uid, False))
+
+    def set_checkin_when_disabled(self, uid: str, value: bool) -> dict:
+        self.calls.append(('set_checkin_when_disabled', uid, value))
+        self.checkin_when_disabled[uid] = bool(value)
+        return _raw_account(uid=uid, enabled=self.enabled.get(uid, True),
+                            checkinWhenDisabled=value)
 
     def set_weight(self, uid: str, weight: float) -> dict:
         self.calls.append(('set_weight', uid, weight))
@@ -182,6 +192,13 @@ class MappingTests(unittest.TestCase):
         account = mapping.public_account(_raw_account(enabled=False))
         self.assertTrue(account['disabled'])
         self.assertEqual(account['weight'], 0)
+
+    def test_public_account_checkin_only(self) -> None:
+        """禁用 + 禁用期间仍签到 = 「仅签到」，不能当成完全停用。"""
+        account = mapping.public_account(
+            _raw_account(enabled=False, checkinWhenDisabled=True))
+        self.assertTrue(account['checkin_only'])
+        self.assertFalse(account['disabled'])
 
     def test_normalize_and_db_realm(self) -> None:
         self.assertEqual(mapping.normalize_realm('INTL'), 'intl')
@@ -315,6 +332,27 @@ class AdapterTests(unittest.TestCase):
         out = self.adapter.set_account_options('u-1', weight=2.5)
         self.assertEqual(out['weight'], 2.5)
         self.assertIn(('set_weight', 'u-1', 2.5), self.client.calls)
+
+    def test_set_account_checkin_only(self) -> None:
+        """仅签到 = 关推理 + 打开「禁用期间仍签到」。"""
+        out = self.adapter.set_account_checkin_only('u-1', True)
+        self.assertTrue(out['checkin_only'])
+        self.assertFalse(out['disabled'])
+        self.assertIn(('set_enabled', 'u-1', False), self.client.calls)
+        self.assertIn(('set_checkin_when_disabled', 'u-1', True), self.client.calls)
+
+        self.client.calls.clear()
+        restored = self.adapter.set_account_checkin_only('u-1', False)
+        self.assertFalse(restored['checkin_only'])
+        self.assertIn(('set_checkin_when_disabled', 'u-1', False), self.client.calls)
+        self.assertIn(('set_enabled', 'u-1', True), self.client.calls)
+
+    def test_set_account_disabled_clears_checkin_only(self) -> None:
+        """完全停用不能留下「禁用期间仍签到」，否则批量签到仍会选它。"""
+        self.adapter.set_account_checkin_only('u-1', True)
+        out = self.adapter.set_account_disabled('u-1', True)
+        self.assertTrue(out['disabled'])
+        self.assertFalse(out['checkin_only'])
 
     def test_account_list_failure_is_remembered_briefly(self) -> None:
         """网关起不来时，开页不能每次都被连接超时拖住。"""

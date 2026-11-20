@@ -352,6 +352,16 @@ class PlatformAdapter(ABC):
         raise PlatformError(f'{self.label} 不支持停用账号', status=400,
                             code='account_disable_unsupported')
 
+    def set_account_checkin_only(self, account_id: str, enabled: bool) -> dict:
+        """开启 / 关闭「仅签到」（**可选能力**）。
+
+        开启后账号退出推理选号（不再消耗积分），但签到、批量签到与平台任务
+        照常执行；关闭后回到正常选号池。没有独立「仅签到」概念的平台沿用
+        默认实现（明确的 400），而不是静默成功。
+        """
+        raise PlatformError(f'{self.label} 不支持「仅签到」', status=400,
+                            code='account_checkin_only_unsupported')
+
     def set_account_cooling(self, account_id: str, until: float,
                             reason: str = '') -> dict:
         """强制冷却到某个时刻（epoch 秒，**可选能力**）。"""

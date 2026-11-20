@@ -126,6 +126,9 @@ def list_platforms(user: dict = Depends(security.current_user)) -> dict:
             is not PlatformAdapter.set_account_options,
             'supports_cooling': type(adapter).set_account_cooling
             is not PlatformAdapter.set_account_cooling,
+            # 能否「仅签到」：摘掉推理流量但保留签到 / 任务（不消耗积分）。
+            'supports_checkin_only': type(adapter).set_account_checkin_only
+            is not PlatformAdapter.set_account_checkin_only,
             'supports_login_callback': hasattr(adapter, 'login_submit_callback'),
             # 能否用手机号 + 短信验证码登录（Loomy：验证码登录 / 微信补绑手机）
             'supports_login_code': hasattr(adapter, 'login_submit_code'),
@@ -465,7 +468,7 @@ async def login_cancel(name: str, login_id: str,
 @router.patch('/{name}/accounts/{account_id}')
 async def update_account_options(name: str, account_id: str, body: dict = Body(...),
                                  user: dict = Depends(security.require_admin)) -> dict:
-    """修改账号级调度参数（权重 / 临时冻结）。
+    """修改账号级调度参数（权重 / 临时冻结 / 仅签到）。
 
     适配器负责校验与落库；未覆盖对应能力的平台会由基类抛明确的「不支持」
     （400），交给 `_fail` 原样回给界面 —— 这里不判断「平台是否支持」，
@@ -476,16 +479,28 @@ async def update_account_options(name: str, account_id: str, body: dict = Body(.
     weight = payload.get('weight')
     has_disabled = 'disabled' in payload
     disabled = payload.get('disabled')
+    has_checkin_only = 'checkin_only' in payload
+    checkin_only = payload.get('checkin_only')
     reason = str(payload.get('reason') or '')
-    if weight is None and not has_disabled:
+    if weight is None and not has_disabled and not has_checkin_only:
         raise HTTPException(status_code=400, detail='没有要修改的项')
     if has_disabled and not isinstance(disabled, bool):
         raise HTTPException(status_code=400, detail='disabled 必须是布尔值')
+    if has_checkin_only and not isinstance(checkin_only, bool):
+        raise HTTPException(status_code=400, detail='checkin_only 必须是布尔值')
+    if has_disabled and has_checkin_only and disabled and checkin_only:
+        # 两种状态互斥：完全停用会连签到一起停，和「仅签到」不能同时成立。
+        raise HTTPException(status_code=400,
+                            detail='disabled 与 checkin_only 不能同时为 true')
     try:
         account: dict | None = None
-        # 先冻结再改权重：两个都传时最终返回的账号仍带着冻结状态。
+        # 顺序：先写完全停用，再写「仅签到」——但停用为真时不再单独写后者。
+        # 两者互斥，停用必须赢；反过来（先仅签到、后停用）在 Qoder 上会让
+        # 「恢复启用」把刚设好的仅签到位又抹掉，等于什么都没做。
         if has_disabled:
             account = adapter.set_account_disabled(account_id, disabled, reason)
+        if has_checkin_only and not (has_disabled and disabled):
+            account = adapter.set_account_checkin_only(account_id, checkin_only)
         if weight is not None:
             account = adapter.set_account_options(account_id, weight=weight)
     except ValueError as exc:
@@ -494,10 +509,15 @@ async def update_account_options(name: str, account_id: str, body: dict = Body(.
         raise _fail(exc) from exc
     security.audit(
         user,
-        'update_account_disabled' if has_disabled and weight is None
+        'update_account_disabled' if has_disabled and weight is None and not has_checkin_only
+        else 'update_account_checkin_only' if has_checkin_only and weight is None and not has_disabled
         else 'update_account_options',
         f'{name}/{account_id}',
-        f'weight={weight} disabled={disabled}' if has_disabled else f'weight={weight}',
+        ' '.join(part for part in (
+            f'weight={weight}' if weight is not None else '',
+            f'disabled={disabled}' if has_disabled else '',
+            f'checkin_only={checkin_only}' if has_checkin_only else '',
+        ) if part),
     )
     return {'platform': name, 'account': account}
 
@@ -703,7 +723,10 @@ def platform_credits_snapshot(name: str,
         if info is None:
             continue
         row['known'] = True
-        row['active'] = not bool(info.get('disabled'))
+        # 「仅签到」账号不进推理选号池，按「不参与调度」处理；传
+        # include_inactive 时仍能看到它的余额。
+        row['active'] = not bool(info.get('disabled')) \
+            and not bool(info.get('checkin_only'))
         if row['active'] or include_inactive:
             rows.append(row)
     return {

@@ -57,6 +57,7 @@ const acct = (uid, extra = {}) => ({
   disabled: false,
   disabled_reason: '',
   disabled_at: 0,
+  checkin_only: false,
   cooling: false,
   cooling_until: 0,
   cool_remaining_sec: 0,
@@ -73,6 +74,8 @@ check('临时冻结优先于一切 → stopped',
     disabled: true, cooling: true, cooling_until: Math.floor(NOW / 1000) + 600,
     has_token: false,
   }), NOW), 'stopped');
+check('仅签到不参与推理 → stopped',
+  platformAvailabilityOf(acct('a', {checkin_only: true}), NOW), 'stopped');
 check('冷却中 → cooling',
   platformAvailabilityOf(acct('a', {
     cooling: true, cooling_until: Math.floor(NOW / 1000) + 600,

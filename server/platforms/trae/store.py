@@ -99,6 +99,15 @@ def is_disabled(account: dict) -> bool:
     return bool(account.get('disabled'))
 
 
+def is_checkin_only(account: dict) -> bool:
+    """「仅签到」位：不参与对话（不消耗积分），签到与平台任务照常执行。
+
+    与 `disabled` 的区别：`disabled` 连批量任务一起停，这个位只把账号从
+    推理选号池里摘出去。两者互斥，见 `set_disabled` / `set_checkin_only`。
+    """
+    return bool(account.get('checkinOnly'))
+
+
 def _update(account_id: object, mutate) -> dict:
     """在文件锁内读出 → 修改 → 原子写回，返回脱敏后的账号。"""
     path = account_path(account_id)
@@ -308,10 +317,33 @@ def set_disabled(account_id: object, disabled: bool, reason: str = '') -> dict:
             raw['disabled'] = True
             raw['disabledReason'] = str(reason or '').strip()[:200]
             raw['disabledAt'] = int(time.time())
+            # 完全停用压过「仅签到」：两者同时为真会让界面无法表达到底停到哪一步。
+            raw.pop('checkinOnly', None)
         else:
             raw.pop('disabled', None)
             raw.pop('disabledReason', None)
             raw.pop('disabledAt', None)
+
+    try:
+        return _update(account_id, mutate)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError('账号不存在') from exc
+
+
+def set_checkin_only(account_id: object, enabled: bool) -> dict:
+    """开启 / 关闭「仅签到」：只摘推理流量，签到与平台任务照常。
+
+    开启时顺手清掉 `disabled`（完全停用），避免两个开关互相打架；关闭时只
+    去掉这个位，账号回到正常选号池。
+    """
+    def mutate(raw: dict) -> None:
+        if enabled:
+            raw['checkinOnly'] = True
+            raw.pop('disabled', None)
+            raw.pop('disabledReason', None)
+            raw.pop('disabledAt', None)
+        else:
+            raw.pop('checkinOnly', None)
 
     try:
         return _update(account_id, mutate)
@@ -400,6 +432,8 @@ def public_account(account: dict) -> dict:
         'disabled': disabled,
         'disabled_reason': str(account.get('disabledReason') or ''),
         'disabled_at': int(account.get('disabledAt') or 0),
+        # 仅签到：不参与推理选号（不消耗积分），签到与批量任务照常。
+        'checkin_only': is_checkin_only(account),
         'cooling': cool_until > 0,
         'cooling_until': int(cool_until) if cool_until else 0,
         'cool_remaining_sec': cool_remaining,

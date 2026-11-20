@@ -367,11 +367,38 @@ class QoderAdapter(PlatformAdapter):
 
     def set_account_disabled(self, account_id: str, disabled: bool,
                              reason: str = '') -> dict:
-        raw = self.client.set_enabled(str(account_id or ''), not bool(disabled))
+        """完全停用 / 恢复：停用会连「仅签到」一并关掉。
+
+        面板的「停用」语义是「调度与批量任务都停」；而 Qoder 的
+        `checkinWhenDisabled` 会让禁用账号继续签到，所以这里必须显式清掉它，
+        否则同一个号会一边显示已停用、一边继续被批量签到选中。
+        """
+        uid = str(account_id or '')
+        if disabled:
+            self.client.set_enabled(uid, False)
+            raw = self.client.set_checkin_when_disabled(uid, False)
+        else:
+            self.client.set_checkin_when_disabled(uid, False)
+            raw = self.client.set_enabled(uid, True)
         self._invalidate_accounts()
         if not isinstance(raw, dict) or not raw:
             # 网关只回 `{account}`；拿不到就重新读一次，别返回半截结构。
-            raw = self._require(str(account_id or ''))
+            raw = self._require(uid)
+        return mapping.public_account(raw)
+
+    def set_account_checkin_only(self, account_id: str, enabled: bool) -> dict:
+        """开启 / 关闭「仅签到」：退出推理选号，签到与平台任务照常。"""
+        uid = str(account_id or '')
+        if enabled:
+            # 顺序很重要：先关掉推理（enabled=false），再打开「禁用期间仍签到」。
+            self.client.set_enabled(uid, False)
+            raw = self.client.set_checkin_when_disabled(uid, True)
+        else:
+            self.client.set_checkin_when_disabled(uid, False)
+            raw = self.client.set_enabled(uid, True)
+        self._invalidate_accounts()
+        if not isinstance(raw, dict) or not raw:
+            raw = self._require(uid)
         return mapping.public_account(raw)
 
     # ── 模型 ────────────────────────────────────────────────

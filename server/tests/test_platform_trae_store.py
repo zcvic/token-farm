@@ -111,6 +111,27 @@ class TraeStoreTest(unittest.TestCase):
         self.assertFalse(restored['disabled'])
         self.assertEqual(restored['disabled_reason'], '')
 
+    def test_checkin_only_state_roundtrip(self) -> None:
+        """「仅签到」与「完全停用」互斥：开启一方会清掉另一方。"""
+        store.save_account({'uid': '80', 'token': 't'})
+        only = store.set_checkin_only('80', True)
+        self.assertTrue(only['checkin_only'])
+        self.assertFalse(only['disabled'])
+        self.assertTrue(only['has_token'])
+
+        # 完全停用压过仅签到
+        frozen = store.set_disabled('80', True, '完全停用')
+        self.assertTrue(frozen['disabled'])
+        self.assertFalse(frozen['checkin_only'])
+
+        # 再开仅签到会解除完全停用
+        only_again = store.set_checkin_only('80', True)
+        self.assertTrue(only_again['checkin_only'])
+        self.assertFalse(only_again['disabled'])
+
+        off = store.set_checkin_only('80', False)
+        self.assertFalse(off['checkin_only'])
+
     def test_cooling_state_roundtrip(self) -> None:
         store.save_account({'uid': '78', 'token': 't'})
         until = time.time() + 3600
