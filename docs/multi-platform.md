@@ -415,8 +415,10 @@ DuMate 的网页登录本质就是百度账号登录：官方登录页
 也不要求面板和浏览器同机，服务端自己完成「取码 → 长轮询 → 兑换 → 落域」：
 
 - `login_start` 立刻返回 `pending`，后台线程去
-  `passport.baidu.com/v2/api/getqrcode` 取 `sign` + `imgurl`；`login_poll`
-  把 `imgurl` 作为 `qr` 回给前端，面板内嵌显示（`url` 为空，不自动开浏览器）；
+  `passport.baidu.com/v2/api/getqrcode` 取 `sign` + `imgurl`，再把图片取回来
+  **内联成 data URL** 交给 `login_poll`：面板是静态导出且 CSP 只允许
+  `self` / `data:` / `blob:` 的图片，直接给 passport 外链会被浏览器拦掉；
+  面板内嵌显示（`url` 为空，不自动开浏览器）；
 - `channel/unicast` 是 30 秒长轮询：`errno=1` 表示还没扫码；`errno=0` 且
   `channel_v.status=0` 时 `channel_v.v` 是一次性 bduss，`status=1` 是
   「已扫码待确认」，继续等；
@@ -432,7 +434,9 @@ DuMate 的网页登录本质就是百度账号登录：官方登录页
   标成「待验证」，凭证照常落盘；
 - 登录会话只在内存里，二维码 5 分钟有效；成功后 `login_id` 对应的会话保留
   一段时间供前端轮询收尾。手工粘贴 Cookie 的导入路径不变，扫码不可用时仍可
-  使用。
+  使用：账号页的「手工导入」既接受 `{"cookie": "..."}`，也接受直接粘贴整行
+  `BDUSS=...; bce-long-term-sessionid=...`（前端会替你包成 JSON）；空状态里
+  同时给出「网页登录」和「手工导入」两个入口，不再只提示从本机导入。
 
 ### 前端：国内版 / 国际版切换（Trae）
 

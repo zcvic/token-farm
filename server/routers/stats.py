@@ -60,6 +60,32 @@ def _platform_scope(platform: str | None) -> str:
     return '' if not p or p == 'all' else p
 
 
+def _cache_rate(hit: int | None, miss: int | None) -> float | None:
+    """缓存命中率 = hit / (hit + miss)。
+
+    返回 None 表示**没有缓存计量**（上游两份字段都没给，两列都是 0）；界面显示
+    「—」而不是 0% —— 「未采集」与「确实一次没命中」是两件事。命中数大于 0
+    而 miss 为 0 时是 100%（上游只给命中数的情况），与日志页的口径一致。
+    """
+    h = int(hit or 0)
+    m = int(miss or 0)
+    denom = h + m
+    if denom <= 0:
+        return None
+    return h / denom
+
+
+def _cache_fields(hit: int | None, miss: int | None) -> dict:
+    """一条聚合行的缓存三件套（token 数 + 命中率），给各维度报表复用。"""
+    h = int(hit or 0)
+    m = int(miss or 0)
+    return {
+        'cache_hit_tokens': h,
+        'cache_miss_tokens': m,
+        'cache_hit_rate': _cache_rate(h, m),
+    }
+
+
 def _epoch_since(days: int) -> int:
     """与 `_since` 同一口径（本地时区、含今天）的起始时刻（epoch 秒）。"""
     return int(time.mktime(time.strptime(_since(days), '%Y-%m-%d')))
@@ -166,26 +192,36 @@ def summary(realm: str | None = None, platform: str | None = None,
     pf, pargs = _platform_filter(platform)
     scope = _platform_scope(platform)
 
-    def agg(where: str, args: tuple) -> tuple[int, int, float, float | None, int]:
+    def agg(where: str, args: tuple) -> tuple[int, int, float, float | None, int, int, int]:
         # 费用（issue #380）：SUM(cost) 在整段都没价时是 NULL —— 不能兜成 0，
         # 那会让「算不出」看起来像「不要钱」。同时数一遍没价的请求量，
         # 界面才能说清「¥1.23，另有 12 次未计价」，而不是给出一个悄悄缩水的数。
+        #
+        # 缓存两列（hit / miss）与按模型、按密钥的报表同源（都来自 usage_daily），
+        # 这样平台模式下也能算出命中率 —— 不再只有 WorkBuddy 的「上游官方统计」
+        # 那一段看得见。
         row = db.query_one(
             f'SELECT COALESCE(SUM(requests),0) AS r, '
             f'COALESCE(SUM(prompt_tokens + completion_tokens),0) AS t, '
             f'COALESCE(SUM(credit),0) AS c, '
             f'SUM(cost) AS cost, '
-            f'COALESCE(SUM(CASE WHEN cost IS NULL THEN requests ELSE 0 END),0) AS unpriced '
+            f'COALESCE(SUM(CASE WHEN cost IS NULL THEN requests ELSE 0 END),0) AS unpriced, '
+            f'COALESCE(SUM(cache_hit_tokens),0) AS ch, '
+            f'COALESCE(SUM(cache_miss_tokens),0) AS cm '
             f'FROM usage_daily WHERE {where}{rf}{pf}',
             args + rargs + pargs,
         )
         return (int(row['r']), int(row['t']), float(row['c'] or 0),
                 None if row['cost'] is None else float(row['cost']),
-                int(row['unpriced'] or 0))
+                int(row['unpriced'] or 0),
+                int(row['ch'] or 0), int(row['cm'] or 0))
 
-    t_req, t_tok, t_credit, t_cost, t_unpriced = agg('day = ?', (today,))
-    w_req, w_tok, w_credit, w_cost, w_unpriced = agg('day >= ?', (week,))
-    a_req, a_tok, a_credit, a_cost, a_unpriced = agg('1=1', ())
+    (t_req, t_tok, t_credit, t_cost, t_unpriced,
+     t_ch, t_cm) = agg('day = ?', (today,))
+    (w_req, w_tok, w_credit, w_cost, w_unpriced,
+     w_ch, w_cm) = agg('day >= ?', (week,))
+    (a_req, a_tok, a_credit, a_cost, a_unpriced,
+     a_ch, a_cm) = agg('1=1', ())
 
     # 活跃密钥：密钥本身**不分版本**（同一把密钥可调两个版本，由模型名决定路由），
     # 所以按版本时应统计「**该版本有调用**的密钥数」，而不是「属于该版本的密钥数」
@@ -232,6 +268,19 @@ def summary(realm: str | None = None, platform: str | None = None,
         'week_tokens': w_tok,
         'total_requests': a_req,
         'total_tokens': a_tok,
+        # 缓存命中（输入侧）：token 合计与命中率。与 WorkBuddy 的「上游官方
+        # 统计」不同源 —— 这里只含经过本网关的调用；平台模式下也照常返回，
+        # 用量页因此在所有平台都能显示命中率。
+        # rate 为 None = 这区间没有缓存计量（两列都是 0），界面显示「—」。
+        'today_cache_hit_tokens': t_ch,
+        'today_cache_miss_tokens': t_cm,
+        'today_cache_hit_rate': _cache_rate(t_ch, t_cm),
+        'week_cache_hit_tokens': w_ch,
+        'week_cache_miss_tokens': w_cm,
+        'week_cache_hit_rate': _cache_rate(w_ch, w_cm),
+        'total_cache_hit_tokens': a_ch,
+        'total_cache_miss_tokens': a_cm,
+        'total_cache_hit_rate': _cache_rate(a_ch, a_cm),
         'active_keys': int(active_keys),
         'top_model': top['model'] if top else None,
         'usage_health': _usage_health(today, t_req, realm, platform),
@@ -838,7 +887,9 @@ def by_model(days: int = 30, realm: str | None = None,
         'SELECT model AS name, SUM(requests) AS requests, '
         'SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens, '
         'COALESCE(SUM(credit),0) AS credit, SUM(cost) AS cost, '
-        'COALESCE(SUM(CASE WHEN cost IS NULL THEN requests ELSE 0 END),0) AS unpriced '
+        'COALESCE(SUM(CASE WHEN cost IS NULL THEN requests ELSE 0 END),0) AS unpriced, '
+        'COALESCE(SUM(cache_hit_tokens),0) AS ch, '
+        'COALESCE(SUM(cache_miss_tokens),0) AS cm '
         f'FROM usage_daily WHERE day BETWEEN ? AND ?{rf}{pf} GROUP BY model '
         'ORDER BY SUM(prompt_tokens + completion_tokens) DESC',
         args,
@@ -858,6 +909,7 @@ def by_model(days: int = 30, realm: str | None = None,
             # 费用（元）；None = 这个模型没收录价目（如 glm / kimi），显示「—」
             'cost': None if r['cost'] is None else float(r['cost']),
             'unpriced_requests': int(r['unpriced'] or 0),
+            **_cache_fields(r['ch'], r['cm']),
             **tmap.get(name, {'tokens_per_sec': None, 'throughput_samples': 0}),
         })
     return out
@@ -882,7 +934,9 @@ def by_key(days: int = 30, realm: str | None = None,
         'SELECT COALESCE(k.name, u.key_id || "") AS name, SUM(u.requests) AS requests, '
         'SUM(u.prompt_tokens) AS prompt_tokens, SUM(u.completion_tokens) AS completion_tokens, '
         'COALESCE(SUM(u.credit),0) AS credit, SUM(u.cost) AS cost, '
-        'COALESCE(SUM(CASE WHEN u.cost IS NULL THEN u.requests ELSE 0 END),0) AS unpriced '
+        'COALESCE(SUM(CASE WHEN u.cost IS NULL THEN u.requests ELSE 0 END),0) AS unpriced, '
+        'COALESCE(SUM(u.cache_hit_tokens),0) AS ch, '
+        'COALESCE(SUM(u.cache_miss_tokens),0) AS cm '
         'FROM usage_daily u LEFT JOIN api_keys k ON k.id = u.key_id '
         f'WHERE u.day BETWEEN ? AND ?{rf}{pf} GROUP BY u.key_id '
         'ORDER BY SUM(u.prompt_tokens + u.completion_tokens) DESC',
@@ -897,6 +951,7 @@ def by_key(days: int = 30, realm: str | None = None,
             'credit': float(r['credit'] or 0),
             'cost': None if r['cost'] is None else float(r['cost']),
             'unpriced_requests': int(r['unpriced'] or 0),
+            **_cache_fields(r['ch'], r['cm']),
         }
         for r in rows
     ]
@@ -928,7 +983,9 @@ def by_account(days: int = 30, realm: str | None = None,
     rows = db.query(
         f"SELECT {db.day_sql('ts')} AS day, account, COUNT(*) AS requests, "
         'SUM(COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0)) AS tokens, '
-        'COALESCE(SUM(credit),0) AS credit, SUM(cost) AS cost '
+        'COALESCE(SUM(credit),0) AS credit, SUM(cost) AS cost, '
+        'COALESCE(SUM(cache_hit_tokens),0) AS ch, '
+        'COALESCE(SUM(cache_miss_tokens),0) AS cm '
         'FROM request_logs '
         "WHERE ts >= ? AND ts < ? AND account IS NOT NULL AND account <> ''"
         f'{rf}{pf} GROUP BY day, account ORDER BY day DESC, credit DESC LIMIT ?',
@@ -947,6 +1004,7 @@ def by_account(days: int = 30, realm: str | None = None,
             'tokens': int(r['tokens'] or 0),
             'credit': float(r['credit'] or 0),
             'cost': None if r['cost'] is None else float(r['cost']),
+            **_cache_fields(r['ch'], r['cm']),
         })
     return {'items': items, 'total': len(rows), 'truncated': len(rows) > capped,
             'from': lo, 'to': hi}
@@ -976,7 +1034,9 @@ def by_account_model(days: int = 30, realm: str | None = None,
         "SELECT account, COALESCE(NULLIF(TRIM(mapped_model), ''), model) AS model_name, "
         'COUNT(*) AS requests, '
         'SUM(COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0)) AS tokens, '
-        'COALESCE(SUM(credit),0) AS credit, SUM(cost) AS cost '
+        'COALESCE(SUM(credit),0) AS credit, SUM(cost) AS cost, '
+        'COALESCE(SUM(cache_hit_tokens),0) AS ch, '
+        'COALESCE(SUM(cache_miss_tokens),0) AS cm '
         'FROM request_logs '
         "WHERE ts >= ? AND ts < ? AND account IS NOT NULL AND account <> ''"
         f'{rf}{pf} GROUP BY account, model_name ORDER BY tokens DESC LIMIT ?',
@@ -995,6 +1055,7 @@ def by_account_model(days: int = 30, realm: str | None = None,
             'tokens': int(r['tokens'] or 0),
             'credit': float(r['credit'] or 0),
             'cost': None if r['cost'] is None else float(r['cost']),
+            **_cache_fields(r['ch'], r['cm']),
         })
     return {'items': items, 'total': len(rows), 'truncated': len(rows) > capped,
             'from': lo, 'to': hi}

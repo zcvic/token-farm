@@ -38,7 +38,7 @@ export const metadata: Metadata = {
    * （管理端本身不做语言路由，见 lib/i18n/config.ts 的说明）。选英文是因为
    * 分享卡片 / 搜索引擎抓取时它面向的受众最广；界面内的文案全部走 i18n。
    */
-  description: 'token-farm - multi-platform account console and OpenAI-compatible gateway (WorkBuddy + Trae)',
+  description: 'token-farm - multi-platform account console and OpenAI-compatible gateway (WorkBuddy, Trae, Qoder, Loomy, DuMate, MiniMax Code)',
   // 图标 / 清单的 URL 也要带部署前缀（PR #60 评审补漏）：Next 只给 `_next`
   // 静态资源与 next/link 跳转补 basePath，**不会**改写 metadata 里的这些字符串
   // ——实测子路径部署下产物里仍是 `href="/favicon/..."`，会被请求到域名根（通常是

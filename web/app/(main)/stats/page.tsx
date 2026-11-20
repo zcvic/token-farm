@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle, Server, CalendarDays, UserRound} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle, Server, CalendarDays, UserRound, Database} from 'lucide-react';
 import {
   Area,
   Bar,
@@ -524,6 +524,47 @@ export default function StatsPage() {
       </section>
       )}
 
+      {/* 输入侧缓存命中率（本网关口径）。
+          以前只有 WorkBuddy 的「上游官方统计」里能看；切到 Trae 等平台后那一整段
+          会隐藏，命中率就彻底消失了。缓存 token 本来就随平台调用一起进了
+          usage_daily，所以这里按同一份数据给出今日 / 近 7 天 / 累计，所有平台都能看。
+          与上游那段的区别写在 cacheNote 里：这里只含经过本网关的调用。 */}
+      <section className="rounded-[20px] bg-muted p-4">
+        <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+          <Database className="h-4 w-4" />
+          {t('stats.cacheTitle')}
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          {([
+            ['today', t('stats.costToday'),
+             summary?.today_cache_hit_rate,
+             summary?.today_cache_hit_tokens,
+             summary?.today_cache_miss_tokens],
+            ['week', t('stats.costWeek'),
+             summary?.week_cache_hit_rate,
+             summary?.week_cache_hit_tokens,
+             summary?.week_cache_miss_tokens],
+            ['total', t('stats.costTotal'),
+             summary?.total_cache_hit_rate,
+             summary?.total_cache_hit_tokens,
+             summary?.total_cache_miss_tokens],
+          ] as const).map(([key, label, rate, hit, miss]) => (
+            <div key={key}>
+              <div className="text-[11px] text-muted-foreground">{label}</div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums">{fmtPercent(rate)}</div>
+              <div className="mt-0.5 text-[10px] text-muted-foreground">
+                {typeof rate === 'number'
+                  ? t('stats.cacheTokensHint', {hit: fmtCompact(hit), miss: fmtCompact(miss)})
+                  : t('stats.cacheNoData')}
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
+          {t('stats.cacheNote')}
+        </p>
+      </section>
+
       <section className="rounded-[20px] bg-muted p-4">
         <div className="mb-3 flex items-center justify-between">
           <div className="text-sm font-medium">{t('stats.tokenTrend')}</div>
@@ -756,6 +797,9 @@ function AccountModelUsagePanel({items, showCost}: {items: AccountModelUsageRow[
                 <TableHead className="text-[11px] text-muted-foreground">{t('stats.model')}</TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+                <TableHead className="whitespace-nowrap text-[11px] text-muted-foreground">
+                  {t('stats.cacheHitRate')}
+                </TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
                 {showCost && (
                   <TableHead className="text-[11px] text-muted-foreground">{t('stats.colCost')}</TableHead>
@@ -773,6 +817,14 @@ function AccountModelUsagePanel({items, showCost}: {items: AccountModelUsageRow[
                   </TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtNumber(row.requests)}</TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtCompact(row.tokens)}</TableCell>
+                  <TableCell className="whitespace-nowrap text-xs tabular-nums">
+                    <span title={t('stats.cacheTokensHint', {
+                      hit: fmtCompact(row.cache_hit_tokens),
+                      miss: fmtCompact(row.cache_miss_tokens),
+                    })}>
+                      {fmtPercent(row.cache_hit_rate)}
+                    </span>
+                  </TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtCredit(row.credit)}</TableCell>
                   {showCost && (
                     <TableCell className="text-xs tabular-nums">{fmtMoney(row.cost)}</TableCell>
@@ -807,6 +859,9 @@ function AccountUsagePanel({items, showCost}: {items: AccountUsageRow[]; showCos
                 <TableHead className="text-[11px] text-muted-foreground">{t('stats.account')}</TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+                <TableHead className="whitespace-nowrap text-[11px] text-muted-foreground">
+                  {t('stats.cacheHitRate')}
+                </TableHead>
                 <TableHead className="text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
                 {showCost && (
                   <TableHead className="text-[11px] text-muted-foreground">{t('stats.colCost')}</TableHead>
@@ -822,6 +877,14 @@ function AccountUsagePanel({items, showCost}: {items: AccountUsageRow[]; showCos
                   </TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtNumber(row.requests)}</TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtCompact(row.tokens)}</TableCell>
+                  <TableCell className="whitespace-nowrap text-xs tabular-nums">
+                    <span title={t('stats.cacheTokensHint', {
+                      hit: fmtCompact(row.cache_hit_tokens),
+                      miss: fmtCompact(row.cache_miss_tokens),
+                    })}>
+                      {fmtPercent(row.cache_hit_rate)}
+                    </span>
+                  </TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtCredit(row.credit)}</TableCell>
                   {showCost && (
                     <TableCell className="text-xs tabular-nums">{fmtMoney(row.cost)}</TableCell>
@@ -886,6 +949,9 @@ function BreakdownPanel({
               <TableHead className="pl-0 text-[11px] text-muted-foreground">{t('metric.name')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
               <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+              <TableHead className="whitespace-nowrap text-[11px] text-muted-foreground">
+                {t('stats.cacheHitRate')}
+              </TableHead>
               {throughput && (
                 <TableHead className="whitespace-nowrap text-[11px] text-muted-foreground">
                   {t('stats.tokensPerSec')}
@@ -919,6 +985,14 @@ function BreakdownPanel({
                   </TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtNumber(it.requests)}</TableCell>
                   <TableCell className="text-xs tabular-nums">{fmtCompact(tokens)}</TableCell>
+                  <TableCell className="whitespace-nowrap text-xs tabular-nums">
+                    <span title={t('stats.cacheTokensHint', {
+                      hit: fmtCompact(it.cache_hit_tokens),
+                      miss: fmtCompact(it.cache_miss_tokens),
+                    })}>
+                      {fmtPercent(it.cache_hit_rate)}
+                    </span>
+                  </TableCell>
                   {throughput && (
                     <TableCell className="whitespace-nowrap text-xs tabular-nums">
                       {typeof it.tokens_per_sec === 'number' ? (
@@ -981,6 +1055,22 @@ function StatsSkeleton() {
             <SkeletonBar className="mt-2 h-2.5 w-24" />
           </div>
         ))}
+      </section>
+
+      <section className="rounded-[20px] bg-muted p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <SkeletonBar className="h-4 w-4 rounded-full" />
+          <SkeletonBar className="h-3.5 w-20" />
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          {Array.from({length: 3}, (_, i) => (
+            <div key={i}>
+              <SkeletonBar className="h-2.5 w-12" />
+              <SkeletonBar className="mt-2 h-5 w-16" />
+              <SkeletonBar className="mt-2 h-2.5 w-24" />
+            </div>
+          ))}
+        </div>
       </section>
 
       <section className="rounded-[20px] bg-muted p-4">

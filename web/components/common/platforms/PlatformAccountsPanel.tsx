@@ -700,8 +700,18 @@ export function PlatformAccountsPanel({
     try {
       body = JSON.parse(raw);
     } catch {
-      notify.err(t('platforms.importInvalid'));
-      return;
+      // DuMate 的凭证本身就是一长行 Cookie，要求用户先包成 JSON 太反人类：
+      // 粘不进去的整段 Cookie 直接按 `{cookie: "..."}` 提交（后端认这个形状）。
+      if (platform === 'dumate' && raw.includes('=')) {
+        body = {cookie: raw};
+      } else {
+        notify.err(t('platforms.importInvalid'));
+        return;
+      }
+    }
+    // 同理：粘贴的是 JSON 字符串（带引号的整行 Cookie）时也包一层。
+    if (platform === 'dumate' && typeof body === 'string') {
+      body = {cookie: body};
     }
     setImportBusy(true);
     try {
@@ -910,6 +920,54 @@ export function PlatformAccountsPanel({
     && (login.status === 'needs_bind'
       || (loginMode === 'sms' && login.status === 'pending'));
   const codeFormBusy = codeBusy || login?.status === 'exchanging';
+  /**
+   * 空状态里的操作按钮：只放这个平台真正能用的入口。
+   *
+   * 以前固定渲染「从本机导入」：没有桌面客户端的平台（DuMate）点了必然失败；
+   * 单区域平台（MiniMax）在「账号都属于另一个版本」的空态下也一样点不动。
+   * 三个入口各自按能力出现，手工导入始终可用。
+   */
+  const emptyActions = canAddAccount ? (
+    <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+      {supportsWebLogin && (
+        <Button
+          size="sm"
+          className="rounded-full"
+          disabled={busyAny || loginStarting || login !== null}
+          onClick={() => void startWebLogin()}
+        >
+          {loginStarting ? <Loader2 className="animate-spin" /> : <LogIn />}
+          {t('platforms.login')}
+        </Button>
+      )}
+      {supportsDesktop && (
+        <Button
+          variant={supportsWebLogin ? 'outline' : 'default'}
+          size="sm"
+          className="rounded-full"
+          disabled={busyAny}
+          onClick={() => void importDesktop()}
+          title={t('platforms.importDesktopHint')}
+        >
+          {busy === 'import' ? <Loader2 className="animate-spin" /> : <MonitorDown />}
+          {t('platforms.importDesktop')}
+        </Button>
+      )}
+      <Button
+        variant="outline"
+        size="sm"
+        className="rounded-full"
+        disabled={busyAny}
+        onClick={() => {
+          setImportText('');
+          setImportOpen(true);
+        }}
+      >
+        <FileJson />
+        {t('platforms.importManual')}
+      </Button>
+    </div>
+  ) : null;
 
   return (
     <>
@@ -1045,7 +1103,9 @@ export function PlatformAccountsPanel({
                     onClick={() => void startWebLogin()}
                     title={platform === 'dumate'
                       ? t('platforms.loginHintDumate')
-                      : t('platforms.loginHint')}
+                      : supportsLoginCallback
+                        ? t('platforms.loginHint')
+                        : t('platforms.loginHintDevice')}
                   >
                     {loginStarting ? <Loader2 className="animate-spin" /> : <LogIn />}
                     {t('platforms.login')}
@@ -1161,20 +1221,14 @@ export function PlatformAccountsPanel({
           <EmptyState
             icon={KeyRound}
             title={t('platforms.noAccounts')}
-            description={t('platforms.noAccountsDesc')}
+            description={platform === 'dumate'
+              ? t('platforms.noAccountsDescDumate')
+              : t('platforms.noAccountsDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
-            {canAddAccount && (
-              <Button
-                size="sm"
-                className="mt-1 rounded-full"
-                disabled={busyAny}
-                onClick={() => void importDesktop()}
-              >
-                <Plus />
-                {t('platforms.importDesktop')}
-              </Button>
-            )}
+            {/* 空态里给的是**这个平台真正能用**的入口：没有本机客户端可导入的
+                平台（DuMate）不能只放一个必然失败的「从本机导入」。 */}
+            {emptyActions}
           </EmptyState>
         ) : realmAware && scopedAccounts.length === 0 ? (
           /* 有账号，但都属于另一个版本：这时说「还没有账号」是假话，
@@ -1185,17 +1239,7 @@ export function PlatformAccountsPanel({
             description={t('accounts.emptyRealmDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
-            {canAddAccount && (
-              <Button
-                size="sm"
-                className="mt-1 rounded-full"
-                disabled={busyAny}
-                onClick={() => void importDesktop()}
-              >
-                <Plus />
-                {t('platforms.importDesktop')}
-              </Button>
-            )}
+            {emptyActions}
           </EmptyState>
         ) : paged.total === 0 ? (
           <EmptyState
@@ -1216,9 +1260,11 @@ export function PlatformAccountsPanel({
                   <TableHead className="text-[11px] text-muted-foreground">
                     {t('accounts.colStatus')}
                   </TableHead>
-                  <TableHead className="text-[11px] text-muted-foreground">
-                    {t('platforms.colRealm')}
-                  </TableHead>
+                  {realmAware && (
+                    <TableHead className="text-[11px] text-muted-foreground">
+                      {t('platforms.colRealm')}
+                    </TableHead>
+                  )}
                   {supportsWeight && (
                     <TableHead
                       className="hidden text-[11px] text-muted-foreground md:table-cell"
@@ -1315,11 +1361,15 @@ export function PlatformAccountsPanel({
                           )}
                         </div>
                       </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary" className="rounded-md text-[10px]">
-                          {a.realm_label || a.realm}
-                        </Badge>
-                      </TableCell>
+                      {/* 单区域平台（Loomy / DuMate）没有版本概念，不显示「国内版」
+                          这一列，否则会让人以为它们也有国际版。 */}
+                      {realmAware && (
+                        <TableCell>
+                          <Badge variant="secondary" className="rounded-md text-[10px]">
+                            {a.realm_label || a.realm}
+                          </Badge>
+                        </TableCell>
+                      )}
                       {/* 权重：同一平台内多个账号之间的分摊比例。0 / 留空 = 默认 1.0，
                           与 WorkBuddy 账号权重的口径一致；编辑入口在右侧操作列。
                           非池化平台没有池内权重，整列隐藏。 */}

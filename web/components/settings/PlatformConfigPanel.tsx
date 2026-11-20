@@ -593,12 +593,13 @@ export function PlatformConfigPanel({
         </section>
       )}
 
-      {/* ── 平台专属：Trae 的会话亲和与桌面端回写 ── */}
+      {/* ── 会话亲和 / 桌面端回写：按平台能力显示（Trae / Loomy / DuMate /
+          MiniMax 都有会话亲和，只有 Trae 有桌面端回写） ── */}
       {(caps?.session_affinity || caps?.desktop_sync) && (
         <section className="rounded-[20px] bg-muted p-4">
           <div className="mb-3 flex items-center gap-2">
             <ShieldCheck className="h-3.5 w-3.5 text-muted-foreground" />
-            <span className="text-sm font-medium">{t('platforms.configSectionTrae')}</span>
+            <span className="text-sm font-medium">{t('platforms.configSectionSession')}</span>
           </div>
           <div className="space-y-2.5">
             {caps?.session_affinity && (

@@ -115,7 +115,7 @@ function PlatformModelsPage() {
         supportsModelCatalog={Boolean(platformInfo?.supports_model_catalog)}
       />
       <p className="text-[11px] leading-4 text-muted-foreground">
-        {t('platforms.footnote')}
+        {t('platforms.footnote', {prefix})}
       </p>
     </div>
   );

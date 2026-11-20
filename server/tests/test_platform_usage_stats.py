@@ -49,9 +49,10 @@ class PlatformUsageStatsTest(unittest.TestCase):
 
         # WorkBuddy：同名模型 + 空平台
         db.bump_usage(self.kid, 'glm-5.3', 20, 10, credit=0.5, realm='cn')
-        # 平台：同一模型名 + trae
+        # 平台：同一模型名 + trae（带缓存计量：80 命中 / 20 未命中）
         db.bump_usage(self.kid, 'glm-5.3', 100, 50, credit=2.5,
-                      realm='cn', platform='trae')
+                      realm='cn', platform='trae',
+                      cache_hit=80, cache_miss=20)
         # 平台签到收入：本端签到路由写入的到账积分
         db.add_checkin_log('u-trae', 'Trae 号', 'platform-batch', True, 0,
                            '签到成功', platform='trae', realm='cn',
@@ -112,6 +113,32 @@ class PlatformUsageStatsTest(unittest.TestCase):
         self.assertEqual(sum(p['requests'] for p in daily), 1)
         hourly = stats.hourly(platform='trae', user=_USER)
         self.assertEqual(sum(p['requests'] for p in hourly), 1)
+
+    def test_cache_hit_rate_is_available_on_platforms(self) -> None:
+        """平台模式下也要能看缓存命中率（此前只有 WorkBuddy 的上游统计有）。
+
+        缓存两列本来就随平台调用写进 usage_daily，所以汇总与按模型 / 按密钥
+        报表都应返回同一命中率。两列都为 0 时是 None（「未采集」），不是 0%。
+        """
+        trae = stats.summary(platform='trae', user=_USER)
+        self.assertEqual(trae['today_cache_hit_tokens'], 80)
+        self.assertEqual(trae['today_cache_miss_tokens'], 20)
+        self.assertAlmostEqual(trae['today_cache_hit_rate'], 0.8)
+        self.assertEqual(trae['total_cache_hit_tokens'], 80)
+        self.assertAlmostEqual(trae['total_cache_hit_rate'], 0.8)
+
+        models = stats.by_model(days=1, platform='trae', user=_USER)
+        self.assertAlmostEqual(models[0]['cache_hit_rate'], 0.8)
+        self.assertEqual(models[0]['cache_hit_tokens'], 80)
+        self.assertEqual(models[0]['cache_miss_tokens'], 20)
+
+        keys = stats.by_key(days=1, platform='trae', user=_USER)
+        self.assertAlmostEqual(keys[0]['cache_hit_rate'], 0.8)
+
+        # WorkBuddy 这一行没有缓存计量：命中率是 None，界面显示「—」而不是 0%
+        wb = stats.summary(platform='workbuddy', user=_USER)
+        self.assertIsNone(wb['today_cache_hit_rate'])
+        self.assertIsNone(stats.by_model(days=1, platform='workbuddy', user=_USER)[0]['cache_hit_rate'])
 
     def test_credits_income_comes_from_checkin_logs_on_platforms(self) -> None:
         flow = stats.credits_flow(days=1, platform='trae', user=_USER)

@@ -863,6 +863,11 @@ export interface AccountUsageRow {
   tokens: number;
   credit: number;
   cost: number | null;
+  /** 输入侧命中 / 未命中缓存的 token 合计（来自请求日志） */
+  cache_hit_tokens?: number;
+  cache_miss_tokens?: number;
+  /** hit / (hit + miss)；null = 该行没有缓存计量（两列都是 0） */
+  cache_hit_rate?: number | null;
 }
 
 /** 按「账号 × 模型」的一行（`/api/stats/by-account-model`，issue #369）。 */
@@ -875,6 +880,11 @@ export interface AccountModelUsageRow {
   tokens: number;
   credit: number;
   cost: number | null;
+  /** 输入侧命中 / 未命中缓存的 token 合计（来自请求日志） */
+  cache_hit_tokens?: number;
+  cache_miss_tokens?: number;
+  /** hit / (hit + miss)；null = 该行没有缓存计量（两列都是 0） */
+  cache_hit_rate?: number | null;
 }
 
 export interface AccountModelUsageResponse {
@@ -915,6 +925,17 @@ export interface UsageBreakdown {
   tokens_per_sec?: number | null;
   /** 参与速率计算的请求条数（只覆盖日志保留期内的成功请求） */
   throughput_samples?: number;
+  /**
+   * 输入侧命中 / 未命中缓存的 token 合计（`usage_daily.cache_*`）。
+   * 平台调用也走同一条累计路径，所以多平台下同样有值。
+   */
+  cache_hit_tokens?: number;
+  cache_miss_tokens?: number;
+  /**
+   * 缓存命中率 = hit / (hit + miss)，0~1。
+   * null / 缺省 = 没有缓存计量（上游两份字段都没给），界面显示「—」而不是 0%。
+   */
+  cache_hit_rate?: number | null;
 }
 
 /**
@@ -1002,6 +1023,22 @@ export interface StatsSummary {
   week_tokens: number;
   total_requests: number;
   total_tokens: number;
+  /**
+   * 输入侧缓存命中（今日 / 近 7 天 / 累计）。
+   *
+   * `cache_*_hit_rate` 是 hit / (hit + miss)，0~1；null = 该区间没有缓存计量
+   * （上游两份字段都没给），界面显示「—」而不是 0%。平台模式下照常返回，
+   * 用量页因此不再只有 WorkBuddy 的「上游官方统计」能看命中率。
+   */
+  today_cache_hit_tokens?: number;
+  today_cache_miss_tokens?: number;
+  today_cache_hit_rate?: number | null;
+  week_cache_hit_tokens?: number;
+  week_cache_miss_tokens?: number;
+  week_cache_hit_rate?: number | null;
+  total_cache_hit_tokens?: number;
+  total_cache_miss_tokens?: number;
+  total_cache_hit_rate?: number | null;
   active_keys: number;
   top_model: string | null;
   /**

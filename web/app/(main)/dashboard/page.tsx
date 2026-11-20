@@ -1301,7 +1301,9 @@ export default function DashboardPage() {
             <EmptyState
               icon={Users}
               title={t('platforms.noAccounts')}
-              description={t('platforms.noAccountsDesc')}
+              description={platform === 'dumate'
+                ? t('platforms.noAccountsDescDumate')
+                : t('platforms.noAccountsDesc')}
               className="flex flex-col items-center justify-center py-12 text-center"
             />
           )}
