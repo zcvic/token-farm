@@ -374,6 +374,7 @@ class MinimaxAdapter(PlatformAdapter):
             if exc.status != 401:
                 raise
             token = await self._token_for(account, proxy=proxy, force=True)
+            user_id = await self._user_id(account, token, proxy=proxy)
             panel = await client.checkin_status(realm, token, user_id,
                                                 proxy=proxy, timeout=timeout)
 
@@ -561,14 +562,15 @@ class MinimaxAdapter(PlatformAdapter):
                     out['errors'].append({'endpoint': 'plan_quota',
                                           'code': exc.code,
                                           'message': exc.message})
-            out['entitlement'] = {
-                'subscribed': bool(membership.get('subscribed')),
-                'tier': membership.get('tier') or '',
-                'until': store.iso_from_epoch(
-                    membership.get('expires_at') or 0),
-                'group_id': group,
-                'windows': windows,
-            }
+            if membership:
+                out['entitlement'] = {
+                    'subscribed': bool(membership.get('subscribed')),
+                    'tier': membership.get('tier') or '',
+                    'until': store.iso_from_epoch(
+                        membership.get('expires_at') or 0),
+                    'group_id': group,
+                    'windows': windows,
+                }
         except PlatformError as exc:
             out['errors'].append({'endpoint': 'membership',
                                   'code': exc.code, 'message': exc.message})

@@ -36,6 +36,52 @@ _QUOTA = re.compile(
     r'insufficient|balance|credit|quota|exhaust|limit|余额|积分|额度|不足|用完|上限',
     re.I)
 
+# 上游会用 3xx 把请求转到另一个站点：国际站（agent.minimax.io）在 Akamai
+# 后面，大陆出口会被 307 到 agent.minimaxi.com，而国内站拒绝国际站 token。
+# httpx 默认不跟重定向，所以我们自己认 Location：跨站就报清楚原因，别把
+# 它当成 token 失效（更不能因此消耗一次性的 refresh token）。
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+def _redirect_target(response: httpx.Response, request_url: str) -> tuple[str, str] | None:
+    """3xx 且 Location 换站时返回 `(from_host, to_host)`，否则 None。"""
+    if response.status_code not in _REDIRECT_STATUSES:
+        return None
+    location = str(response.headers.get('location') or '').strip()
+    if not location:
+        return None
+    try:
+        target = urllib.parse.urljoin(str(request_url), location)
+        source_host = urllib.parse.urlsplit(str(request_url)).netloc.lower()
+        target_host = urllib.parse.urlsplit(target).netloc.lower()
+    except ValueError:
+        return None
+    if not target_host or target_host == source_host:
+        return None
+    return source_host, target_host
+
+
+def _guard_redirect(response: httpx.Response, request_url: str,
+                    info: dict, what: str = '') -> None:
+    """跨站 3xx → 明确的 PlatformError；同站 3xx 留给调用方。"""
+    target = _redirect_target(response, request_url)
+    if target is None:
+        return
+    source_host, target_host = target
+    label = f'MiniMax Code{" " + what if what else ""}'
+    if info.get('realm') == 'global':
+        hint = ('国际站的请求被转到了国内站，国内站不接受国际站的登录态。'
+                '请给这个账号绑定一个中国大陆以外的代理出口后重试。')
+    else:
+        hint = (f'请求被转到了 {target_host}，该站不接受本站的登录态。'
+                '请检查这个账号绑定的代理出口。')
+    raise PlatformError(
+        f'{label} 被上游重定向：{source_host} → {target_host}'
+        f'（HTTP {response.status_code}）。{hint}',
+        status=502, code='cross_site_redirect',
+        payload={'from': source_host, 'to': target_host,
+                 'status': response.status_code})
+
 
 # ── 站点 / 出口 ─────────────────────────────────────────────
 def site(realm: object) -> dict[str, str]:
@@ -80,6 +126,14 @@ def _response_error(response: httpx.Response, text: str,
     if response.status_code == 402:
         return PlatformError(f'额度已用完：{message}', status=402,
                              code='quota_exhausted', payload=payload)
+    if response.status_code == 404:
+        return PlatformError(f'接口不存在：{message}', status=404,
+                             code='not_found', payload=payload)
+    if 300 <= response.status_code < 400:
+        # 同站重定向到这里说明没有可用 Location（没跟）或跳转层数过多。
+        return PlatformError(f'上游重定向（HTTP {response.status_code}）：{message}',
+                             status=502, code='upstream_redirect',
+                             payload=payload)
     if response.status_code == 429:
         retry = response.headers.get('retry-after')
         return PlatformError(f'限流：{message}', status=429,
@@ -134,6 +188,7 @@ async def _post_form(site_info: dict, path: str, fields: dict[str, str], *,
                          'Content-Type': 'application/x-www-form-urlencoded'})
     except httpx.HTTPError as exc:
         raise _network_error(exc) from exc
+    _guard_redirect(response, url, site_info, '登录')
     payload = _json(response)
     return response, payload
 
@@ -167,6 +222,9 @@ async def start_device(realm: object, *, proxy: str | None = None,
         interval = float(payload.get('interval') or 5)
     except (TypeError, ValueError):
         interval = 5.0
+    # 上游的 user_code 变体把 interval 给成毫秒（如 5000）；>1000 按毫秒折回秒。
+    if interval > 1000:
+        interval /= 1000.0
     try:
         expires = float(payload.get('expires_in')
                         or payload.get('expired_in') or C.DEVICE_TTL_SECONDS)
@@ -274,6 +332,7 @@ async def fetch_models(realm: object, access: str = '', *, proxy: str | None = N
             response = await ask('')
     except httpx.HTTPError as exc:
         raise _network_error(exc) from exc
+    _guard_redirect(response, url, info, '模型目录')
     if response.status_code >= 400:
         raise _response_error(response, response.text, _json(response))
     payload = _json(response)
@@ -391,6 +450,7 @@ async def account_call(realm: object, path: str, *, access: str,
         except httpx.HTTPError as exc:
             last = exc
             continue
+        _guard_redirect(response, url, local, what)
         payload = _json(response)
         if response.status_code in (401, 403):
             raise PlatformError('MiniMax Code 登录已失效', status=401,
@@ -437,10 +497,30 @@ async def fetch_identity(realm: object, access: str, *, user_id: object = '',
 async def fetch_membership(realm: object, access: str, user_id: str, *,
                            proxy: str | None = None,
                            timeout: float = C.ACCOUNT_TIMEOUT) -> dict:
-    """套餐 / 积分摘要；识别不了时返回 `{}`（不把 Free 当结论）。"""
-    workspace = await account_call(
-        realm, C.WORKSPACE_PATH, access=access, user_id=user_id, body={},
-        proxy=proxy, timeout=timeout, what='工作区')
+    """套餐 / 积分摘要；识别不了时返回 `{}`（不把 Free 当结论）。
+
+    国际站的这两个矩阵接口都返回 404（上游已知行为），此时套餐是「不知道」，
+    不是 Free：返回空字典，由调用方把 entitlement 留空。
+    """
+    try:
+        workspace = await account_call(
+            realm, C.WORKSPACE_PATH, access=access, user_id=user_id, body={},
+            proxy=proxy, timeout=timeout, what='工作区')
+    except PlatformError as exc:
+        if exc.status in (401, 402):
+            raise
+        if exc.status != 404:
+            raise
+        # 国际站没有工作区接口：直接问会员接口，两个都 404 就是「未知」。
+        try:
+            payload = await account_call(
+                realm, C.MEMBERSHIP_PATH, access=access, user_id=user_id,
+                body={}, proxy=proxy, timeout=timeout, what='套餐')
+        except PlatformError as inner:
+            if inner.status == 404:
+                return {}
+            raise
+        return _membership_of(payload)
     data = workspace.get('data') if isinstance(workspace.get('data'), dict) else {}
     items = (workspace.get('workspaces') if isinstance(workspace.get('workspaces'), list)
              else data.get('workspaces') if isinstance(data.get('workspaces'), list)
@@ -561,11 +641,12 @@ async def plan_quota(realm: object, access: str, group: str = '', *,
         headers['X-Group-Id'] = group
 
     async def ask(path: str, budget: float) -> list[dict]:
+        url = f"{info['platform'].rstrip('/')}{path}"
         async with config.http_client(_timeout(budget),
                                       proxy=_selected_proxy(proxy),
                                       lane='minimax') as client:
-            response = await client.get(f"{info['platform'].rstrip('/')}{path}",
-                                        headers=headers)
+            response = await client.get(url, headers=headers)
+        _guard_redirect(response, url, info, 'M Plan')
         if response.status_code >= 400:
             raise _response_error(response, response.text, _json(response))
         return parse_plan(_json(response))
@@ -677,6 +758,7 @@ async def chat(realm: object, access: str, body: dict, *, proxy: str | None = No
                 access, session_id=session_id), json=body)
     except httpx.HTTPError as exc:
         raise _network_error(exc) from exc
+    _guard_redirect(response, chat_url(realm), site(realm), '对话')
     payload = _json(response)
     if response.status_code >= 400:
         raise _response_error(response, response.text, payload)
@@ -704,6 +786,11 @@ async def open_chat(realm: object, access: str, body: dict, *,
             response = await client.send(request, stream=True)
     except httpx.HTTPError as exc:
         raise _network_error(exc) from exc
+    try:
+        _guard_redirect(response, chat_url(realm), site(realm), '对话')
+    except PlatformError:
+        await response.aclose()
+        raise
     if response.status_code >= 400:
         raw = (await response.aread()).decode('utf-8', errors='replace')
         await response.aclose()
@@ -760,6 +847,7 @@ def _post_form_sync(info: dict, path: str, fields: dict[str, str], *,
                          'Content-Type': 'application/x-www-form-urlencoded'})
     except httpx.HTTPError as exc:
         raise _network_error(exc) from exc
+    _guard_redirect(response, url, info, '登录')
     return response, _json(response)
 
 
@@ -791,6 +879,9 @@ def start_device_sync(realm: object, *, proxy: str | None = None,
         interval = float(payload.get('interval') or 5)
     except (TypeError, ValueError):
         interval = 5.0
+    # 上游的 user_code 变体把 interval 给成毫秒（如 5000）；>1000 按毫秒折回秒。
+    if interval > 1000:
+        interval /= 1000.0
     try:
         expires = float(payload.get('expires_in')
                         or payload.get('expired_in') or C.DEVICE_TTL_SECONDS)
@@ -860,6 +951,7 @@ def fetch_identity_sync(realm: object, access: str, *,
             response = http.get(url, headers=headers)
     except httpx.HTTPError as exc:
         raise _network_error(exc) from exc
+    _guard_redirect(response, url, info, '账号信息')
     payload = _json(response)
     if response.status_code in (401, 403):
         raise PlatformError('MiniMax Code 登录已失效', status=401,

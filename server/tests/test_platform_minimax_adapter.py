@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import httpx
+
 from server import config, db
 from server.platforms.base import PlatformError
 from server.platforms.minimax import catalog, client, constants as C, store
@@ -599,6 +601,66 @@ class MinimaxAdapterTest(unittest.TestCase):
         self.assertIsNone(out['session_usage'])
         codes = {item['code'] for item in out['errors']}
         self.assertIn('login_expired', codes)
+
+    def test_usage_leaves_plan_unknown_when_membership_is_missing(self) -> None:
+        """国际站会员接口 404：套餐留空，不能当成 Free 显示。"""
+        self._seed(realm='global')
+
+        async def empty_ledger(*args, **kwargs):
+            return []
+
+        async def no_membership(*args, **kwargs):
+            return {}
+
+        with mock.patch.object(client, 'credit_details', new=empty_ledger), \
+                mock.patch.object(client, 'fetch_membership', new=no_membership):
+            out = asyncio.run(self.adapter.usage('mm_1'))
+        self.assertIsNone(out['entitlement'])
+        self.assertNotIn('membership', {e['endpoint'] for e in out['errors']})
+
+
+class MinimaxInternationalTest(unittest.TestCase):
+    """国际站的两个已知上游差异：跨站 307 与会员接口 404。"""
+
+    def test_cross_site_redirect_is_named_not_auth_failure(self) -> None:
+        response = httpx.Response(
+            307, headers={'location': 'https://agent.minimaxi.com/v1/api/user/info'})
+        with self.assertRaises(PlatformError) as caught:
+            client._guard_redirect(
+                response, 'https://agent.minimax.io/v1/api/user/info',
+                C.SITES['global'], '账号信息')
+        error = caught.exception
+        self.assertEqual(error.code, 'cross_site_redirect')
+        self.assertEqual(error.status, 502)
+        self.assertIn('agent.minimaxi.com', error.message)
+        self.assertIn('代理', error.message)
+
+    def test_same_host_redirect_is_left_alone(self) -> None:
+        response = httpx.Response(
+            307, headers={'location': '/v1/api/user/info'})
+        client._guard_redirect(
+            response, 'https://agent.minimax.io/v1/api/user/info',
+            C.SITES['global'])
+
+    def test_membership_404_on_both_matrix_endpoints_is_unknown(self) -> None:
+        not_found = PlatformError('404 page not found', status=404,
+                                  code='not_found')
+        with mock.patch.object(client, 'account_call',
+                               new=mock.AsyncMock(side_effect=[not_found, not_found])):
+            result = asyncio.run(client.fetch_membership(
+                'global', _ACCESS, 'u-1'))
+        self.assertEqual(result, {})
+
+    def test_membership_falls_back_to_direct_call_on_global(self) -> None:
+        not_found = PlatformError('404 page not found', status=404,
+                                  code='not_found')
+        payload = {'has_token_plan': True, 'token_plan_tier': 'Max'}
+        with mock.patch.object(client, 'account_call',
+                               new=mock.AsyncMock(side_effect=[not_found, payload])):
+            result = asyncio.run(client.fetch_membership(
+                'global', _ACCESS, 'u-1'))
+        self.assertTrue(result['subscribed'])
+        self.assertEqual(result['tier'], 'Max')
 
 
 if __name__ == '__main__':

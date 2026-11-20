@@ -55,6 +55,11 @@
 #          query device_platform=web、is_desktop=1、desktop_version=0.6.12。
 #        · 积分明细：GET /minimax-cloud/api/v1/credit/details
 #          （page_number / page_size / include_expired）。
+#          条目：credit_type（1 / 2 为积分池，其余忽略）、granted_amount /
+#          remaining_amount（**带千分位的字符串**）、expire_at_ms（毫秒）。
+#          → adapter._ledger 归一成 {'amount', 'expire_at', 'label'}，
+#          amount 是剩余、expire_at 是 epoch 秒（与前端契约一致）。
+#          内部契约写错不会报错，只会让界面「积分有效期」整列静默变空。
 #        · 套餐窗口：GET {platform}/backend/account/token_plan/remains_percent，
 #          回退 GET {platform}/v1/api/openplatform/coding_plan/remains，
 #          需要 X-Group-Id。→ client.plan_quota / parse_plan
@@ -67,3 +72,29 @@
 #        · 不接管 MiniMax 官方 CLI 的本地登录态（没有「从本机导入」）。
 #        · 不把参考包的嵌套重试 / 状态机搬过来；选号、冷却、重试在
 #          adapter.py，按 token-farm 的口径实现。
+#
+# ---- 2026-11-20 国际站补两处漏项（0.2.9 里已有，本仓库此前没落）----
+#   · 国际站跨站 307：agent.minimax.io 在 Akamai 后面，中国大陆出口的请求
+#     会被 307 到 agent.minimaxi.com（X-From: ak），国内站拒绝国际站 token。
+#     httpx 默认不跟重定向，表现为 HTTP 307 / 400；跟了会把国内站的
+#     "invalid access token" 误判成登录失效。现在 client._guard_redirect
+#     认出跨站 Location，报 cross_site_redirect，并提示给账号绑境外代理；
+#     不消耗 refresh token。OAuth / 账号 / 模型 / 对话 / 套餐 / 签到同一口径。
+#   · 国际站会员接口 404：/matrix/api/v1/user/get_user_extra_info 与
+#     /matrix/api/v1/commerce/get_membership_info 都回 404（上游 #666）。
+#     此时套餐是「未知」，不是 Free：fetch_membership 返回 {}，
+#     用量页把 entitlement 留空，不记 membership 错误。
+#
+# ---- 同类实现（阅读用，不引入代码）----
+#   · MiniMax-AI/minimax-code（MIT，官方 CLI）：`mcode login --region global`；
+#     登录态在 ~/.minimax/auth/{buildEnv}/{region}/{clientId}/auth.json。
+#   · magpie-community/plugins packages/minimax：本仓库的主参考源（0.2.9）。
+#   · yetone/magpie internal/provider/minimax_checkin.go：Go 版签到，
+#     timezone_id=Asia/Shanghai + x-signature。
+#   · borncode-app/dsh-borncode（原 dsh-minimax-kit）：读 ~/.minimax/auth、
+#     在 auth.lock 下刷新；签到 / 积分 / 模型同步 / 额度。
+#   · Barsillkin/minimax-proxy：把 MiniMax Code OAuth 暴露成 Anthropic 兼容
+#     本地代理（hosts / region 目录的整理很清楚）。
+#   · decolua/9router：多平台路由；有 minimax-code 的本地授权 lease。
+#   · mgmg22/QinglongMy、Minatoxiaohu/agent-auto-signin：签到脚本，
+#     前者会在签到前先调 /v1/api/user/renewal。
