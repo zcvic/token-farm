@@ -120,6 +120,53 @@ class NonChatFilterTest(unittest.TestCase):
         ids = [m['id'] for m in out]
         self.assertEqual(ids, ['glm-5.2'], f'图片生成模型应被过滤，实际 {ids}')
 
+    def test_video_and_audio_generation_filtered(self) -> None:
+        """视频 / 音频生成模型也要剔（issue #461）。
+
+        模型中心只服务 chat 协议，列出 `kling-video-v3` 这种模型，用户选它
+        必然失败，而且报错看起来像网关故障。
+        """
+        ok, out = self._fetch([
+            {'id': 'glm-5.2', 'maxInputTokens': 131072, 'maxOutputTokens': 32768},
+            {'id': 'kling-video-v3', 'maxInputTokens': 4096, 'maxOutputTokens': 4096},
+            {'id': 'minimax-video-h3', 'maxInputTokens': 4096, 'maxOutputTokens': 4096},
+            {'id': 'some-video-gen-1', 'maxInputTokens': 4096, 'maxOutputTokens': 4096},
+            {'id': 'foo-tts-bar', 'maxInputTokens': 4096, 'maxOutputTokens': 4096},
+            {'id': 'hunyuan-video', 'maxInputTokens': 4096, 'maxOutputTokens': 4096},
+        ])
+        self.assertTrue(ok, out)
+        ids = [m['id'] for m in out]
+        self.assertEqual(ids, ['glm-5.2'], f'视频/音频生成模型应被过滤，实际 {ids}')
+
+    def test_video_and_audio_tags_filtered(self) -> None:
+        ok, out = self._fetch([
+            {'id': 'glm-5.2', 'maxInputTokens': 131072, 'maxOutputTokens': 32768},
+            {'id': 'model-a', 'maxInputTokens': 4096, 'maxOutputTokens': 4096,
+             'tags': ['text-to-video']},
+            {'id': 'model-b', 'maxInputTokens': 4096, 'maxOutputTokens': 4096,
+             'tags': ['text-to-speech']},
+            {'id': 'model-c', 'maxInputTokens': 4096, 'maxOutputTokens': 4096,
+             'tags': ['video-generation']},
+        ])
+        ids = [m['id'] for m in out]
+        self.assertEqual(ids, ['glm-5.2'], f'视频/音频 tag 应被过滤，实际 {ids}')
+
+    def test_multimodal_chat_is_kept(self) -> None:
+        """能读视频/图片但产出文本的模型必须保留 —— 剔掉可用模型比漏剔更糟。"""
+        ok, out = self._fetch([
+            {'id': 'glm-4v', 'maxInputTokens': 8192, 'maxOutputTokens': 4096},
+            {'id': 'qwen2.5-vl-72b', 'maxInputTokens': 8192, 'maxOutputTokens': 4096},
+            {'id': 'xxx-video-understanding', 'maxInputTokens': 8192, 'maxOutputTokens': 4096},
+            {'id': 'gpt-4o-audio-preview', 'maxInputTokens': 8192, 'maxOutputTokens': 4096},
+            {'id': 'gemini-omni', 'maxInputTokens': 8192, 'maxOutputTokens': 4096},
+        ])
+        self.assertTrue(ok, out)
+        ids = sorted(m['id'] for m in out)
+        self.assertEqual(ids, sorted([
+            'glm-4v', 'qwen2.5-vl-72b', 'xxx-video-understanding',
+            'gpt-4o-audio-preview', 'gemini-omni',
+        ]), f'多模态对话模型被误杀：{ids}')
+
     def test_boundary_values_kept(self) -> None:
         """边界：257 输出不算 tiny（上游是 <= 256）；无关 tag 不过滤。"""
         ok, out = self._fetch([
