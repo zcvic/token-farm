@@ -625,3 +625,27 @@ d2737dd4c9341805cc6f47ed244e72cfa5adc9ed
 #        · 1fafb14 /v1/search、/v1/fetch、/v1/embeddings 进请求台账：这三个
 #          入口在本地是 Python 面板侧，Go 侧没有这些路由，没有可接的台账点。
 d40d4b83ed756f6a3362935042a35a26d1acb0a6
+
+# ---- 2026-11 第十四批：面板仓 2b6b386 → 7d5b163（v2.11.20）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批无 Go upstream/ 改动，3 个实质提交里取 2 项、补 1 个修复：
+#        · a990935 + f0ffbe1 模型中心剔除视频 / 音频生成模型（issue #461）：
+#          server/services/tencent.py 的 _non_chat_model 原来只认 text-to-image；
+#          补 tag 白名单（text-to-video / image-to-video / text-to-speech …）、
+#          id 生成类片段（-video- / video-gen / -tts / tts- …）与后缀
+#          （-video / -tts / -audio，覆盖 hunyuan-video 这类无版本号命名）。
+#          多模态对话模型（understanding / -vl / vision / multimodal / omni）
+#          优先放行，避免把「能读视频但产出文本」的可用模型误杀。
+#          仍然只在**国内版**生效（调用方按 realm != GLOBAL 判定）。
+#          测试补进 server/tests/test_model_filter.py 的 NonChatFilterTest。
+#        · 6285931 统计页「昨日」单日范围：只取范围选择器 + 昨日取数这一半。
+#          web/lib/usage-chart.ts 新增 shiftDayKey / yesterdayKeyLocal；
+#          stats 页增加 isYesterday、range、spanDays、chartEnd 与 hourly 目标日，
+#          五份 locale 补 stats.yesterday。
+#          **未取** hourlyTargetFor() 重构：本地自定义同一天的小时图此前已按
+#          d === 1 + customStart 传参修好（chartEnd 还支持历史止日），不复刻上游
+#          的另一套判据。
+#        · 7d5b163 发版提交（只改上游 CHANGELOG 与 server/main.py 版本号）不取。
+a990935abf8c5d8eecaad963418cddb50e7a30c8
+f0ffbe18051680d0248cecbabdec294b890de669
+62859317608c533b2940a41c85f1389694cf3ced
