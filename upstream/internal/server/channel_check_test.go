@@ -106,7 +106,7 @@ func TestChatChannelCheckNeverDisables(t *testing.T) {
 // issue #245：回退到 /console 拿到的 11102 不得写 (账号,模型) 负缓存。
 //
 // 现场：15 个号跑几小时后全部软冷却、所有请求 503。原因是回退路径的 11102 被当成
-// 「该账号缺这个模型」，写了 6 小时模型级冷却，逐个账号轮过去就把整池打穿。
+// 「该账号缺这个模型」，写了 (账号,模型) 负缓存，逐个账号轮过去就把整池打穿。
 func TestConsoleFallbackModelMissingDoesNotBlockModel(t *testing.T) {
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

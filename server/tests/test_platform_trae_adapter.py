@@ -16,6 +16,7 @@ from unittest import mock
 from server import config, db
 from server.platforms.base import PlatformError
 from server.platforms.trae import catalog, client, store
+from server.platforms.trae import chat as chatmod
 from server.platforms.trae.adapter import TraeAdapter, _credit_expiries
 
 
@@ -347,6 +348,30 @@ class CreditDetailMeterTest(_Base):
         self.assertAlmostEqual(usage_second['credit'], 0.02)
 
 
+class AliasRoutingTest(_Base):
+    """显示名 / `-solo` 兼容名也要解析到正确通道与版本（上游 93d24a14）。
+
+    客户端面板里看到的是显示名（`Seed-Code`），而上游只认目录 id
+    （`Doubao-Seed-Code`）。只按 id 查的代价是：通道判错 → 先打一次 4023 再
+    兜底换通道；版本判错 → 把国内版模型派给国际版账号。
+    """
+
+    def test_display_name_resolves_channel(self) -> None:
+        self.assertEqual(self.adapter._channel('Seed-Code'), 'solo')
+        self.assertEqual(self.adapter._channel('Doubao-Seed-Code'), 'solo')
+        self.assertEqual(self.adapter._channel('Doubao-Seed-Code-solo'), 'solo')
+        self.assertEqual(self.adapter._channel('GLM-5.3'), 'solo')
+
+    def test_display_name_resolves_realm(self) -> None:
+        self.assertEqual(self.adapter._model_realm('Seed-Code'), 'cn')
+        self.assertEqual(self.adapter._model_realm('Claude-Sonnet-4.6'), 'intl')
+
+    def test_unknown_model_falls_back_to_chat(self) -> None:
+        """认不出的模型保持旧行为：默认 chat，由 4023 兜底换通道。"""
+        self.assertEqual(self.adapter._channel('no-such-model'), 'chat')
+        self.assertIsNone(self.adapter._model_realm('no-such-model'))
+
+
 class CandidateTest(_Base):
     def test_candidates_prefer_matching_realm(self) -> None:
         store.save_account({'uid': 'cn-1', 'realm': 'cn', 'token': 't'})
@@ -440,6 +465,76 @@ class ChatAffinityTest(_Base):
                 asyncio.run(self.adapter._chat_accounts('glm-5.2', body))
         self.assertIsNone(self.adapter._affinity.get('prompt_cache_key:sess-429'),
                           '限流后不解绑会让同一会话每轮都撞同一个号')
+
+
+class ChatRotationStopTest(_Base):
+    """风控 / 额度用尽必须停止整池轮换（上游 1.7.1 的 TerminalProviderError 语义）。
+
+    两者的共同点是「换号得不到不同答案」：
+
+      · 4015 / 4019 是设备 / 出口维度风控，换个号还是同一出口；
+      · 4008 是账号额度用尽，额度会随套餐重置，账号本身没坏。
+
+    继续轮转的代价不对称：风控会把整池逐个推进冷却（上游 4019 → 1800s），
+    一次请求就能让池子半小时不可用；4008 则会让客户端误以为「网关坏了」，
+    把一次可预期的限流放大成整池 429。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        store.save_account({'uid': 'cn-1', 'realm': 'cn', 'token': 't'})
+        store.save_account({'uid': 'cn-2', 'realm': 'cn', 'token': 't'})
+
+    def _chat(self, error: PlatformError) -> tuple[PlatformError, list[str]]:
+        tried: list[str] = []
+
+        async def chat_once(account, model, body, wrapper_model, **kwargs):  # noqa: ANN001
+            tried.append(str(account.get('uid')))
+            raise error
+
+        with mock.patch.object(
+                self.adapter, '_ensure_token',
+                mock.AsyncMock(side_effect=lambda account: account)), \
+             mock.patch.object(self.adapter, '_chat_once', mock.AsyncMock(
+                side_effect=chat_once)):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter._chat_accounts(
+                    'glm-5.2', {'prompt_cache_key': 'sess-stop'}))
+        return ctx.exception, tried
+
+    def test_risk_control_stops_rotation_and_cools_hit_account(self) -> None:
+        err, tried = self._chat(PlatformError(
+            'Trae 风控（4015/4019）：账号或出口被限制，请稍后重试',
+            status=403, code='risk_control'))
+        self.assertEqual(err.status, 403)
+        self.assertEqual(len(tried), 1, f'风控不该换号，实际打了 {tried}')
+        account = store.read_account(tried[0])
+        self.assertIsNotNone(account)
+        self.assertTrue(store.is_cooling(account), '命中的账号应被冻结')
+        self.assertIn('risk control', account.get('coolingReason') or '')
+        # 冻结时长固定 30 分钟，避免一次风控把号锁半天。
+        remaining = store.cooling_until(account) - time.time()
+        self.assertGreater(remaining, 29 * 60)
+        self.assertLessEqual(remaining, 30 * 60)
+
+    def test_quota_exhausted_stops_rotation_without_cooling(self) -> None:
+        err, tried = self._chat(PlatformError(
+            'Trae 免费额度用尽（4008 quota exceeded），请稍后重试',
+            status=429, code='quota_exceeded',
+            retry_after=chatmod.QUOTA_RETRY_AFTER))
+        self.assertEqual(err.status, 429)
+        self.assertEqual(err.retry_after, chatmod.QUOTA_RETRY_AFTER)
+        self.assertEqual(len(tried), 1, f'额度用尽不该换号，实际打了 {tried}')
+        account = store.read_account(tried[0])
+        self.assertFalse(store.is_cooling(account),
+                         '额度用尽是暂时的，账号本身没坏，不该冻结')
+
+    def test_credential_error_still_rotates(self) -> None:
+        """对照组：401 才该换号——把「停止轮转」限制在风控 / 额度两类。"""
+        err, tried = self._chat(PlatformError(
+            '令牌失效', status=401, code='unauthorized'))
+        self.assertEqual(err.status, 401)
+        self.assertEqual(len(tried), 2, f'401 应换到下一个号，实际 {tried}')
 
 
 if __name__ == '__main__':

@@ -94,10 +94,20 @@ func TestClassify(t *testing.T) {
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},
-		// 11102「该后端无此模型」：确定性答复，归 ErrModelBlocked（(账号,模型) 负缓存避让）。
-		{404, `{"code":11102,"msg":"model [deepseek-v3-2-volc] service info not found"}`, ErrModelBlocked},
-		{400, `{"error":{"code":"11102","message":"model service info not found"}}`, ErrModelBlocked},
-		{400, `{"msg":"service info not found"}`, ErrModelBlocked},
+		// 11102「该模型 id 上游不存在」：模型级确定性答复（换遍全池同一句）→ 请求级
+		// ErrModelMissing：不轮转、不罚号（issue #280 实测三号一字不差）。
+		{404, `{"code":11102,"msg":"model [deepseek-v3-2-volc] service info not found"}`, ErrModelMissing},
+		{400, `{"error":{"code":"11102","message":"model service info not found"}}`, ErrModelMissing},
+		{400, `{"msg":"service info not found"}`, ErrModelMissing},
+		// 14401「route config not found」是图像模型的同族答复（该模型在本域没有
+		// 路由）：换号与重试同样不可能成功，一并归请求级。
+		{400, `{"code":14401,"msg":"route config not found"}`, ErrModelMissing},
+		{404, `{"msg":"route config not found"}`, ErrModelMissing},
+		// 11158 是账号类型级模型权限拒绝：同一模型换有权限的账号仍可能成功，
+		// 按 (账号, 模型) 避让；不能落入 ErrClient 轮转后误报 503。
+		{400, `{"code":11158,"msg":"model [gpt-5.6-sol] is not allowed for user type [personal_free_user]"}`, ErrModelBlocked},
+		{400, `{"error":{"code":"11158","message":"model is not allowed for user type"}}`, ErrModelBlocked},
+		{429, `{"code":11158,"msg":"model is not allowed for user type"}`, ErrSoftRate},
 		// 11102 撞在 requestId 上不算（不得误避让可用模型）。
 		{404, `{"requestId":"11102","msg":"ok"}`, ErrNotFound},
 		// 429 + 11102 → 限流语义（ErrSoftRate），不是模型不存在。
@@ -324,10 +334,10 @@ func TestIsModelRateLimit(t *testing.T) {
 	}
 }
 
-// TestIsModelBlocked 11102「该后端无此模型」判定：只认 code 精确等于 11102 或 msg 命中
-// 窄短语 "service info not found"，且仅在 400/404 下判。覆盖 reference 报告「11102 撞在
-// ID 上」的坑——requestId 里的 11102 不得误判。
-func TestIsModelBlocked(t *testing.T) {
+// TestIsModelMissing 11102「该模型 id 上游不存在」判定：只认 code 精确等于 11102 或
+// msg 命中窄短语 "service info not found"，且仅在 400/404 下判。覆盖 reference 报告
+// 「11102 撞在 ID 上」的坑——requestId 里的 11102 不得误判。
+func TestIsModelMissing(t *testing.T) {
 	cases := []struct {
 		status int
 		body   string
@@ -348,7 +358,61 @@ func TestIsModelBlocked(t *testing.T) {
 		{500, `{"code":11102,"msg":"service info not found"}`, false},
 		// code 非 11102 且无短语 → 不算。
 		{404, `{"code":11103,"msg":"x"}`, false},
+		// 11158 是账号权限而非模型 id 不存在，不能混进来。
+		{400, `{"code":11158,"msg":"model is not allowed for user type"}`, false},
+		// 14401「route config not found」是图像模型的同族答复，算模型不存在。
+		{400, `{"code":14401,"msg":"route config not found"}`, true},
+		{404, `{"msg":"route config not found"}`, true},
+		// 宽泛的 "route ... not found" 不算：只认窄短语。
+		{404, `{"msg":"route [x] not found"}`, false},
 		// 空 body 不算。
+		{404, ``, false},
+	}
+	for _, c := range cases {
+		if got := IsModelMissing(c.status, c.body); got != c.want {
+			t.Errorf("IsModelMissing(%d,%q)=%v want %v", c.status, c.body, got, c.want)
+		}
+	}
+}
+
+// TestModelBlockReasonFor 11158 用独立 reason 前缀，便于 /status 台账区分
+// 「模型不存在」与「账号类型无权限」；其余确定性模型拒绝沿用 11102 前缀。
+func TestModelBlockReasonFor(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+	}{
+		{`{"code":11158,"msg":"model is not allowed for user type"}`, ModelForbiddenReason},
+		{`{"msg":"model is not allowed for user type"}`, ModelForbiddenReason},
+		{`{"code":11102,"msg":"service info not found"}`, ModelBlockReason},
+		{`{"code":14401,"msg":"route config not found"}`, ModelBlockReason},
+		{`{}`, ModelBlockReason},
+	}
+	for _, c := range cases {
+		if got := ModelBlockReasonFor(c.body); got != c.want {
+			t.Errorf("ModelBlockReasonFor(%q)=%q want %q", c.body, got, c.want)
+		}
+	}
+}
+
+// TestIsModelBlocked 11158「该账号类型无权使用该模型」判定：只认 code 精确等于 11158
+// 或 msg 命中窄短语 "not allowed for user type"，且仅在 400/404 下判。
+func TestIsModelBlocked(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{400, `{"code":11158,"msg":"model [gpt-5.6-sol] is not allowed for user type [personal_free_user]"}`, true},
+		{400, `{"error":{"code":"11158","message":"model is not allowed for user type"}}`, true},
+		{400, `{"msg":"model is not allowed for user type"}`, true},
+		// 11102 是模型 id 不存在，不是账号权限。
+		{404, `{"code":11102,"msg":"service info not found"}`, false},
+		// 429 带 11158 属限流语义，不算权限拒绝。
+		{429, `{"code":11158,"msg":"model is not allowed for user type"}`, false},
+		// 非 400/404 不算。
+		{500, `{"code":11158,"msg":"model is not allowed for user type"}`, false},
+		{404, `{"code":11103,"msg":"x"}`, false},
 		{404, ``, false},
 	}
 	for _, c := range cases {

@@ -2,8 +2,8 @@
 
 钉住两件事：
 
-  1. **分类口径**与上游一致：6004 是模型限流、11102 是「该账号无此模型」
-     （不是错误）、401/12153 是凭证失效、402/14018 是额度不足；
+  1. **分类口径**与上游一致：6004 是模型限流、11102 / 14401 / 11158 是「该账号
+     用不了这个模型」（不是错误）、401/12153 是凭证失效、402/14018 是额度不足；
   2. 组合数上限与模型名去前缀（`cn:` / `global:` 同名合并）。
 """
 from __future__ import annotations
@@ -31,6 +31,17 @@ class ClassifyProbeResultTest(unittest.TestCase):
         status, code = tencent.classify_probe_result(
             False, '上游返回 code=11102 该后端无此模型')
         self.assertEqual((status, code), ('no_model', '11102'))
+
+    def test_model_missing_and_forbidden_are_not_errors(self) -> None:
+        """11102 / 14401 是模型 id 不存在，11158 是账号类型无权限。
+
+        三者对该账号都是「用不了这个模型」，不是账号故障：探测结果归
+        `no_model`，不计入错误统计（面板据此提示换模型 / 换号，而不是报红）。
+        """
+        for code in ('11102', '14401', '11158'):
+            status, got = tencent.classify_probe_result(
+                False, f'上游返回 code={code} 模型不可用')
+            self.assertEqual((status, got), ('no_model', code))
 
     def test_model_rate_limit(self) -> None:
         self.assertEqual(

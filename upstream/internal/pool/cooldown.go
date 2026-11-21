@@ -110,20 +110,27 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 	}
 }
 
-// BlockModelBackoff 11102「该后端无此模型」的 (账号, 模型) 负缓存入口（handler.applyErrorPolicy
-// 调用）。复用 modelCooldowns 机制（不新建平行状态）：写 modelCooldowns[model]，Until 为指数退避
-// TTL，选号侧 healthyForModel 自动对该账号避开该模型。
+// BlockModelBackoff 「该账号类型无权使用该模型」的 (账号, 模型) 负缓存入口
+// （handler.applyErrorPolicy 在 11158 / ErrModelBlocked 分支调用）。复用
+// modelCooldowns 机制（不新建平行状态）：写 modelCooldowns[model]，Until 为指数
+// 退避 TTL，选号侧 healthyForModel 自动对该账号避开该模型。
 //
-// 语义与 6004 正交：6004 是「模型被限流、对齐重置墙钟」，本入口是「官方确定该后端无此模型、
-// 重试无意义，只能换模型/换账号」。退避按 reference model_blocks.py 口径（吸收语义、不抄实现）：
-//   - 首次命中 TTL = modelBlockBaseTTL（6h）；
+// 语义与 6004 正交：6004 是「模型被限流、对齐重置墙钟」，本入口是「官方确定该
+// 账号类型不能用这个模型、重试无意义，只能换账号/换模型」。退避按 reference
+// model_blocks.py 口径（吸收语义、不抄实现）：
+//   - 首次命中 TTL = modelBlockBaseTTL（2m）；
 //   - 半开到期后允许放行重试；再次命中 Hits++ → TTL = base × 2^min(hits-1, modelBlockShift)；
-//   - 封顶 modelBlockMaxTTL（24h，最多一天再试一次）；
+//   - 封顶 modelBlockMaxTTL（10m）；
 //   - 该模型请求成功即由 BlockModelClear 清除（注意：6004 的 NoteSuccess 不清 modelCooldowns，
-//     故清理必须由 handler 在成功且 model 命中 11102 条目时显式调用，见 BlockModelClear）。
+//     故清理必须由 handler 在成功且 model 命中该条目时显式调用，见 BlockModelClear）。
 //
-// resetAt 无需传（11102 无重置文案），ResetAt 保持零值，与 6004 台账（rateLimitedModelsLocked）
-// 共用 Until 判定——11102 条目会以 11102 reason 出现在 /status 台账，运维可见。
+// 11102/14401「模型 id 上游不存在」**不再**走这里（请求级 ErrModelMissing，不写
+// 负缓存、不轮转）；历史 state.json 里由旧版本写入的 11102 条目仍按 reason 前缀
+// 识别与清理。
+//
+// resetAt 无需传（这类拒绝无重置文案），ResetAt 保持零值，与 6004 台账
+// （rateLimitedModelsLocked）共用 Until 判定——条目会以 reason 前缀出现在
+// /status 台账，运维可见。
 func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 	if uid == "" || model == "" {
 		return
@@ -157,10 +164,11 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 	p.dirty.Store(true)
 }
 
-// BlockModelClear 清除 (账号, 模型) 的 11102 负缓存条目（该模型实测又通了）。半开探测或正常
-// 请求对该模型成功后调用（handler 成功路径）。只清 11102 条目、不碰 6004 独立冷却表——
-// 6004 有自身上游重置墙钟语义，成功不该抹掉（见 NoteSuccess 注释）。reason 前缀判定区分两者：
-// 11102 条目的 reason 恒以 "11102" 开头（见上游 BlockModelReason）。
+// BlockModelClear 清除 (账号, 模型) 的确定性模型拒绝负缓存（11102 / 11158；该模型
+// 实测又通了）。半开探测或正常请求对该模型成功后调用（handler 成功路径）。只清这些
+// 条目、不碰 6004 独立冷却表——6004 有自身上游重置墙钟语义，成功不该抹掉
+// （见 NoteSuccess 注释）。reason 前缀判定区分两者：11102 / 11158 条目恒以这两个
+// 前缀开头（见 upstream.ModelBlockReason / ModelForbiddenReason）。
 func (p *Pool) BlockModelClear(uid, model string) {
 	if uid == "" || model == "" {
 		return
@@ -172,7 +180,7 @@ func (p *Pool) BlockModelClear(uid, model string) {
 		return
 	}
 	mc, exists := e.modelCooldowns[model]
-	if !exists || !strings.HasPrefix(mc.Reason, "11102") {
+	if !exists || (!strings.HasPrefix(mc.Reason, "11102") && !strings.HasPrefix(mc.Reason, "11158")) {
 		return
 	}
 	delete(e.modelCooldowns, model)
@@ -182,14 +190,18 @@ func (p *Pool) BlockModelClear(uid, model string) {
 	p.dirty.Store(true)
 }
 
-// ClearModelBlocks 清掉**所有账号**上该模型的 11102 负缓存，返回清理条数。
+// ClearModelBlocks 清掉**所有账号**上该模型的确定性模型拒绝负缓存（11102 / 11158），
+// 返回清理条数。
 //
-// 背景：上游 11102 有时是瞬时故障（模型注册表抖动 / 灰度切换）。一次抖动会让每个
-// 被选中的账号各写一条 6h 起的指数退避负缓存，全池写满后对外就是「一整天 503
+// 背景：上游这类拒绝有时是瞬时的（模型注册表抖动 / 灰度切换）。一次抖动会让每个
+// 被选中的账号各写一条指数退避负缓存，全池写满后对外就是「一整天 503
 // no_healthy_account」，而模型其实早已恢复（实测 20/20 账号直连均 200）。
 //
+// 11102/14401 现在已归请求级、不写负缓存；本方法仍保留 11102 前缀匹配，是为了让
+// 旧 state.json 里遗留的条目也能被清掉。
+//
 // 选号侧发现「该模型 0 个可用账号」时调用本方法自愈：清一次、重试一次。
-// 只清 reason 以 "11102" 开头的条目，不碰 6004 的独立冷却表。
+// 只清 reason 以 "11102" / "11158" 开头的条目，不碰 6004 的独立冷却表。
 func (p *Pool) ClearModelBlocks(model string) int {
 	if model == "" {
 		return 0
@@ -202,7 +214,9 @@ func (p *Pool) ClearModelBlocks(model string) int {
 			continue
 		}
 		mc, ok := e.modelCooldowns[model]
-		if !ok || !strings.HasPrefix(mc.Reason, "11102") {
+		modelBlocked := ok && (strings.HasPrefix(mc.Reason, "11102") ||
+			strings.HasPrefix(mc.Reason, "11158"))
+		if !modelBlocked {
 			continue
 		}
 		delete(e.modelCooldowns, model)

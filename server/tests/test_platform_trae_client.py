@@ -187,6 +187,30 @@ class BodyTest(unittest.TestCase):
                                           {'max_tokens': 123})
         self.assertEqual(explicit['max_tokens'], 123)
 
+    def test_solo_function_follows_model_group(self) -> None:
+        """`solo_work_lite` / `solo_agent_remote` 两组模型不通用（上游 32961736）。
+
+        Doubao-Seed-Code 与 qwen3.8-flash 只在 agent 组：发给 solo_work_lite 时
+        上游回的是 4001「the param is invalid」，而不是 4023「模型不存在」，
+        很容易被误判成 max_tokens / messages 的问题。
+        """
+        messages = [{'role': 'user', 'content': 'hi'}]
+        for model in ('Doubao-Seed-Code', 'qwen3.8-flash'):
+            body = client.build_solo_body(model, messages, {})
+            self.assertEqual(body['function'], 'solo_agent_remote', model)
+        for model in ('deepseek-v4.1-flash', 'glm-5.3'):
+            body = client.build_solo_body(model, messages, {})
+            self.assertEqual(body['function'], 'solo_work_lite', model)
+
+    def test_solo_body_resolves_display_name_to_upstream_key(self) -> None:
+        """客户端发显示名（Seed-Code）/ `-solo` 兼容名也要落到正确分组。"""
+        messages = [{'role': 'user', 'content': 'hi'}]
+        for alias in ('Seed-Code', 'Doubao-Seed-Code-solo'):
+            body = client.build_solo_body(alias, messages, {})
+            self.assertEqual(body['function'], 'solo_agent_remote', alias)
+            self.assertEqual(body['config_name'], 'Doubao-Seed-Code', alias)
+            self.assertEqual(body['model'], 'Doubao-Seed-Code', alias)
+
     def test_tool_hint_includes_parameter_schema(self) -> None:
         """只给工具名不够：模型得知道参数名/类型/必填。"""
         tools = [{'type': 'function', 'function': {

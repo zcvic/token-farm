@@ -1645,7 +1645,10 @@ def classify_probe_result(ok: bool, message: str) -> tuple[str, str | None]:
     m = _PROBE_CODE_RE.search(message or '')
     code = m.group(1) if m else None
     text = (message or '').lower()
-    if code == '11102':
+    if code in ('11102', '14401', '11158'):
+        # 11102/14401：模型 id 上游不存在（换号无用）；11158：该账号类型无权限
+        # （换到有权限的号可能成功，但对该号而言同样只是「用不了这个模型」）。
+        # 三种都不是账号故障，探测结果不该计入错误。
         return 'no_model', code
     if code in ('12153', '401'):
         return 'auth', code

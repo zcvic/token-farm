@@ -666,6 +666,39 @@ def _error_text(data: Any) -> str:
 QUOTA_CODE = '4008'
 QUOTA_RETRY_AFTER = 60
 
+# 上游显式风控业务码。风控是**设备 / 出口**维度，不是账号故障：换号只会
+# 让下一个号得到同样的答案，并把整池都推进冷却。适配器据此只冻结命中的
+# 那个账号并终止当前请求（见 adapter._is_risk_control）。
+RISK_CODES = ('4015', '4019')
+_RISK_KEYWORDS = ('risk_control', 'risk control', 'unusual activity')
+
+
+def is_risk_error(data: Any) -> bool:
+    """错误体是否表示 4015 / 4019 风控。
+
+    业务码可能在 `code` / `Code` 字段，也可能只写进 `message`
+    （`[4015] risk control`），所以两处都认。
+
+    **不做整段文本的裸子串匹配**：`4015` 撞在 requestId / 时间戳里就会把一次
+    普通 4xx 判成风控，而风控误判的代价是「停止整池轮换 + 冷却账号 30 分钟」
+    （与上游只认结构化 code 字段同口径）。文本里只认两种明确形态：
+    关键词（`risk_control` 等）与方括号包裹的业务码（`[4015]`）。
+    """
+    if isinstance(data, dict):
+        code = data.get('code')
+        if code is None:
+            code = data.get('Code')
+        if str(code if code is not None else '').strip() in RISK_CODES:
+            return True
+        text = ' '.join(str(data.get(key) or '')
+                        for key in ('message', 'msg', 'error', 'Message'))
+    else:
+        text = str(data or '')
+    lowered = text.lower()
+    if any(word in lowered for word in _RISK_KEYWORDS):
+        return True
+    return any(f'[{code}]' in text for code in RISK_CODES)
+
 
 def is_quota_error(data: Any) -> bool:
     """错误体是否表示 4008 quota exceeded。
@@ -694,7 +727,8 @@ def error_from_event(data: Any, *, payload: Any = None) -> PlatformError:
 
     4008 单独改判成 429：客户端会按限流退避，而不是把「额度用尽」当成
     「网关坏了」反复重试；同时它不会被误认成 4015/4019 风控（那两条才需要
-    冷却或换号）。
+    冷却或换号）。4015/4019 则改判成 403 + `risk_control`，让适配器在换号
+    之前就识别出来。
     """
     if is_quota_error(data):
         return PlatformError(
@@ -702,6 +736,14 @@ def error_from_event(data: Any, *, payload: Any = None) -> PlatformError:
             '这不是风控，账号本身可用。',
             status=429, code='quota_exceeded',
             retry_after=QUOTA_RETRY_AFTER,
+            payload=payload if payload is not None else data)
+    if is_risk_error(data):
+        return PlatformError(
+            '上游风控命中（Trae 4015/4019：账号或出口地区限制）。网关已停止换号'
+            '并只冷却命中账号，避免一次请求冷却整池；请使用与账号同区的出口、'
+            '稍后重试或更换账号——原地重试不会解决。上游详情：%s'
+            % _error_text(data),
+            status=403, code='risk_control',
             payload=payload if payload is not None else data)
     return PlatformError(_error_text(data), status=502, code='upstream_error',
                          payload=payload if payload is not None else data)

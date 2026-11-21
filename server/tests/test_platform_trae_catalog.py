@@ -188,6 +188,39 @@ class SourcesTest(unittest.TestCase):
         self.assertTrue(summary['imported_at'])
 
 
+class SoloFunctionTest(unittest.TestCase):
+    """SOLO 通道的 function 按模型所属分组选择（上游 llm_utils_chat 两组不通用）。
+
+    `solo_work_remote`（18 个）与 `solo_agent_remote`（20 个）的模型集合不通用：
+    把只在 agent 组的模型发给 `solo_work_lite`，上游回的不是 4023「模型不存在」，
+    而是 4001「the param is invalid」——很容易被误判成 max_tokens / messages 问题。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patch = mock.patch.object(config, 'DATA_DIR', Path(self.tmp.name))
+        patch.start()
+        self.addCleanup(patch.stop)
+        catalog.clear_imported()
+
+    def test_agent_only_models_use_agent_function(self) -> None:
+        for name in ('Doubao-Seed-Code', 'qwen3.8-flash'):
+            self.assertEqual(catalog.solo_function_for(name),
+                             catalog.SOLO_AGENT_FUNCTION, name)
+
+    def test_other_models_keep_work_function(self) -> None:
+        for name in ('glm-5.3', 'Doubao-Seed-2.1-Pro'):
+            self.assertEqual(catalog.solo_function_for(name),
+                             catalog.SOLO_FUNCTION, name)
+
+    def test_display_name_and_solo_suffix_resolve_to_same_function(self) -> None:
+        # 客户端可能发显示名（Seed-Code）或 `-solo` 兼容名，都该解析到同一分组。
+        for name in ('Seed-Code', 'Doubao-Seed-Code', 'Doubao-Seed-Code-solo'):
+            self.assertEqual(catalog.solo_function_for(name),
+                             catalog.SOLO_AGENT_FUNCTION, name)
+
+
 class AdapterCatalogTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

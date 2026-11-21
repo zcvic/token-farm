@@ -176,11 +176,27 @@ git remote add qoder-ref https://github.com/shuishuipingan/qoder2api-hub.git
 git fetch qoder-ref --no-tags
 ```
 
-已核对到 `44b6f33`（v1.9.11）→ `25d0594`（v1.9.12）。基线、取用范围与本地唯一
-补丁（账号权重）记录在 `deploy/qoder-ref.txt`。升级方式是重跑
+已核对到 `44b6f33`（v1.9.11）→ `25d0594`（v1.9.12）→ `285d98be`（v1.9.13）。基线、
+取用范围与本地唯一补丁（账号权重）记录在 `deploy/qoder-ref.txt`。升级方式是重跑
 `python server/platforms/qoder/tools/vendor_qoder.py --source <clone>`，
 `--check` 校验一致性；重新 vendor 后必须重新应用那份补丁
 （`server/tests/test_qoder_vendor.py` 守着）。
+
+> **Qoder 批（2026-11-21，`25d0594` → `285d98be`，v1.9.13）**：4 个非 merge 提交，
+> 整目录重 vendor，变动的协议文件是 `qoder_accounts.py` / `qoder_proxy.py` /
+> `qoder_scheduler.py` / `qoder_settings.py` / `qoder_tasks.py`（无新增模块与数据
+> 文件，`vendor_qoder.py` 的 `MODULES` / `DATA_FILES` 不变）。三项实质修复：
+> 签到结果保留上游奖励拒绝语义（`failureCode` 优先于 `errorCode`，
+> `SAME_PERSON_ALREADY_CLAIMED` 仍归 blocked，`success=false` 不再被当成领取成功；
+> 兑换码缺货 / 任务未完成分别归 pending / locked，其余拒绝写进错误明细而不是静默
+> 吞掉）；新增 `settings.omit_default_system_prompt`（默认关闭，只有显式开启才
+> 清空 baseprompt 里的官方 system 提示词，`SYSTEM_PROMPT` 默认值随之从
+> `"You are a helpful assistant."` 改成 `None`）；该设置的写盘与面板刷新做了
+> 防覆盖保护（`settings.json` 无效时拒绝写入，保存路由校验布尔类型）。
+> `embedded.py` 跟着把 `proxy.SYSTEM_PROMPT` 设成 `None`——与上游默认等价，
+> 内置网关行为不变。账号权重补丁已重新应用。面板侧的「省略默认系统提示词」表单
+> 仍不取：token-farm 的入口是平台设置，需要时改 `accounts/settings.json`
+> （`docs/qoder.md` 已写明）。
 
 > **Qoder 批（2026-11-20，`44b6f33` → `25d0594`，v1.9.12）**：7 个非 merge 提交，
 > 整目录重 vendor。这一批是**联网工具链重写**：新增 `qoder_web_response.py`、
@@ -294,7 +310,7 @@ CN 专发的 `X-Client-*` 三头、小程序口径撤头、global UA 品牌段�
   这三个入口在本地是 Python 面板侧，Go 侧没有对应路由。
 - 两个未取提交都已在上面写明；本批没有其他增量。
 
-### 已评估：misakano `d40d4b8..be99749d`
+### 已评估：misakano `d40d4b8..c4052548`
 
 扫描边界之后参考仓又推了两批（2026-11-20）：
 
@@ -309,6 +325,19 @@ CN 专发的 `X-Client-*` 三头、小程序口径撤头、global UA 品牌段�
   语音入口，没有可接的落点；`be99749d` 的 crossacct 探针结论「上游前缀缓存按
   账号隔离」与本地会话粘性一致，仅作参考。逐条见附录 G，来源号同时记在
   `deploy/workbuddy-panel-ref.txt` 第十七批。
+- **`be99749d..c4052548`（附录 H，5 个非 merge）**：取 2 项、3 项语音仍不取。
+  `d629a8ca` 把 11102/14401「模型 id 上游不存在」从 (账号,模型) 负缓存里拆出来，
+  归请求级 `ErrModelMissing`（不罚号、不轮转、末端 400 透传原文），11158
+  「账号类型无权限」仍走负缓存 + 轮转；`9ad206bd` 修 `/v1/responses` 回放的跨轮
+  拼接——同轮的助手正文与工具调用必须落在同一条 assistant 上，`final_answer` /
+  user / compaction 都是回合边界。三条音频提交（`026f9c06` / `d5ce7de4` /
+  `c4052548`）与附录 G 同源，仍等本地真的接语音端点。另有一处面板侧联动：
+  `wb2api._clear_cooling_online` / `modelrecovery` 的「在线清除 / 自动复查」判据
+  原来只认 `11102` 前缀，11158 独立前缀后会掉出范围，已收口成
+  `is_model_block_reason()`（`('11102','11158')` 前缀匹配，不误伤 6004）；
+  `wbforward.model_missing_body` 同时认 14401 的 `route config not found`
+  （旧版本上游会把它包成 503，同样改判 404）。
+  逐条见附录 H，已同步项登记在 `deploy/workbuddy-panel-ref.txt` 第十八批。
 
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）

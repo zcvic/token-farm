@@ -1,4 +1,4 @@
-"""低频复查 11102 模型误标；成功后同步运行中网关，真实 6004 等待上游重置。"""
+"""低频复查确定性模型拒绝负缓存；成功后同步运行中网关，真实 6004 等待上游重置。"""
 from __future__ import annotations
 
 import asyncio
@@ -72,7 +72,7 @@ async def run_once(now: float | None = None) -> dict:
                 if account.get('disabled') or account.get('manual_disabled') or account.get('cooling') or uid not in files:
                     continue
                 for block in account.get('rate_limited_models', []):
-                    if not str(block.get('reason', '')).startswith('11102'):
+                    if not wb2api.is_model_block_reason(block.get('reason')):
                         continue
                     model = block['model']
                     key = f"{group['id']}|{uid}|{model}"

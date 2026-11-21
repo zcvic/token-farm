@@ -951,6 +951,14 @@ Cline 的免费档有两处硬约束，都写在 `client.py` 里：`deepseek/` /
 - 免费额度用尽：上游回业务码 `4008`（`quota exceeded`），网关改判成
   `429 Too Many Requests` + `Retry-After: 60`，错误码 `quota_exceeded`。
   它**不是**风控：不冷却账号、不换号；4015 / 4019 才是风控（403）。
+  风控命中后只冷却命中的那个账号并**终止本次请求**，不再轮换整池——风控是设备 /
+  出口维度，换号只会拿到同一个答复，还会把每个号逐个推进 1800 秒冷却
+  （来源 `683a3385`）。
+- 模型通道：`llm_utils_chat` 的 `solo_work_remote` 与 `solo_agent_remote` 两组
+  模型集合不通用，`Doubao-Seed-Code` / `qwen3.8-flash` 只在 agent 组。网关按模型
+  选 `function`（`server/platforms/trae/catalog.py` 的 `solo_function_for`），
+  选错时上游回的是 `4001 the param is invalid` 而不是「模型不存在」
+  （来源 `32961736` / `93d24a14`）。
 - 模型列表：`POST /api/ide/v1/model_list`（仅国内版；国际版 403，用本地目录）。
 
 ### 流结束判据（不要静默截断）
@@ -1414,7 +1422,7 @@ WorkBuddy 在网关里的形态与平台适配器不同：它没有自己的账�
    留给需要按调用方区分的适配器；WorkBuddy 反代时上游看到的是面板自己的出口 IP
    （与直连路径一致，不伪造 `X-Forwarded-For`）。
 2. **传输层只有一份**。`services/wbforward.py` 提供 `forward()` 与相关助手
-   （请求头、超时、SSE 逐字节透传、`11102 → 404` 改判、429 `Retry-After`、
+   （请求头、超时、SSE 逐字节透传、`11102` / `14401` → 404 改判、429 `Retry-After`、
    usage 提取、首字延迟）。网关直连与组合成员共用它——分头写必然漂移，而漂移
    只会表现在其中一条路径上。
 3. **记账只做一次**。鉴权（密钥 / IP / 版本 / 白名单 / 限流）在 `_authorize` 做，

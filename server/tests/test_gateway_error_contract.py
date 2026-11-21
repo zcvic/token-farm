@@ -111,7 +111,7 @@ class RetryAfterParseTest(unittest.TestCase):
 
 
 class ModelMissingRewriteTest(unittest.TestCase):
-    """`_model_missing_body`：11102 改判 404，其余 5xx 原样。"""
+    """`_model_missing_body`：11102 / 14401 改判 404，其余 5xx 原样。"""
 
     _TEXT = json.dumps({'error': {
         'code': 'no_healthy_account',
@@ -126,6 +126,20 @@ class ModelMissingRewriteTest(unittest.TestCase):
         self.assertEqual(body['error']['type'], 'invalid_request_error')
         self.assertIn('11102', body['error']['message'], '上游原文要保留，排障要看 requestId')
         self.assertIn('gateway_hint', body['error'], '上游给的可执行建议不能丢')
+
+    def test_14401_image_route_missing_also_becomes_404(self) -> None:
+        """14401「route config not found」是图像模型的同族答复（模型 id 不存在）。
+
+        它和 11102 一样换号无用；旧版本上游会把它包成 503，同样要改判成 404，
+        否则客户端会把「模型不存在」当成过载反复重试。
+        """
+        text = json.dumps({'error': {
+            'code': 'no_healthy_account',
+            'message': json.dumps({'code': 14401, 'msg': 'route config not found'}),
+        }}, ensure_ascii=False)
+        body = gateway._model_missing_body(json.loads(text), text)
+        self.assertIsNotNone(body)
+        self.assertEqual(body['error']['code'], 'model_not_found')
 
     def test_plain_5xx_untouched(self) -> None:
         self.assertIsNone(gateway._model_missing_body(

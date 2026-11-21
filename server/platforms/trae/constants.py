@@ -24,6 +24,15 @@ PATH_CHAT = '/api/ide/v1/llm_raw_chat'
 # 只有这条通道能跑。见 docs/multi-platform.md「模型通道」。
 PATH_AGENT_CHAT = '/api/agent/v3/llm_utils_chat'
 SOLO_FUNCTION = 'solo_work_lite'
+# 上游 `llm_utils_chat` 按 function 分组，两组的模型集合**不通用**：
+#   · solo_work_remote  18 个；
+#   · solo_agent_remote 20 个（多出 Doubao-Seed-Code / qwen3.8-flash）。
+# 把只在 agent 组的模型发给 solo_work_lite，上游不会回 4023「模型不存在」，
+# 而是回 4001「the param is invalid」，很容易被误判成 max_tokens / messages
+# 的问题。清单实测 2026-11-20：Seed-Code 在 solo_agent_lite / solo_agent_remote
+# 都能跑，qwen3.8-flash 只有 solo_agent_remote 能跑，所以统一用 remote。
+SOLO_AGENT_FUNCTION = 'solo_agent_remote'
+SOLO_AGENT_ONLY = frozenset({'Doubao-Seed-Code', 'qwen3.8-flash'})
 PATH_MODEL_LIST = '/api/ide/v1/model_list'
 PATH_SESSION_USAGE = '/api/v1/commercial/get_session_usage'
 # 「用量明细」：按会话分组的逐条扣费记录（客户端 UI 的「用量明细」就是它）。

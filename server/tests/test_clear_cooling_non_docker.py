@@ -1,7 +1,8 @@
 """issue #329：非 docker 部署下的「清除冷却」。
 
 两条修复路径各自的回归：
-  · 在线优先：11102 误标与面板强制冷却走上游 admin 接口，不停上游；
+  · 在线优先：确定性模型拒绝负缓存（11102 旧条目 / 11158 账号类型无权限）与
+    面板强制冷却走上游 admin 接口，不停上游；
   · WB2API_MODE=systemd：停启 / 重启走 systemctl，日志走 journalctl。
 """
 from __future__ import annotations
@@ -21,6 +22,8 @@ def _status(**account) -> dict:
 
 _BLOCK_11102 = {'model': 'deepseek-v4.1-flash', 'until': '2099-01-01T00:00:00Z',
                 'reason': '11102 model not available'}
+_BLOCK_11158 = {'model': 'gpt-6-luna', 'until': '2099-01-01T00:00:00Z',
+                'reason': '11158 model not allowed for account type'}
 _BLOCK_6004 = {'model': 'glm-5.3', 'until': '2099-01-01T00:00:00Z',
                'reason': '6004 model rate limit'}
 
@@ -45,6 +48,17 @@ class OnlineFirstTest(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertTrue(detail['online'])
         cm.assert_awaited_once_with('u1', 'deepseek-v4.1-flash')
+        ctl.assert_not_awaited()
+
+    def test_11158_block_cleared_online_without_restart(self) -> None:
+        """11158 是独立前缀：面板的在线清除必须一起认，否则只能停上游改文件。"""
+        (ok, msg, detail), cm, _en, ctl = self._run([
+            _status(cooling=False, rate_limited_models=[_BLOCK_11158]),
+            _status(cooling=False, rate_limited_models=[]),
+        ])
+        self.assertTrue(ok, msg)
+        self.assertTrue(detail['online'])
+        cm.assert_awaited_once_with('u1', 'gpt-6-luna')
         ctl.assert_not_awaited()
 
     def test_manual_freeze_released_online(self) -> None:

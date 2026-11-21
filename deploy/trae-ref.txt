@@ -42,4 +42,47 @@
 #     把 Qoder 接成另一种上游，与本仓 qoder 平台适配器是两套运行时，不合并。
 #   · 1535821 的 fork 维护同步脚本：本仓已有 deploy/sync-upstream.sh 与
 #     各 ref 文件，重复工具只增加维护面。
-3d2e23e28b9f90b8ba51b5c494b8531d0b3ac6ef
+
+# ---- 2026-11 第三批（基线 3d2e23e → e7eef187，6 个非 merge 提交）
+# 已同步（按本仓模块化风格重写，不是 cherry-pick）：
+#   · 683a3385 风控 4015/4019 命中即停轮转：旧实现在风控 403 上无条件
+#     continue，会走完整池并给每个号记 note_error()；4019 映射 BREAKER_RISK
+#     （1800s），一次请求就能把池子冷却 30 分钟。风控是设备 / 出口维度，
+#     换号只会拿到同一个答复。本地落点：
+#       - adapter.py 新增 _is_risk_control / _is_quota_terminal 与
+#         RISK_COOLDOWN_SECONDS=1800；轮转循环命中风控即只冷却命中号并停
+#         （不再 continue 全池），非风控 401/403（token 刷新、会话失效）照旧轮转。
+#       - chat.py 新增 RISK_CODES={4015,4019} / is_risk_error / error_from_event，
+#         事件级 403 risk_control 走同一判定。
+#       - client.py 的 _http_error 风控改判。
+#     判定收紧为结构化口径：只认 code/Code 字段、关键词、`[4015]` 方括号形态，
+#     **不做裸子串匹配**——错误体带 requestId / 时间戳，裸匹配 "4015" 会把正常
+#     响应误判成风控，代价是停整池 + 冷却 30 分钟。测试：
+#     test_platform_trae_quota_error.py（403 风控断言 + 裸子串不误判）。
+#   · 32961736 / 93d24a14 SOLO 按模型分组选 function：上游 llm_utils_chat 的
+#     solo_work_remote 与 solo_agent_remote 两组模型集合**不通用**，
+#     Doubao-Seed-Code 与 qwen3.8-flash 只在 agent 组。旧实现统一发
+#     solo_work_lite，这两个模型固定被上游拒 4001「the param is invalid」
+#     （很容易误判成 max_tokens / messages 问题）。本地落点：
+#       - constants.py 新增 SOLO_AGENT_FUNCTION='solo_agent_remote' 与
+#         SOLO_AGENT_ONLY={Doubao-Seed-Code, qwen3.8-flash}。
+#       - catalog.py 新增 resolve（按 id 或显示名找条目，大小写不敏感、忽略
+#         `-solo` 后缀）/ upstream_key / solo_function_for；适配器的 _channel /
+#         _model_realm 也改走 catalog.resolve，显示名与 `-solo` 别名解析到同一
+#         分组。client.build_solo_body 用 catalog.upstream_key + solo_function_for。
+#       测试：test_platform_trae_catalog.py 的 SoloFunctionTest、
+#       test_platform_trae_client.py（分组 + 别名解析）、
+#       test_platform_trae_adapter.py（AliasRoutingTest）。
+#   · e7eef187 上游额度用尽（4008）是终态：命中后不冷却、不换号，直接把错误
+#     交回客户端。本地落点：adapter.py 的 _is_quota_terminal + 轮转循环里在
+#     解绑 / 冷却之前直接 raise（顺序很关键：先 raise 才能保证 4008 不被
+#     cooldown_429 顺手冻结）。测试 test_platform_trae_adapter.py 的
+#     ChatRotationStopTest（风控 / 额度各一条 + 401 仍换号的对照组）。
+#   · b2243de2 显式风控 code 在任何重试之前判定：与 683a3385 同源，本地已由
+#     「_http_error 先判风控再判轮转」+ is_risk_error 的结构化判定覆盖。
+#   · a6b712da 管理侧风控处理与响应关闭的测试：语义已被上面几个本地用例
+#     （风控 403 / 裸子串不误判 / 额度终态 / 别名路由）覆盖，不另立一份。
+# 有意不跟：
+#   · 09de3039 / a8341425 两个 merge 提交（子提交已逐条判定，单独看无增量）。
+#   · e7eef187 里的版本号与 CHANGELOG 部分（发布提交内容）。
+e7eef187800e45ac0e9a32bb18d7bd6e7fbaa4f9

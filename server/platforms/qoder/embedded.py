@@ -256,7 +256,11 @@ def _boot() -> Runtime:
     proxy.USAGE_LOG = str(usage / 'usage.jsonl')
     proxy.USAGE_SUMMARY = str(usage / 'usage-summary.json')
     proxy.API_KEY = api_key
-    proxy.SYSTEM_PROMPT = proxy.DEFAULT_SYSTEM_PROMPT
+    # 1.9.13 起上游默认 SYSTEM_PROMPT = None：保留 baseprompt 模板里的官方
+    # system 提示词，是否省略由 accounts/settings.json 的
+    # omit_default_system_prompt 决定（默认关闭）。内置网关跟上游默认走，
+    # 不改默认行为。
+    proxy.SYSTEM_PROMPT = None
 
     try:
         pool = qoder_accounts.AccountPool(str(accounts), log=proxy.log)

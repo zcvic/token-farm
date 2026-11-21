@@ -122,8 +122,9 @@ func (h *Handler) adminAccountRevive(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// adminModelAvailable 接受管理端的成功探测，只解除该账号该模型的 11102 负缓存。
-// 小请求成功不能证明真实 6004 token 配额已恢复，因此不清除 6004 或账号级状态。
+// adminModelAvailable 接受管理端的成功探测，只解除该账号该模型的确定性模型拒绝
+// 负缓存（11102 / 11158）。小请求成功不能证明真实 6004 token 配额已恢复，因此
+// 不清除 6004 或账号级状态。
 func (h *Handler) adminModelAvailable(w http.ResponseWriter, r *http.Request) {
 	uid, ok := adminUID(w, r)
 	if !ok {

@@ -657,9 +657,22 @@ async def _admin_account_call(uid: str, action: str, *, reason: str = '',
     return True, '', 'ok', payload if isinstance(payload, dict) else {}
 
 
+# 「确定性模型拒绝」负缓存的 reason 前缀（上游 `upstream.ModelBlockReason` /
+# `ModelForbiddenReason`）：11102 是旧版本写的（现已归请求级、不再新增），
+# 11158「该账号类型无权限」是现役来源。14401 也归请求级，不写负缓存。
+# 只认前缀、不做子串匹配：6004 模型限流与它共用 modelCooldowns，不能误清。
+MODEL_BLOCK_REASON_PREFIXES = ('11102', '11158')
+
+
+def is_model_block_reason(reason: object) -> bool:
+    """该条模型冷却是不是「确定性模型拒绝」负缓存（可在线清除）。"""
+    text = str(reason or '')
+    return any(text.startswith(prefix) for prefix in MODEL_BLOCK_REASON_PREFIXES)
+
+
 async def clear_model_block(uid: str, model: str, *, base_url: str | None = None,
                             api_key: str | None = None) -> tuple[bool, str, str]:
-    """成功探测同步到运行中的网关；只清 11102，不清真实模型配额或账号状态。
+    """成功探测同步到运行中的网关；只清确定性模型拒绝，不清真实模型配额或账号状态。
 
     第三项是 `_admin_account_call` 的结果码：`no_route` 表示上游没注册管理接口
     （`admin.enabled` 默认 false）。那不是同步失败，只是没有这条同步通道 ——
@@ -1134,8 +1147,9 @@ async def _clear_cooling_online(uid: str, account: dict,
 
     在线接口只覆盖两类状态，正好是最常见、也最需要急救的两类：
 
-      · 模型级限流里原因为 `11102` 的误标 → `models/{m}/available`
-        （#328：兜底路径的 11102 被当成账号缺模型，整池被 6h 冷却打穿）；
+      · 模型级限流里原因为 `11102` / `11158` 的确定性模型拒绝 → `models/{m}/available`
+        （#328：兜底路径的 11102 被当成账号缺模型，整池被负缓存打穿；11158 是
+        账号类型无权限，换到有权限的号后同样需要在线解除）；
       · 本模块写入的强制冷却（manual_disabled + 冷却标记）→ `enable`。
 
     账号级冷却 / 熔断 / 降权、真实 6004 等其它模型限流没有在线接口，返回
@@ -1148,7 +1162,7 @@ async def _clear_cooling_online(uid: str, account: dict,
     models = account.get('rate_limited_models') or []
     names: list[str] = []
     for item in models:
-        if not isinstance(item, dict) or not str(item.get('reason') or '').startswith('11102'):
+        if not isinstance(item, dict) or not is_model_block_reason(item.get('reason')):
             return None
         name = str(item.get('model') or '').strip()
         if not name:

@@ -31,7 +31,8 @@ func TestGatewayHintKindMap(t *testing.T) {
 		{"11140 account fault", ErrAccountFault, `{"code":11140,"msg":"request illegal"}`, "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"},
 		{"12153 session dead", ErrSessionDead, `{"code":12153,"msg":"Offline user session not found"}`, "account session expired at upstream; the account is disabled until re-login"},
 		{"402 hard credit", ErrHardCredit, `{"code":1,"msg":"余额不足"}`, "account credits exhausted at upstream; CN accounts recover via the next daily check-in, global accounts need a top-up"},
-		{"11102 model blocked", ErrModelBlocked, `{"code":11102,"msg":"model [glm-4.6v] service info not found"}`, "upstream has no such model on this backend; switch model or retry on another account"},
+		{"11102 model missing", ErrModelMissing, `{"code":11102,"msg":"model [glm-4.6v] service info not found"}`, "model id does not exist upstream (ids are case-sensitive); copy the id from /v1/models — switching accounts will not help"},
+		{"11158 model blocked", ErrModelBlocked, `{"code":11158,"msg":"model is not allowed for user type"}`, "this model is not allowed for the account type (11158); retry on an account with permission or switch model"},
 		// 11103「该模型的后端没启用」：marker 先于 Kind 表，ErrClient 也能拿到
 		// 「换号无用」的指向（真机形态见 server 的 backend_unsupported_test）。
 		{"11103 backend unsupported", ErrClient, `{"code":11103,"msg":"Backend [hunyuan-stream] is not supported"}`, "this model's backend is not enabled upstream (11103); switching accounts will not help, switch model"},

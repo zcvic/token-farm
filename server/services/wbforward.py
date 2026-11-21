@@ -80,8 +80,13 @@ def model_missing_body(payload: object, text: str) -> dict | None:
 
     重试无意义（换多少账号都没有这个模型），而 5xx 会让客户端反复重试、也把
     排障方向带到「号池挂了」。只在文案确实来自 11102 时改判，其余原样透传。
+
+    新版本上游把 11102/14401 归请求级、直接回 400 `model_unavailable` 并透传
+    原文，不再走「整池被挡 → 503 no_healthy_account」这条路；本函数因此主要
+    服务于旧版本上游，保留是为了滚动升级期间两种口径都能落到 404。
     """
-    if not text or ('11102' not in text and 'service info not found' not in text):
+    if not text or ('11102' not in text and 'service info not found' not in text
+                    and 'route config not found' not in text):
         return None
     err = payload.get('error') if isinstance(payload, dict) else None
     message = str(err.get('message') or '') if isinstance(err, dict) else ''

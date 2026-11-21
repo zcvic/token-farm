@@ -48,6 +48,27 @@ class QuotaDetectTest(unittest.TestCase):
                      {}, None, ''):
             self.assertFalse(chatmod.is_quota_error(data), data)
 
+    def test_risk_control_detected(self) -> None:
+        for data in ({'code': 4015, 'message': 'risk control'},
+                     {'code': 4019, 'message': 'risk_control'},
+                     {'Code': '4019'},
+                     {'message': 'unusual activity detected'},
+                     # 只写进 message 的方括号业务码（上游真实形态）。
+                     {'message': '[4015] risk control triggered'}):
+            self.assertTrue(chatmod.is_risk_error(data), data)
+        for data in ({'code': 4008, 'message': 'quota exceeded'},
+                     {'code': 4023, 'message': 'model is unknown'},
+                     {}, None, ''):
+            self.assertFalse(chatmod.is_risk_error(data), data)
+
+    def test_risk_code_in_unrelated_text_is_not_risk(self) -> None:
+        # 裸子串匹配会把 requestId / 时间戳里的 4015 判成风控，代价是停止整池
+        # 轮换 + 冷却账号 30 分钟，所以只认结构化 code 与 `[4015]` 形态。
+        for data in ({'message': 'request 4015abc failed'},
+                     {'message': 'ts=1740150000 timeout'},
+                     {'requestId': '4019', 'message': 'boom'}):
+            self.assertFalse(chatmod.is_risk_error(data), data)
+
     def test_error_from_event_carries_429(self) -> None:
         err = chatmod.error_from_event({'code': 4008,
                                         'message': 'quota exceeded'})
@@ -57,11 +78,14 @@ class QuotaDetectTest(unittest.TestCase):
         self.assertIn('4008', err.message)
         self.assertIn('quota exceeded', err.message.lower())
 
-    def test_other_errors_keep_502(self) -> None:
+    def test_risk_control_becomes_403_terminal(self) -> None:
+        # 风控是设备 / 出口维度：改判成 403 + risk_control，适配器据此停止整池轮换
+        # （同上游 1.7.1 的 ProviderRisk 语义）。
         err = chatmod.error_from_event({'code': 4015, 'message': 'risk control'})
-        self.assertEqual(err.status, 502)
-        self.assertEqual(err.code, 'upstream_error')
+        self.assertEqual(err.status, 403)
+        self.assertEqual(err.code, 'risk_control')
         self.assertIsNone(err.retry_after)
+        self.assertIn('4015', err.message)
 
 
 class HttpErrorTest(unittest.TestCase):
@@ -80,11 +104,18 @@ class HttpErrorTest(unittest.TestCase):
         self.assertEqual(err.retry_after, 60)
 
     def test_other_http_errors_unchanged(self) -> None:
+        # 风控 4015 改判成 403 + risk_control（终态，不换号）；与上游 1.7.1 同口径。
         err = client._http_error(403, json.dumps(
             {'code': 4015, 'message': 'risk control'}))
         self.assertEqual(err.status, 403)
-        self.assertEqual(err.code, '4015')
+        self.assertEqual(err.code, 'risk_control')
         self.assertIsNone(err.retry_after)
+
+    def test_unrelated_http_error_keeps_original(self) -> None:
+        err = client._http_error(403, json.dumps(
+            {'code': 4023, 'message': 'model is unknown'}))
+        self.assertEqual(err.status, 403)
+        self.assertEqual(err.code, '4023')
 
 
 class AggregateQuotaTest(unittest.TestCase):
@@ -103,8 +134,15 @@ class AggregateQuotaTest(unittest.TestCase):
         self.assertEqual(ctx.exception.retry_after, 60)
 
     def test_non_quota_error_stays_upstream_error(self) -> None:
+        # 4015 风控是终态错误：403 + risk_control，而不是「未知上游错误」502。
         with self.assertRaises(PlatformError) as ctx:
             self._aggregate({'code': 4015, 'message': 'risk control'})
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertEqual(ctx.exception.code, 'risk_control')
+
+    def test_unrelated_error_stays_upstream_error(self) -> None:
+        with self.assertRaises(PlatformError) as ctx:
+            self._aggregate({'code': 4023, 'message': 'model is unknown'})
         self.assertEqual(ctx.exception.status, 502)
         self.assertEqual(ctx.exception.code, 'upstream_error')
 

@@ -14,7 +14,7 @@ import (
 // 现场：/v2 撞 11128（渠道校验）后 markChannelBlocked 记 10 分钟，之后 chatPaths 把
 // /console 排到首位。这时 /console 报 11102 落在 i == 0，旧判据
 // `if i > 0 && kind == ErrModelBlocked` 不成立，11102 被当成「该账号缺这个模型」，
-// handler 写 6 小时负缓存；十几个号轮一圈就是整池 503 no_healthy_account。
+// handler 写 (账号,模型) 负缓存；十几个号轮一圈就是整池 503 no_healthy_account。
 //
 // 修复后的判据按路径走：/console 自己报 11102 一律降级，且还有候选时换回 /v2 继续试。
 // 所以这条用例在修复前必须失败（err 非空且 Kind == ErrModelBlocked、只走了一条路径），

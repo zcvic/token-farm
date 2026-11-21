@@ -125,6 +125,25 @@ def _is_model_unknown(exc: PlatformError) -> bool:
     return '4023' in text or 'model is unknown' in text.lower()
 
 
+# 风控命中（4015/4019）是设备 / 出口维度，不是账号故障。只冻结命中的那个号，
+# 并终止本次请求：继续换号会让下一个号得到同样的答案，还会把整池逐个冷却。
+RISK_COOLDOWN_SECONDS = 30 * 60
+
+
+def _is_risk_control(exc: PlatformError) -> bool:
+    """是不是上游显式风控（4015/4019）—— 命中后必须停止整池轮换。"""
+    if str(exc.code or '').strip() in ('risk_control', *chatmod.RISK_CODES):
+        return True
+    return chatmod.is_risk_error({'code': exc.code, 'message': exc.message})
+
+
+def _is_quota_terminal(exc: PlatformError) -> bool:
+    """4008 额度用尽是终止错误：不冷却、不换号（额度恢复后可立即继续用）。"""
+    if str(exc.code or '').strip() == 'quota_exceeded':
+        return True
+    return chatmod.is_quota_error({'code': exc.code, 'message': exc.message})
+
+
 def _credit_expiries(ent_usage: object, *, now: float | None = None) -> list[dict]:
     """把权益包拆成 `[{amount, expire_at, label}]`，按到期时间升序。
 
@@ -943,7 +962,10 @@ class TraeAdapter(PlatformAdapter):
 
     @staticmethod
     def _model_realm(model: str) -> str | None:
-        found = catalog.find(model)
+        # 用 `resolve` 而不是 `find`：客户端常用显示名（`Seed-Code`），只认 id
+        # 时判不出版本，`_candidates` 就会跳过「按模型版本筛账号」这一步，把
+        # 只在国内版有的模型派给国际版账号（必然 4023）。
+        found = catalog.resolve(model)
         return normalize_realm(found['realm']) if found else None
 
     def realm_of_model(self, model: str) -> str | None:
@@ -982,7 +1004,10 @@ class TraeAdapter(PlatformAdapter):
         hit = self._routes.get(model)
         if hit:
             return hit
-        found = catalog.find(model)
+        # `resolve` 同时认 id / 显示名 / `-solo` 兼容名：客户端常用显示名
+        # （`Seed-Code`），只按 id 查会先误走 chat 通道，再靠一次 4023 才切到
+        # solo——多打一次失败请求，还会把「模型未知」写进日志误导排查。
+        found = catalog.resolve(model)
         if found and found.get('channel'):
             return str(found['channel'])
         target = model.strip().lower()
@@ -1161,6 +1186,21 @@ class TraeAdapter(PlatformAdapter):
                     # 失败换号 / 换通道前先把名额还回去，否则这个账号会永久少一个槽。
                     release()
                     last_error = exc
+                    # 风控命中（4015/4019）是设备 / 出口维度，不是账号故障：只冻结命中的
+                    # 这个号并终止本次请求。继续换号只会让下一个号得到同样的答案，还会
+                    # 把整池逐个冷却（上游 4019 → 1800s），一次请求就能让池子半小时不可用。
+                    if _is_risk_control(exc):
+                        if uid:
+                            try:
+                                store.set_cooling(uid, time.time() + RISK_COOLDOWN_SECONDS,
+                                                  f'{channel} risk control')
+                            except (FileNotFoundError, ValueError, OSError):
+                                pass
+                        raise
+                    # 4008 额度用尽：额度会随套餐重置恢复，账号本身没坏 —— 不冷却、
+                    # 不换号，直接把 429 交给客户端按限流退避。
+                    if _is_quota_terminal(exc):
+                        raise
                     # 只有「凭据不可用」才换号；429/5xx 换号往往只是把限流扩散到更多账号
                     if exc.status in (401, 403):
                         break

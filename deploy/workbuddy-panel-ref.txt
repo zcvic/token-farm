@@ -717,3 +717,71 @@ abed839572c786cecead9c422e1114639e3244f8
 #        · be99749d crossacct 探针（前缀缓存按账号隔离）
 #      结论与 F.3 一致：等本地真的接语音端点时，再按「面板入口 + 真机抓包」
 #      一起做。详见 docs/upstream-sync-misakano.md 附录 G。
+
+# ---- 2026-11 第十八批：misakano be99749d → c4052548（5 个非 merge 提交）----
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      本批取 2 项（第 1 项在本地补了 14401 与 11158 两个分支），3 项语音仍不取。
+#      已取（按本仓结构重写）：
+#        · d629a8ca 11102 模型 id 不存在归请求级（issue #280）：
+#          upstream/internal/upstream/client.go 新增 ErrModelMissing（11102 /
+#          14401），与 ErrModelBlocked（11158「该账号类型无权限」）彻底分开：
+#          前者请求级、不罚号、不轮转，末端透传 400 + 上游原文；后者保留
+#          (账号,模型) 负缓存 + 轮转（换到有权限的号真能成功）。
+#          判定收口成共用的 isModelCode（code 精确等于 + 窄短语命中，只看
+#          400/404），IsModelMissing 先判 11102/14401 再排除 11158。
+#          新增 modelMissingCodes = {11102, 14401}——14401「route config
+#          not found」是图像模型同族答复，换号与重试同样不可能成功。
+#          ModelBlockReasonFor 给 11158 独立前缀 ModelForbiddenReason，
+#          /status 台账与日志才分得清两种拒绝；ModelBlockReason 值仍留
+#          "11102" 前缀，历史 state.json 里的负缓存条目继续可识别。
+#          pool.BlockModelClear / ClearModelBlocks 同时认 "11102" 与 "11158"
+#          前缀。handler.applyErrorPolicy 的 ErrModelBlocked 分支改用
+#          ModelBlockReasonFor；chatCompletions 的请求级 fail-fast 分支加入
+#          ErrModelMissing（与 11101/11133/11151 同一处置），console-first
+#          回退判据同时认 ErrModelBlocked 与 ErrModelMissing。
+#          hint.go 给 11158 单独一条文案（「换到有权限的号仍可成功」），与
+#          11102 的「换号无用」区分开——共用一句会给出反向建议。
+#          pool 侧只改注释：负缓存 TTL 早已是 2m 起 / 封顶 10m，旧注释还写着
+#          6h/24h，与 entry.go 的常量自相矛盾，一并订正。
+#          测试：client_test.go（TestClassify 补 14401 行、TestIsModelMissing /
+#          TestIsModelBlocked 拆开、新增 TestModelBlockReasonFor）、hint_test.go、
+#          fallback_model_missing_test.go，新增
+#          upstream/internal/server/model_missing_test.go（11102 请求级不罚号
+#          / 11158 仍轮转两条端到端）。
+#        · 9ad206bd 同轮助手文字与工具调用合并回放（PR #281）：
+#          server/routers/responses.py 的 flush_calls 原来按「复用最后一条无
+#          tool_calls 的 assistant」兜底，会把**上一轮**的 final_answer 正文
+#          认领给下一轮的 function_call（跨轮拼接）。改为显式暂存本轮正文
+#          tool_turn_text：只有 assistant 消息、有正文、无内联 tool_calls 且
+#          phase != final_answer 才登记；user / system / tool 结果 / compaction
+#          都是回合边界，就地清空。回放成两条 assistant 时 Kimi 系会在进度行
+#          之后停住（模型看到「上一轮已经说完话」，把工具结果当新一轮输入）。
+#          测试：server/tests/test_responses_replay.py 新增 SameTurnReplayTest
+#          （进度行合并并行调用 + 两段 reasoning 按序拼接 / final_answer 边界 /
+#          compaction 边界 / user 边界）。
+#      未取：
+#        · 026f9c06 ASR 请求体落盘前钳到 3MB+64KiB、清理 multipart 临时文件：
+#          本地没有 /v1/audio/transcriptions，无落点。
+#        · d5ce7de4 TTS 缺 done 判截断 / ASR 认 response_format / 音频台账带
+#          账号：同上，整条 audio 数据面本地不存在。
+#        · c4052548 TTS 截断后换号重试的回归位：d5ce7de4 的测试补充，同样没有
+#          可接的路由。三条都归在附录 G.3 的「等本地真的接语音端点再做」。
+#      本批只记**已同步**的两个提交（见文件头第 10 行）；三条语音提交只在上面
+#      逐条写明不取原因，不写哈希。
+#      本地联动（不是上游提交，但分开 11102 / 11158 后必须跟着改，否则新语义只
+#      在 Go 侧生效、面板侧还按旧口径）：
+#        · server/services/wb2api.py 新增 is_model_block_reason /
+#          MODEL_BLOCK_REASON_PREFIXES=('11102','11158')，_clear_cooling_online
+#          与 modelrecovery 的复查判据都改用它——只认前缀、不做子串匹配，
+#          6004 限流与它共用 modelCooldowns，不能误清。不跟着改的话，11158
+#          新写入的负缓存只能靠「停上游改 state.json」清除。
+#        · server/services/tencent.py 的 classify_probe_result：11102 / 14401 /
+#          11158 统一归 no_model（该账号用不了这个模型，不是账号故障）。
+#        · server/services/wbforward.py 的 model_missing_body 认 14401 的
+#          「route config not found」短语（旧版本上游会把它包成 503）。
+#        · 测试：test_clear_cooling_non_docker.py 加 11158 在线清除用例；
+#          test_model_recovery_scheduler.py 加 11158 复查用例；
+#          test_probe_models.py 加三码分类用例；test_gateway_error_contract.py
+#          加 14401 改判用例。
+9ad206bdc50971e0a082d4ea1273dca05e12591c
+d629a8ca9d0e7d48700d9fd7e462dfdd2cc268ff

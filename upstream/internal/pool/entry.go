@@ -454,19 +454,21 @@ type modelCostEntry struct {
 // 在 2f4c77b 加上持久化后未同步更新，与上方 stateModelCooldown 的「落盘/恢复往返无损」自相矛盾。
 // 承载两种「该模型在此账号上不可用」语义：
 //   - 6004 模型级限流：Until 对齐上游重置墙钟；ResetAt 记录权威恢复时刻。
-//   - 11102 该后端无此模型：Until 为指数退避 TTL（6h 起、封顶 24h）；Hits 记录
-//     累计命中次数驱动退避（6004 无 hits 概念，Hits 恒 0）。
+//   - 11158 账号类型无权使用该模型：Until 为指数退避 TTL（2m 起、封顶 10m）；
+//     Hits 记录累计命中次数驱动退避（6004 无 hits 概念，Hits 恒 0）。
+//     11102/14401「模型 id 上游不存在」不走这里（请求级，不写负缓存）。
 type modelCooldown struct {
-	// Until 该模型的冷却截止（6004：now+min(resetAt-now, soft_rate_max)；11102：now+退避 TTL）。
+	// Until 该模型的冷却截止（6004：now+min(resetAt-now, soft_rate_max)；11158：now+退避 TTL）。
 	Until time.Time
 	// ResetAt 上游「将在 … 重置」的原始墙钟（未经 soft_rate_max 截断）。
 	// 与 Until 的区别同旧 softRateReset：Until 可能截断，ResetAt 是上游权威恢复时刻。
-	// 11102 无重置文案，ResetAt 恒零值。
+	// 11158 无重置文案，ResetAt 恒零值。
 	ResetAt time.Time
 	// Reason 触发原因（透出运维可读文案，同 Status.Reason）。
 	Reason string
-	// Hits 11102 负缓存的累计命中次数（驱动指数退避）。运行态不落盘（同 modelCost 口径：
-	// 重启后从 6h 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
+	// Hits 确定性模型拒绝负缓存的累计命中次数（驱动指数退避）。运行态不落盘（同
+	// modelCost 口径：重启后从 2m 基数重新学习）；6004 条目 Hits 恒 0。持久化来回
+	// 不会写入该字段。
 	Hits int
 }
 
@@ -507,13 +509,14 @@ const (
 // 避免测试/裸用池时退避无上限。
 const defaultSoftRateMax = 2 * time.Hour
 
-// 11102「该后端无此模型」负缓存的退避参数（吸收 model_blocks.py 语义，复用 modelCooldowns
-// 机制承载）。首次命中冷却 2m，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
-// 封顶 10m；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
+// 确定性模型拒绝（11158「该账号类型无权使用该模型」）负缓存的退避参数（吸收
+// model_blocks.py 语义，复用 modelCooldowns 机制承载）。首次命中冷却 2m，半开到期
+// 放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），封顶 10m；该模型请求成功
+// 即清。6004 限流不参与本退避（各自独立语义）。
 //
-// 2026-10-28 从 6h/24h 缩短到 2m/10m：原参数把「一次偶发 11102」放大成整池锁死——
+// 2026-10-28 从 6h/24h 缩短到 2m/10m：原参数把「一次偶发拒绝」放大成整池锁死——
 // 见 ithtelab/workbuddy-manager#308 作者的复现（同样波次只让单账号停 2 分钟即自愈，
-// 而 6h 基数会把 14 个账号逐个锁死一整天）。缩短的代价只是「真无此模型」时多试几次，
+// 而 6h 基数会把 14 个账号逐个锁死一整天）。缩短的代价只是「真无权限」时多试几次，
 // 收益是全池自愈速度从小时级回到分钟级。
 const (
 	modelBlockBaseTTL = 2 * time.Minute

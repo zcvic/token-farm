@@ -164,5 +164,79 @@ class CompactionReplayTest(unittest.TestCase):
         self.assertGreater(len(body), 30_000)
 
 
+class SameTurnReplayTest(unittest.TestCase):
+    """同轮的助手文字与工具调用必须落在**同一条** assistant 消息上。
+
+    Responses 把一轮拆成 reasoning / message / function_call 三个 item，Chat
+    只有一条 assistant。回放成两条 assistant 时，Kimi 系会在进度行之后停住
+    （模型看到「上一轮已经说完话」，把工具结果当成新一轮输入）。
+    """
+
+    def test_progress_text_merges_with_parallel_calls(self) -> None:
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'role': 'user', 'content': 'fix tests'},
+            {'type': 'reasoning', 'summary': [{'type': 'summary_text', 'text': 'inspect'}]},
+            {'type': 'message', 'role': 'assistant', 'phase': 'commentary',
+             'content': [{'type': 'output_text', 'text': 'running tests'}]},
+            {'type': 'reasoning', 'summary': [{'type': 'summary_text', 'text': 'run both checks'}]},
+            {'type': 'function_call', 'call_id': 'c1', 'name': 'check', 'arguments': '{}'},
+            {'type': 'function_call', 'call_id': 'c2', 'name': 'check', 'arguments': '{}'},
+            {'type': 'function_call_output', 'call_id': 'c1', 'output': 'failed'},
+            {'type': 'function_call_output', 'call_id': 'c2', 'output': 'ok'},
+            {'type': 'message', 'role': 'assistant', 'content': 'done'},
+        ]})
+        msgs = out['messages']
+        self.assertEqual(_roles(out), ['user', 'assistant', 'tool', 'tool', 'assistant'])
+        merged = msgs[1]
+        self.assertEqual(merged['content'], 'running tests')
+        # 两条 reasoning item 按序拼接：进度前的「inspect」与调用前的「run both checks」
+        # 都属于这一轮决策，不能只留最后一段。
+        self.assertEqual(merged['reasoning_content'], 'inspect\nrun both checks')
+        self.assertEqual([c['id'] for c in merged['tool_calls']], ['c1', 'c2'])
+        self.assertEqual([m['tool_call_id'] for m in msgs[2:4]], ['c1', 'c2'])
+        self.assertEqual(msgs[4]['content'], 'done')
+
+    def test_final_answer_is_a_turn_boundary(self) -> None:
+        """`phase=final_answer` 的正文是上一轮的收尾，不能被下一轮调用吞掉。
+
+        吞掉的后果：用户看到的那句回答在回放历史里挂上了后续工具调用，
+        下一轮模型以为「我还没说完」——表现是重复输出同一段结论。
+        """
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'type': 'message', 'role': 'assistant', 'phase': 'final_answer',
+             'content': 'done'},
+            {'type': 'function_call', 'call_id': 'c1', 'name': 'check', 'arguments': '{}'},
+        ]})
+        msgs = out['messages']
+        self.assertEqual(len(msgs), 2)
+        self.assertNotIn('tool_calls', msgs[0])
+        self.assertEqual(msgs[0]['content'], 'done')
+        self.assertEqual(msgs[1]['tool_calls'][0]['id'], 'c1')
+
+    def test_compaction_is_a_turn_boundary(self) -> None:
+        """压缩项是上下文交接点，跨过它的文字与调用不属于同一轮。"""
+        blob = base64.b64encode(json.dumps(
+            {'v': 1, 'summary': 'earlier work'}).encode()).decode()
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'role': 'assistant', 'content': 'done'},
+            {'type': 'compaction', 'encrypted_content': blob},
+            {'type': 'function_call', 'call_id': 'c1', 'name': 'check', 'arguments': '{}'},
+        ]})
+        asst = [m for m in out['messages'] if m['role'] == 'assistant']
+        self.assertEqual(len(asst), 2, '压缩点前后必须各自成一条 assistant')
+        self.assertNotIn('tool_calls', asst[0])
+        self.assertEqual(asst[1]['tool_calls'][0]['id'], 'c1')
+
+    def test_user_turn_does_not_merge(self) -> None:
+        """user 边界同样要截断：把上一轮的正文合并到下一轮调用上会串轮。"""
+        out = R.to_chat_request({'model': 'm', 'input': [
+            {'role': 'assistant', 'content': 'ok'},
+            {'role': 'user', 'content': 'next'},
+            {'type': 'function_call', 'call_id': 'c1', 'name': 'check', 'arguments': '{}'},
+        ]})
+        self.assertEqual(_roles(out),
+                         ['assistant', 'user', 'assistant'])
+
+
 if __name__ == '__main__':
     unittest.main()

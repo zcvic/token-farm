@@ -177,10 +177,12 @@ class TraeRealmMappingTest(unittest.TestCase):
         self.assertEqual(_trae_mod._db_realm(None), 'cn')
 
     def test_realm_of_model_uses_catalog(self) -> None:
-        with mock.patch.object(_trae_mod.catalog, 'find',
+        # 适配器按 `catalog.resolve` 取版本：它比 `find` 多认显示名与 `-solo`
+        # 别名，`find` 只认 id。这里 patch 的必须是与实现同一个入口。
+        with mock.patch.object(_trae_mod.catalog, 'resolve',
                                return_value={'realm': 'intl'}):
             self.assertEqual(_trae_mod.adapter.realm_of_model('glm-5.3'), 'global')
-        with mock.patch.object(_trae_mod.catalog, 'find', return_value=None):
+        with mock.patch.object(_trae_mod.catalog, 'resolve', return_value=None):
             self.assertIsNone(_trae_mod.adapter.realm_of_model('unknown'))
 
 

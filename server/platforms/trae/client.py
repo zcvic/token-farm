@@ -27,7 +27,7 @@ import httpx
 from ... import config
 from ..base import PlatformError
 from . import chat as chatmod
-from . import desktop, deviceproof, enterprise, fingerprint
+from . import catalog, desktop, deviceproof, enterprise, fingerprint
 from .constants import (
     APP_ID,
     CLIENT_ID,
@@ -52,7 +52,6 @@ from .constants import (
     PATH_USAGE_GROUP,
     PLUGIN_CHANNEL,
     REALMS,
-    SOLO_FUNCTION,
     USAGE_TYPE_CREDITS,
     normalize_realm,
     realm_hosts,
@@ -224,6 +223,11 @@ def _http_error(status: int, text: str) -> PlatformError:
     # 4008（免费额度用尽）在上游可能是 400/403，也可能藏在 body 里；统一改判
     # 成 429 + Retry-After，别让客户端把它当成鉴权/风控错误去换 token。
     if chatmod.is_quota_error({'code': code, 'message': message}):
+        return chatmod.error_from_event({'code': code, 'message': message},
+                                        payload=payload)
+    # 4015 / 4019 是设备 / 出口维度的风控：先改判成 403 + risk_control，适配器
+    # 才能停止整池轮换、只冷却命中账号（而不是当普通 401/403 继续换号）。
+    if chatmod.is_risk_error({'code': code, 'message': message}):
         return chatmod.error_from_event({'code': code, 'message': message},
                                         payload=payload)
     if status in (401, 403):
@@ -1278,7 +1282,7 @@ def build_solo_body(model: str, messages: object, body: dict,
                     max_tokens: int | None = None,
                     protocol_hint: bool | None = None,
                     reasoning_effort: bool | None = None) -> dict:
-    """构造 `llm_utils_chat` 请求体（`function=solo_work_lite`）。
+    """构造 `llm_utils_chat` 请求体（`solo_work_lite` / `solo_agent_remote`）。
 
     `config_name` 与 `model` 要同时给：上游按 `config_name` 找模型配置、
     按 `model` 计费，缺一个就是 4023 / 4001。
@@ -1289,9 +1293,12 @@ def build_solo_body(model: str, messages: object, body: dict,
     `max_tokens` / `max_completion_tokens` / `max_output_tokens` 时以客户端为准。
     三个开关传 `None` 时沿用 `TF_TRAE_*` 环境变量。
     """
-    model_name = str(model or '').strip()
-    if not model_name:
+    raw_model = str(model or '').strip()
+    if not raw_model:
         raise PlatformError('model 不能为空', status=400, code='invalid_model')
+    # 显示名 / `-solo` 兼容名 → 上游键；两组 SOLO function 不通用，必须按
+    # 解析后的键选 function（见 constants.SOLO_AGENT_ONLY）。
+    model_name = catalog.upstream_key(raw_model) or raw_model
     tools = normalize_tools(body.get('tools'))
     # SOLO 与 IDE 通道对工具历史的处理不同：这里必须保留原生 tool_calls /
     # tool 回执，否则多轮工具链会在第二轮断掉（见 `normalize_solo_messages`）。
@@ -1301,7 +1308,7 @@ def build_solo_body(model: str, messages: object, body: dict,
         messages_norm = _inject_tool_hint(messages_norm, tools)
     payload: dict[str, Any] = {
         'messages': messages_norm,
-        'function': SOLO_FUNCTION,
+        'function': catalog.solo_function_for(model_name),
         'stream': True,
         'config_name': model_name,
         'model': model_name,

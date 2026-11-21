@@ -40,6 +40,21 @@ class ModelRecoverySchedulerTests(unittest.IsolatedAsyncioTestCase):
             await recovery.run_once(5000)
             probe.assert_not_awaited()
 
+    async def test_forbidden_block_is_probed_like_missing(self):
+        """11158「账号类型无权限」与 11102 同属确定性拒绝，都在复查范围内。
+
+        它同样写进 modelCooldowns（独立 reason 前缀），换到有权限的号之后需要
+        把这条负缓存在线清掉，否则那个号会一直被跳过。
+        """
+        self.account['rate_limited_models'][0]['reason'] = (
+            '11158 model not allowed for account type')
+        with patch.object(recovery, '_probe', new=AsyncMock(
+                return_value={'status': 'ok', 'gateway_synced': True})) as probe:
+            await recovery.run_once(1000)
+            self.assertEqual((await recovery.run_once(1030))['recovered'], 1)
+            probe.assert_awaited_once_with(self.group, 'workbuddy-u1.json',
+                                           'deepseek-v4.1-flash')
+
     async def test_failed_probe_backs_off_and_persists(self):
         with patch.object(recovery, '_probe', new=AsyncMock(return_value={'status': 'no_model'})) as probe:
             await recovery.run_once(1000)

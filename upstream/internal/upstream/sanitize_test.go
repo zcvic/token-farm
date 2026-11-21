@@ -517,7 +517,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 // 上游拦的是**句式**而不是品牌名：system 首句写成
 // "You are an AI agent powered by <brand>." 或
 // "You are a coding agent powered by the <model> model." 都会 400 code=11-128，
-// 网关随后回退 /console 拿到 11102、把 (账号,模型) 打进 6 小时冷却 → 整池 503。
+// 网关随后回退 /console 拿到 11102、把 (账号,模型) 打进负缓存 → 整池 503。
 // 下面几条是 issue 里的真实抓包原文（冠词、大小写、句号照抄）。
 func TestDshSystemPromptRewritten(t *testing.T) {
 	cases := []string{

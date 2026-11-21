@@ -33,7 +33,8 @@ from typing import Any
 
 from ... import config
 from . import desktop
-from .constants import DEFAULT_REALM, normalize_realm
+from .constants import (DEFAULT_REALM, SOLO_AGENT_FUNCTION, SOLO_AGENT_ONLY,
+                        SOLO_FUNCTION, normalize_realm)
 
 logger = logging.getLogger('workbuddy.platforms.trae.catalog')
 
@@ -262,6 +263,45 @@ def find(model_id: str) -> dict | None:
             if model['id'].lower() == target:
                 return dict(model)
     return None
+
+
+def resolve(model_id: str, realm: str | None = None) -> dict | None:
+    """按 id 或显示名找目录条目（大小写不敏感，忽略 `-solo` 后缀）。
+
+    客户端有时用显示名（`Seed-Code` / `GLM-5.3`），上游只认目录里的 id
+    （`Doubao-Seed-Code` / `glm-5.3`）；SOLO 的 `-solo` 兼容名同理。解析放在
+    这里，适配器选通道与构造 SOLO 请求体共用同一份口径。
+    """
+    target = str(model_id or '').strip()
+    if target.lower().endswith('-solo'):
+        target = target[:-5]
+    if not target:
+        return None
+    want = normalize_realm(realm) if realm else None
+    low = target.lower()
+    for group in (imported(), bundled()):
+        for model in group:
+            if want and normalize_realm(model.get('realm')) != want:
+                continue
+            if (str(model.get('id') or '').strip().lower() == low
+                    or str(model.get('name') or '').strip().lower() == low):
+                return dict(model)
+    return None
+
+
+def upstream_key(model_id: str) -> str:
+    """客户端模型名 → 上游键（国内版限定；认不出时原样返回）。"""
+    target = str(model_id or '').strip()
+    if target.lower().endswith('-solo'):
+        target = target[:-5]
+    found = resolve(target, 'cn')
+    return str(found.get('id') or target) if found else target
+
+
+def solo_function_for(model_id: str) -> str:
+    """该模型走哪个 SOLO function（两组集合不通用，见 SOLO_AGENT_ONLY）。"""
+    key = upstream_key(model_id)
+    return SOLO_AGENT_FUNCTION if key in SOLO_AGENT_ONLY else SOLO_FUNCTION
 
 
 # ── 导入 / 导出 / 状态 ──────────────────────────────────────

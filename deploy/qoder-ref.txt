@@ -107,3 +107,40 @@
 #          副本里出现的每个 qoder_* 包内导入都必须在 MODULES 里）。
 #        · 锚点提交：25d05944cdc9b36cb69b162d9cba0d8e8989f4db（v1.9.12）
 #          上一次基线：44b6f3377a68e20f0f6d2fb4a626ca616db2415f（v1.9.11）
+
+# ---- 2026-11 第四批：1.9.12 (25d05944) → 1.9.13 (285d98be)，4 个非 merge 提交
+#      整目录重新 vendor（变动的协议文件：qoder_accounts.py、qoder_proxy.py、
+#      qoder_scheduler.py、qoder_settings.py、qoder_tasks.py；无新增模块 / 数据
+#      文件，MODULES / DATA_FILES 不变）。_vendor/README.md 与 __init__.py 的
+#      版本戳已由脚本更新。
+#      已取（副本里与上游逐字节一致，只有导入改写）：
+#        · 958f14f6 签到保留上游奖励拒绝语义：活动返回的 failureCode 优先于
+#          errorCode，SAME_PERSON_ALREADY_CLAIMED 仍归 blocked，success=false
+#          不再被当成领取成功；兑换码缺货 / 任务未完成分别归入 pending / locked，
+#          其余拒绝写进错误明细，不再静默吞掉（run_checkin 结果为此返回 ok=false，
+#          避免把服务端拒绝变成对旧端点的再次领取）。
+#        · f57c56e9 允许省略默认 Qoder 系统提示词：新增 settings
+#          omit_default_system_prompt（默认关闭），默认仍保留 baseprompt 模板里的
+#          官方 system 提示词，仅显式开启时才清空；qoder_proxy 的 SYSTEM_PROMPT
+#          默认值从 "You are a helpful assistant." 改为 None，构建请求体逻辑与
+#          旧默认行为等价。
+#        · 1a9ae799 保护 prompt 设置写入与面板刷新：set_omit_default_system_prompt
+#          在 settings.json 无效时拒绝覆盖，保存路由校验布尔类型并回 400/500；
+#          runtime_settings_view 暴露该开关。
+#        · 285d98be 版本号提升到 1.9.13。
+#        · 431c3f01 是 PR #166 的 merge 提交本身，未单独取；其内容已随
+#          f57c56e9 / 1a9ae799 进入副本。
+#      本地适配：
+#        · 账号权重补丁仍由本仓维护，vendor 后已重新应用（qoder_accounts.py 的
+#          WEIGHT_MIN/WEIGHT_MAX、normalize_weight/selection_weight、
+#          Account.weight、_weighted_pick、_rotate_pick/_rotate_unweighted、
+#          set_weight；qoder_proxy.py 的 /accounts/weight），
+#          server/tests/test_qoder_vendor.py 守着重跑。
+#        · embedded.py：1.9.13 移除了 DEFAULT_SYSTEM_PROMPT 常量，初始化处改为
+#          proxy.SYSTEM_PROMPT = None（与上游默认一致，默认行为不变）。
+#      未取（副本里没有，也不需要）：
+#        · dashboard.html / i18n/ / docs/ / tests/_test_*：面板与发布链是自己的。
+#        · 面板侧的「省略默认系统提示词」开关：token-farm 平台设置暂不暴露，
+#          该值保持默认 false（可在 accounts/settings.json 手工配置）。
+#        · 锚点提交：285d98be756e3f20a51a2a35b4ea7a575e107b1c（v1.9.13）
+#          上一次基线：25d05944cdc9b36cb69b162d9cba0d8e8989f4db（v1.9.12）

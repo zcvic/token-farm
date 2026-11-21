@@ -73,8 +73,15 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 活动未开启，跳过），积分只能靠充值/订阅恢复。旧文案对 global 号的持有者
 		// 是一个永远不会兑现的承诺（issue #191 的延伸）。
 		return "account credits exhausted at upstream; CN accounts recover via the next daily check-in, global accounts need a top-up"
+	case ErrModelMissing:
+		// 11102：模型 id 在上游不存在（id 大小写敏感，display name 也算不存在——实测
+		// "DeepSeek-V4.1-Flash" 全池 11102，id "deepseek-v4.1-flash" 立刻 200）。
+		// 点名「换号无用」，否则客户端会以为换个号能过。
+		return "model id does not exist upstream (ids are case-sensitive); copy the id from /v1/models — switching accounts will not help"
 	case ErrModelBlocked:
-		return "upstream has no such model on this backend; switch model or retry on another account"
+		// 11158「该账号类型无权使用该模型」：换到有权限的号（如 Pro）真能成功，所以
+		// 文案要区分于 11102 的「换号无用」。
+		return "this model is not allowed for the account type (11158); retry on an account with permission or switch model"
 	case ErrBadParams:
 		// 11129/11152：整颗工具定义被拒（schema 形态或工具名），换号重试必然复现。
 		// 上游原文只说「工具定义不合规」，客户端看不出该改哪儿，这里点名是 tools。
@@ -192,8 +199,8 @@ func IsRequestParamRejected(body string) bool {
 }
 
 // isBackendUnsupported 上游 11103「Backend [x] is not supported」body 判定。
-// 与 11102「该后端无此模型」不同：11103 是模型侧配置问题，不是账号权限问题，
-// 换遍全池结果一样，因此不能走 ErrModelBlocked 的 (账号,模型) 负缓存。
+// 与 11102/14401「模型 id 上游不存在」不同：11103 是模型侧配置问题，不是账号
+// 权限问题，换遍全池结果一样，因此也不能走 ErrModelBlocked 的 (账号,模型) 负缓存。
 func isBackendUnsupported(body string) bool {
 	lower := strings.ToLower(body)
 	return codeMarker(lower, "11103") || hasBusinessCode(body, "11103")

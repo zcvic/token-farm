@@ -710,6 +710,14 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
         # 上游以 11148 tool_call_mismatch 拒绝整段历史。
         open_call_ids: list[str] = []
 
+        # 本轮已落地的助手正文消息，后续 function_call 要**合并进这一条**而不是
+        # 另起一条 assistant。Responses 把一轮拆成 reasoning / message /
+        # function_call 三个 item，Chat 只有一条 assistant；回放成两条时 Kimi 系
+        # 会在进度行之后停住（模型看到「上一轮已经说完话」，把工具结果当新一轮
+        # 输入）。只对 phase 不是 final_answer 的正文生效：final_answer 是上一轮
+        # 的收尾，被下一轮调用吞掉会让模型以为「我还没说完」，重复输出结论。
+        tool_turn_text: dict | None = None
+
         def take_reasoning() -> str | None:
             """取走累积的推理文本并把状态清空。"""
             nonlocal pending_reasoning
@@ -719,26 +727,25 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
             return value
 
         def flush_calls() -> None:
-            nonlocal tool_group_open
+            nonlocal tool_group_open, tool_turn_text
             if pending_calls:
                 # Responses represents one assistant turn as separate reasoning,
                 # message and call items. Chat must preserve that single turn:
                 # splitting its text and calls creates a synthetic assistant
                 # message and leaves the real reasoning off the tool-call turn.
-                reuse_previous = bool(
-                    messages
-                    and messages[-1].get('role') == 'assistant'
-                    and not messages[-1].get('tool_calls')
-                )
-                if reuse_previous:
-                    msg = messages[-1]
+                if tool_turn_text is not None:
+                    # 本轮正文已落地：把调用并进那一条，别再造一条空 assistant。
+                    msg = tool_turn_text
                     msg['tool_calls'] = list(pending_calls)
                 else:
+                    # 本轮没有可合并的正文（纯调用回合，或跨过了 final_answer /
+                    # user / compaction 边界）：新建一条只带 tool_calls 的 assistant。
                     msg = {
                         'role': 'assistant',
                         'content': None,
                         'tool_calls': list(pending_calls),
                     }
+                    messages.append(msg)
                 # 工具调用回合也可能带推理（模型先思考再调工具），一并保留，
                 # 否则这类多轮同样会因缺痕迹被腾讯拒。
                 pending = take_reasoning()
@@ -750,8 +757,7 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
                         elif existing != pending:
                             pending = existing + '\n' + pending
                     attach_reasoning(msg, pending)
-                if not reuse_previous:
-                    messages.append(msg)
+                tool_turn_text = None
                 tool_group_open = True
                 open_call_ids.extend(
                     str(call.get('id') or '') for call in pending_calls if call.get('id')
@@ -785,6 +791,10 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
 
         for item in raw_input:
             if not isinstance(item, dict):
+                # 纯字符串等非 dict 项：按 user 侧边界处理，上一轮的正文不能再被
+                # 后面的调用认领（与 Go 同口径）。待挂推理保持原样——本地对
+                # 「reasoning 项无归属」的处理是补占位而不是丢弃，清掉会撞 11155。
+                tool_turn_text = None
                 continue
             kind = str(item.get('type') or '')
             if kind == 'additional_tools':
@@ -861,6 +871,9 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
             flush_calls()
 
             if kind in ('function_call_output', 'custom_tool_call_output'):
+                # 工具结果属于 user 侧回应：跨过它，上一轮的正文不能再被后面的
+                # 调用认领（防御性清空——正常顺序里 flush_calls 已消费过）。
+                tool_turn_text = None
                 # 与 Anthropic 层同一个坑（那个 PR #25 报了）：tool 消息的 content
                 # 在 OpenAI 协议里只能是字符串，**放不下结构化图片**。
                 # 只取文字会让工具输出的图片**静默丢失**（模型看不到图）；
@@ -915,6 +928,8 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
                 # 以 system 消息保留在回放历史里；解不出内容（或只是密文）则跳过，
                 # 不造空消息。至此待挂推理已过期，就地清掉，别泄漏到后面的轮次。
                 pending_reasoning = None
+                # 压缩点是回合边界：跨过它的正文与调用不属于同一轮。
+                tool_turn_text = None
                 summary = _decode_compaction_summary(item.get('encrypted_content'))
                 if summary.strip():
                     messages.append({
@@ -1014,6 +1029,23 @@ def to_chat_request(body: dict, custom_tool_names: set[str] | None = None,
                         ))
                     if inline_calls:
                         msg['tool_calls'] = list(inline_calls)
+                # 本轮正文暂存给后续 function_call 合并（见 flush_calls）。
+                # 只收「有正文、没有内联调用、phase 不是 final_answer」的 assistant：
+                #   · 有内联调用 = 已经是完整的调用回合，不需要再合并；
+                #   · final_answer = 上一轮的收尾，跨过去就是串轮。
+                if role == 'assistant':
+                    eligible = (
+                        not inline_calls
+                        and isinstance(msg.get('content'), str)
+                        and msg['content'].strip()
+                        and item.get('phase') != 'final_answer'
+                    )
+                    # 不合格就清空：否则 final_answer 或纯调用回合之后的调用
+                    # 会认领到更早那条正文，把两轮拼成一轮。
+                    tool_turn_text = msg if eligible else None
+                else:
+                    # user / system 边界：上一轮的正文不能再被下一轮调用认领。
+                    tool_turn_text = None
                 messages.append(msg)
         # 历史以工具结果收尾时，本组图片还没补 user 消息。
         flush_calls()
