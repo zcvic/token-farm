@@ -91,6 +91,28 @@ check('没有 access token → attention',
 check('刷新失败留痕 → attention',
   platformAvailabilityOf(acct('a', {lastRefreshError: 'refresh failed'}), NOW), 'attention');
 
+/* ── 会自动续期的平台（MiniMax Code）─────────────────────────────
+   access token 只有约 1 小时、由后端按需换新，所以它过期**不算**故障；
+   真正会掉线的是 refresh token，看的是 refreshExpiredAt。 */
+check('自动续期平台：access token 过期但仍可用 → usable',
+  platformAvailabilityOf(acct('a', {
+    token_auto_refresh: true,
+    expiredAt: iso(NOW - 1000),
+    refreshExpiredAt: iso(NOW + 10 * 86400_000),
+  }), NOW), 'usable');
+check('自动续期平台：refresh token 已过期 → attention',
+  platformAvailabilityOf(acct('a', {
+    token_auto_refresh: true,
+    expiredAt: iso(NOW + 3600_000),
+    refreshExpiredAt: iso(NOW - 1000),
+  }), NOW), 'attention');
+check('自动续期平台：没有 refresh 到期时间时不臆测 → usable',
+  platformAvailabilityOf(acct('a', {
+    token_auto_refresh: true,
+    expiredAt: iso(NOW - 1000),
+    refreshExpiredAt: '',
+  }), NOW), 'usable');
+
 /* ── 检索 ─────────────────────────────────────────────────────── */
 
 check('空关键词命中一切',
@@ -139,6 +161,22 @@ const byExpiry = [
 check('令牌最早过期在前，无有效期排最后',
   ids(selectPlatformAccounts(byExpiry, {...filters, sort: 'expires'}, creditOf, NOW)),
   ['soon', 'later', 'never']);
+
+const autoRefresh = [
+  acct('short-access', {
+    token_auto_refresh: true,
+    expiredAt: iso(NOW + 60_000),
+    refreshExpiredAt: iso(NOW + 20 * 86400_000),
+  }),
+  acct('soon-refresh', {
+    token_auto_refresh: true,
+    expiredAt: iso(NOW + 20 * 86400_000),
+    refreshExpiredAt: iso(NOW + 3600_000),
+  }),
+];
+check('自动续期平台按 refresh token 排序，不看 1 小时的 access token',
+  ids(selectPlatformAccounts(autoRefresh, {...filters, sort: 'expires'}, creditOf, NOW)),
+  ['soon-refresh', 'short-access']);
 
 const byCredits = [
   acct('rich', {credits: 100}),

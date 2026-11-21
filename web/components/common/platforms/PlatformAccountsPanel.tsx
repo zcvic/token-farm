@@ -73,6 +73,7 @@ import {platformCreditExpiries, platformCreditPacks} from '@/lib/platform-credit
 import {
   PLATFORM_GROUPS,
   platformAvailabilityOf,
+  platformExpiryOf,
   platformGroupCounts,
   platformGroupLabelKey,
   selectPlatformAccounts,
@@ -103,21 +104,8 @@ import type {
   PlatformUsage,
 } from '@/lib/types';
 
-/** ISO 时间串 → epoch 毫秒（`fmtDateTime` 认两种单位；解析不出来的交给它显示 —）。 */
-function isoMs(value: string): number | null {
-  if (!value) return null;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? ms : null;
-}
-
 /** 一页显示多少个账号（与 WorkBuddy 账号页同口径）。 */
 const PAGE_SIZE = 20;
-
-/** 令牌是否已经过期（后端用 ISO 串，前端只在展示时分一次）。 */
-function isExpired(value: string): boolean {
-  const ms = isoMs(value);
-  return ms !== null && ms <= Date.now();
-}
 
 /** 积分显示：加载中 `…`，拿不到实时值就退到「上次登记」（`~` 前缀），都没有给 `—`。 */
 function creditText(entry: PlatformCredits | undefined, loading: boolean): string {
@@ -1372,7 +1360,11 @@ export function PlatformAccountsPanel({
               <TableBody>
                 {paged.rows.map((a) => {
                   const rowBusy = busy === a.uid;
-                  const expired = isExpired(a.expiredAt);
+                  // 会自动续期的平台（MiniMax Code）看 refresh token 的寿命：
+                  // 它的 access token 只有约 1 小时且由后端按需换新，拿它判
+                  // 「已过期」会把正常账号整片标红。
+                  const expiryMs = platformExpiryOf(a);
+                  const expired = Number.isFinite(expiryMs) && expiryMs <= now;
                   const group = platformAvailabilityOf(a, now);
                   // 积分到期明细：后端已经筛过一遍，这里按**当前时刻**再筛一次
                   // —— 页面停留期间包会到期 / 被用满，列表不会每分钟重新请求。
@@ -1516,7 +1508,7 @@ export function PlatformAccountsPanel({
                       <TableCell className="hidden md:table-cell">
                         <div className="flex items-center gap-1.5">
                           <span className="text-xs tabular-nums text-muted-foreground">
-                            {fmtDateTime(isoMs(a.expiredAt))}
+                            {fmtDateTime(Number.isFinite(expiryMs) ? expiryMs : null)}
                           </span>
                           {expired && (
                             <Badge variant="secondary" className="rounded-md text-[10px] text-amber-700 dark:text-amber-400">

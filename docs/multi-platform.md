@@ -817,7 +817,66 @@ access token、不能刷新，也没有 userId，导入时按 token 摘要生成
 只记日志，绝不让「同步失败」连累刷新结果。手工粘贴 token 的账号（没有
 `desktopPath`）不会去碰客户端的文件。
 
-### 6.2 三个新平台的能力边界：签到 / 余额 / 续期
+### 6.2 令牌自动续期（哪些平台、什么阈值）
+
+进程内巡检（`server/services/renew.py`，每小时一跳）对平台账号做两件事：按剩余
+寿命续期，以及「每 N 天全量刷一次」的计划任务。两份排程共用同一张清单
+`_PLATFORM_RENEWERS`，新增平台只加一行，巡检循环 / 计划任务 / 「立即执行一次」
+三处自动覆盖。
+
+| 平台 | 判据 | 阈值 | 为什么不更短 / 更长 |
+| --- | --- | --- | --- |
+| Trae | accessToken `expiredAt` | 3 天 | 令牌寿命约 60 天，3 天足够覆盖闲置号 |
+| Qoder | `expiredAt`（网关 `expiresAt`） | 6 小时 | jobToken 约 24 小时，按天判会让刚签发的令牌立刻进窗口 |
+| MiniMax Code | **refreshToken** `refreshExpiredAt` | 3 天 | access token 只有约 1 小时，由适配器按需刷新；拿它判会每小时轮换一遍一次性 refresh token |
+| Cline | **refreshToken** `refreshExpiredAt` | 3 天 | 与 MiniMax 同理：access token 约 10 分钟且由 `_token_for` 按需轮换；refresh token 一次性，按 access 判会反复轮换 |
+
+三条共同口径：
+
+- **续期一律走适配器的 `refresh_account`**。轮换式令牌（Trae / MiniMax / Cline）
+  必须先原子落盘再使用，Qoder 的 token 落盘与 COSY 会话重建都在内置网关里；绕开
+  适配器会丢令牌或把用户登出。
+- **解不出到期时间就不刷**，交给「刷新」按钮与计划任务，不按小时去猜。
+- **停用的号跳过**；「仅签到」的号照常续期（它只是不参与对话，凭证要活着）。
+
+以下四个平台**有意不在巡检里**：
+
+- **Loomy**：没有 refresh token，只能密码重登。按小时对一批账号重复登录既没有
+  意义，也容易触发风控；闲置号在下次请求 401 时自动重登即可（见
+  [`loomy.md`](loomy.md)）。
+- **DuMate**：凭证是长期 Cookie，换 token 只是探活；账号文件里也没有 token
+  到期时间可判，强行定时探活只会多打上游。失效时由 401 触发重新导入。
+- **Kilo**：token 是一年期、**没有 refresh token**，续不了；过期只能重新登录。
+  按小时去读资料 / 余额既没有意义，也只是多打上游。账号页的「过期时间」直接
+  显示 token 的 `expiredAt`（按一年期推算），到期前重新登录即可。
+- **Discovery**：凭证是 API Key（约 6 个月），没有刷新语义。巡检里的「续期」
+  只能是探活，而探活就是一次 `/v1/models`——它同时还是**额度探针**，按小时
+  对整池 Key 打一轮会让已经耗尽的账号反复被计入限流。失效与耗尽都由对话的
+  401 / 402 触发，不需要定时任务。
+
+「令牌刷新计划」默认开启（每 5 天凌晨 3 点全量刷一遍），对 MiniMax 与 Cline
+尤其重要：设备码登录拿不到 refresh token 的寿命，`refreshExpiredAt` 为空的账号
+只能靠这条排程定期轮换。
+
+MiniMax 的 refresh token 是**一次性**的：换发后旧的立即作废，所以轮换成功后
+旧记录里那个到期时间也一并失效，适配器会把它清空（上游回 `refresh_expires_in`
+时按它记新的）。不清空的话，巡检每小时都会把「旧的到期时间快到了」当成理由再
+轮换一轮，白打上游。
+
+账号页对 MiniMax 的「过期时间」一列显示的是 **refresh token** 的到期时间
+（`token_auto_refresh` 标记告诉前端换字段）：它的 access token 只有约 1 小时，
+按它判「已过期」会把闲置一小时的正常账号整片标红。首页的平台卡片与「令牌最早
+过期」排序用同一份判定。
+
+Cline 是同一个问题、同一个做法：access token 约 10 分钟且由适配器按需轮换，
+`public_account()` 也把 `token_auto_refresh` 置为 `True`。区别在于 Cline 的
+`refreshExpiredAt` 通常是空的（上游不告诉 refresh token 的寿命），所以这条排程
+对它是**唯一**的定期轮换入口——`refresh_cline_all(force=False)` 在
+`refreshExpiredAt` 缺失时一律跳过，只有「令牌刷新计划」以 `force=True` 调用时才
+真正换发。这与 MiniMax 的「解不出到期时间就不刷」是同一条口径的两种落法：
+一个是「按 refresh 寿命判」，一个是「没有寿命可判就只靠计划任务」。
+
+### 6.3 三个新平台的能力边界：签到 / 余额 / 续期
 
 | 平台 | 签到 | 余额接口 | 续期 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -1163,8 +1222,14 @@ Trae 事件 → OpenAI chunk：
   目录降级、选号、token 缓存与 401 重试、`max_tokens` 钳制、SSE 扫描、签到与积分，
   以及百度扫码登录的事件 / 兑换解析与会话状态机。
 - `server/tests/test_platform_minimax_adapter.py`：MiniMax Code 的账号脱敏、目录解析、
-  双区选号、refresh token 轮换落盘、401 重试、签到 / 积分、OpenAI ↔ Anthropic
-  请求 / 响应 / 流式翻译。
+  双区选号、refresh token 轮换落盘（含换发后清掉旧 refresh 到期时间）、401 重试、
+  签到 / 积分、OpenAI ↔ Anthropic 请求 / 响应 / 流式翻译。
+- `server/tests/test_minimax_renew.py`：MiniMax 的续期判据（看 refresh token 的
+  寿命而不是 1 小时的 access token）、force 全刷、缺 refreshToken 记失败、
+  仅签到号照常续期、解不出到期时间不臆测。
+- `server/tests/test_cline_renew.py`：Cline 的续期判据（上游不给 refresh 寿命，
+  `force=False` 一律跳过）、force 全刷、缺 refreshToken 记失败、仅签到号照常
+  续期、没进窗口的号不计「跳过」、适配器缺失时返回空统计。
 - `server/tests/test_platform_discovery_adapter.py`：Discovery 的 Key 脱敏与
   `dc_` uid 派生、目录归一与 8 条兜底、`quota_exceeded` → 402 冻 1 小时 /
   `rate_limit_exceeded` → 429 的区分、空模型名补 `auto`、`max_tokens` 原样透传、

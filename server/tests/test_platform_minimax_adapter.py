@@ -56,6 +56,9 @@ class MinimaxStoreTest(unittest.TestCase):
         self.assertEqual(public['realm'], 'cn')
         self.assertEqual(public['realm_label'], '国内版')
         self.assertEqual(public['email'], 'a@b.c')
+        # access token 只有约 1 小时且由适配器按需刷新：界面不能拿它判过期，
+        # 否则闲置一小时的号全被标红。这个标记告诉前端改看 refreshExpiredAt。
+        self.assertTrue(public['token_auto_refresh'])
 
     def test_safe_id_rejects_traversal(self) -> None:
         for bad in ('../x', 'a/b', 'a\\b', '', 'x' * 200):
@@ -394,6 +397,38 @@ class MinimaxAdapterTest(unittest.TestCase):
         raw = store.read_account('mm_1')
         self.assertEqual(raw['refreshToken'], 'new-refresh')
         self.assertEqual(raw['token'], 'new-access')
+        # 换发后旧的 refresh 到期时间已作废：必须清掉，否则「按剩余寿命续期」
+        # 会每小时都判成快过期，白白多轮换一轮一次性 token。
+        self.assertEqual(raw['refreshExpiredAt'], '')
+
+    def test_rotation_clears_stale_refresh_expiry(self) -> None:
+        """旧 refresh token 的到期时间不能跟着新 token 一起留下。"""
+        self._seed(token='', expiredAt='')
+        store.patch_account('mm_1', {
+            'refreshExpiredAt': store.iso_from_epoch(time.time() - 60)})
+
+        async def fake_refresh(realm, refresh, **kwargs):
+            return {'access_token': 'new-access', 'refresh_token': 'new-refresh',
+                    'expires_in': 3600}
+
+        with mock.patch.object(client, 'refresh_token', new=fake_refresh):
+            asyncio.run(self.adapter._token_for(
+                store.read_account('mm_1'), proxy=None))
+        self.assertEqual(store.read_account('mm_1')['refreshExpiredAt'], '')
+
+    def test_rotation_keeps_refresh_expiry_when_upstream_gives_it(self) -> None:
+        """上游哪天回了 `refresh_expires_in`，就按它记，而不是一律清空。"""
+        self._seed(token='', expiredAt='')
+
+        async def fake_refresh(realm, refresh, **kwargs):
+            return {'access_token': 'new-access', 'refresh_token': 'new-refresh',
+                    'expires_in': 3600, 'refresh_expires_in': 30 * 86400}
+
+        with mock.patch.object(client, 'refresh_token', new=fake_refresh):
+            asyncio.run(self.adapter._token_for(
+                store.read_account('mm_1'), proxy=None))
+        expiry = store.epoch_from_iso(store.read_account('mm_1')['refreshExpiredAt'])
+        self.assertGreater(expiry, time.time() + 29 * 86400)
 
     def test_valid_access_token_is_reused(self) -> None:
         self._seed()

@@ -383,6 +383,11 @@ def public_account(account: dict) -> dict:
         'has_token': bool(access or refresh),
         'has_refresh_token': bool(refresh),
         'token_preview': mask_token(access or refresh),
+        # access token 只有约 1 小时，且**由适配器按需刷新**（`_token_for` 在
+        # 使用前发现临近过期就换一份）。所以 `expiredAt` 过期并不代表账号不可用，
+        # 界面不能把它当成「需处理」——否则闲置一小时的号全被标红，用户会去白
+        # 折腾一轮。前端据此改看 `refreshExpiredAt`（真正会死的是它）。
+        'token_auto_refresh': True,
         'source': source,
         'createdAt': int(account.get('createdAt') or 0),
         'updatedAt': int(account.get('updatedAt') or 0),

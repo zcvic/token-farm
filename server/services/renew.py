@@ -44,21 +44,39 @@
 失败可能只是网络抖动；真正的可用性判断仍由上游的选号与保活负责。失败会记在
 任务日志里（kind=keepalive），用户能看见。
 
-## 平台账号（Trae / Qoder）
+## 平台账号（Trae / Qoder / MiniMax Code / Cline）
 
 平台账号**不在**上面那套目录里（`platforms/<name>/accounts/`），刷新协议也各不
-相同：Trae 是轮换式 `ExchangeToken`，Qoder 是内置网关里的 OAuth token 刷新。
-两边各自由 `refresh_trae_all` / `refresh_qoder_all` 单独巡检，接在同一条循环上，
-但状态互不影响（一段抛错不让另一段整小时都跑不到）。续期一律走适配器的
+相同：Trae 是轮换式 `ExchangeToken`，Qoder 是内置网关里的 OAuth token 刷新，
+MiniMax Code 与 Cline 都是 OAuth 一次性 refresh token。它们各自由 `refresh_trae_all` /
+`refresh_qoder_all` / `refresh_minimax_all` / `refresh_cline_all` 单独巡检，接在同一条
+循环上，但状态互不影响（一段抛错不让另一段整小时都跑不到）。续期一律走适配器的
 `refresh_account`：
 
   · Trae：适配器负责「先看客户端是否已刷新」「刷新后原子落盘并回写客户端」，
     绕开它会因为轮换把用户的 IDE 登出；
   · Qoder：适配器转给内置网关，网关负责 token 落盘与 COSY 会话失效重建；
-    直接打回环 HTTP 会漏掉这两步。
+    直接打回环 HTTP 会漏掉这两步；
+  · MiniMax：refresh token 换发后旧的立即作废，适配器按账号加锁并**先落盘
+    再使用**；绕开它会丢掉新 token，账号只能重新登录。
+  · Cline：与 MiniMax 同一套一次性令牌语义，判据却不同——上游不给 refresh
+    token 的寿命，所以 `force=False` 时一律跳过，只由「令牌刷新计划」定期轮换，
+    见 `refresh_cline_all`。
 
 Qoder 的 accessToken 寿命比 WorkBuddy 短得多（jobToken 约 24 小时、deviceToken
-约 30 天），所以阈值单独取 6 小时，见 `_QODER_RENEW_BEFORE_SECONDS`。
+约 30 天），所以阈值单独取 6 小时，见 `_QODER_RENEW_BEFORE_SECONDS`。MiniMax
+的 accessToken 只有约 1 小时，但它本来就由适配器在每次使用前按需刷新——按剩余
+寿命巡检等于让闲置号每小时轮换一次一次性 refresh token，所以这里判的是
+**refresh token 的到期时间**，见 `refresh_minimax_all`。Cline 的 access token
+更短（约 10 分钟）、refresh token 又没有寿命可判，于是只剩「计划任务定期轮换」
+这一条路，见 `refresh_cline_all`。
+
+Loomy / DuMate / Kilo / Discovery **有意不在这里**：Loomy 没有 refresh token，
+只能密码重登（按小时重复登录容易触发风控）；DuMate 的凭证是长期 Cookie，既没有
+到期时间可判，换 token 也只是探活；Kilo 的 token 是一年期且没有 refresh token，
+续不了；Discovery 是 API Key，巡检里的「续期」只能退化成探活，而探活本身就是一次
+额度探针，按小时打整池会把耗尽的账号反复计入限流。四者都靠「下次请求 401 / 402
+时重登、重新导入或换号」兜底，理由见 `docs/multi-platform.md`。
 
 没有账号的平台会被 `has_accounts_hint()` 直接跳过——Qoder 的内置网关不该因为
 一条令牌巡检就被拉起来。
@@ -91,6 +109,14 @@ _RENEW_BEFORE_SECONDS = 3 * 86400
 # 每小时都去换一遍 token（还可能把上游风控喂饱）。取 6 小时：巡检一小时一跳，
 # 最长晚 1 小时发现，仍远早于过期。
 _QODER_RENEW_BEFORE_SECONDS = 6 * 3600
+
+# MiniMax 的续期窗口（秒），判的是 **refresh token** 的到期时间，不是 access
+# token。access token 只有约 1 小时，而适配器每次使用前会按 2 分钟余量自己换；
+# 巡检再按 access token 判，等于让每个闲置号每小时轮换一次**一次性** refresh
+# token——多一轮上游风控，也把「上游已换发、本地还没落盘」的丢链窗口放大 N 倍。
+# refresh token 的寿命是天级的，所以沿用 WorkBuddy 的 3 天：巡检一小时一跳，
+# 有足够余量。
+_MINIMAX_RENEW_BEFORE_SECONDS = 3 * 86400
 
 # 连续写入失败（磁盘只读等）时不刷屏的间隔
 _LOG_THROTTLE_SECONDS = 6 * 3600
@@ -376,6 +402,14 @@ def _qoder_adapter():
     return _platform_adapter('qoder')
 
 
+def _minimax_adapter():
+    return _platform_adapter('minimax')
+
+
+def _cline_adapter():
+    return _platform_adapter('cline')
+
+
 def _trae_expires_at(account: dict) -> int | None:
     """账号的 accessToken 到期时刻（epoch 秒）；解不出返回 None。"""
     from ..platforms.trae.client import parse_epoch
@@ -514,16 +548,144 @@ async def refresh_qoder_all(force: bool = False, now: int | None = None) -> dict
     return stats
 
 
+async def refresh_minimax_all(force: bool = False, now: int | None = None) -> dict:
+    """巡检一遍 MiniMax Code 账号并按需续期。
+
+    判据与 Trae / Qoder 不同，看的是 **refresh token 的到期时间**
+    （`refreshExpiredAt`），不是 access token 的 `expiredAt`：
+
+      · access token 只有约 1 小时，适配器在每次使用前会按 2 分钟余量自己换，
+        巡检不需要管它。拿它当判据会让**每个号每一轮**都落在窗口里，等于每小时
+        轮换一遍一次性 refresh token——上游风控与「换发后没落盘」的丢链窗口
+        都会被放大。
+      · refresh token 才是会真正过期的那个（换发后旧的立即作废）。它的寿命是
+        天级的，所以沿用 3 天的窗口。
+
+    `refreshExpiredAt` 为空时（设备码登录拿不到这个字段，上游刷新响应通常也不回）
+    非全量巡检一律跳过、不臆测：没有可靠的到期时间，按小时去轮换一次性 refresh
+    token 只会白打上游。这类账号的主路径是「令牌刷新计划」（每 N 天 force 全刷
+    一次，默认开启），所以 `force=True` **不要求**到期时间——计划的意义就是
+    「不看剩多少天，定期换一遍」，缺了到期时间反而更需要它。
+    """
+    stats = {'checked': 0, 'renewed': 0, 'failed': 0, 'skipped': 0}
+    adapter = _minimax_adapter()
+    if adapter is None:
+        return stats
+    now_ts = int(time.time()) if now is None else int(now)
+    for account in adapter.list_accounts():
+        uid = str(account.get('uid') or '').strip()
+        if not uid:
+            continue
+        # 停用 / 仅签到的号照样续期：仅签到的语义是「不参与对话」，签到与凭证
+        # 必须保持活跃（与 WorkBuddy 的 manual_disabled 同一口径）。完全停用才跳过。
+        if account.get('disabled'):
+            stats['skipped'] += 1
+            continue
+        # 先判「有没有 refreshToken」再判到期时间：没有它无论剩多久都续不了，
+        # 记成失败而不是跳过，否则用户只看到「跳过」却不知道号迟早会掉线。
+        if not account.get('has_refresh_token'):
+            _note_failure(f'minimax/{uid}',
+                          '缺少 refreshToken，无法自动续期（需重新登录）')
+            stats['failed'] += 1
+            continue
+        if not force:
+            expires = _parse_expiry(account.get('refreshExpiredAt'))
+            if expires is None:
+                # 解不出 refresh token 的到期时间：不臆测，交给刷新计划与「刷新」按钮。
+                stats['skipped'] += 1
+                continue
+            if expires - now_ts > _MINIMAX_RENEW_BEFORE_SECONDS:
+                continue
+        stats['checked'] += 1
+        try:
+            # refresh token 是一次性的：适配器按账号加锁、先落盘再使用，绕开它
+            # 直接调 client.refresh_token 会在落盘前就把旧 token 作废。
+            await adapter.refresh_account(uid, force=True)
+        except Exception as exc:  # noqa: BLE001
+            _note_failure(f'minimax/{uid}', err_text(exc))
+            stats['failed'] += 1
+            continue
+        stats['renewed'] += 1
+        _last_fail_log.pop(f'minimax/{uid}', None)
+        logger.info('MiniMax token 已续期: %s', uid)
+        _record({'uid': uid, 'nickname': str(account.get('nickname') or ''),
+                 'file': uid}, 1, 'token 自动续期成功（MiniMax Code）')
+    return stats
+
+
+async def refresh_cline_all(force: bool = False, now: int | None = None) -> dict:
+    """巡检一遍 Cline 账号并按需轮换 refresh token。
+
+    Cline 的凭证有两层，判据与 MiniMax 同类但不完全一样：
+
+      · access token 只有约 10 分钟，适配器在每次使用前按 2 分钟余量自己换，
+        巡检不管它；
+      · refresh token 是**一次性轮换**的，上游不给它的寿命（WorkOS 侧也不回），
+        所以 `refreshExpiredAt` 基本永远是空的。
+
+    没有可靠的到期时间就不臆测：`force=False` 时一律跳过，只由「令牌刷新计划」
+    （默认每 5 天 `force=True`）定期换一遍。理由和 MiniMax 那段一样——按小时去
+    轮换一次性 token，只会白白放大「上游已换发、本地还没落盘」的丢链窗口。
+    """
+    stats = {'checked': 0, 'renewed': 0, 'failed': 0, 'skipped': 0}
+    adapter = _cline_adapter()
+    if adapter is None:
+        return stats
+    now_ts = int(time.time()) if now is None else int(now)
+    for account in adapter.list_accounts():
+        uid = str(account.get('uid') or '').strip()
+        if not uid:
+            continue
+        # 停用 / 仅签到的号照样续期：仅签到的语义是「不参与对话」，凭证必须
+        # 保持活跃。完全停用才跳过。
+        if account.get('disabled'):
+            stats['skipped'] += 1
+            continue
+        if not account.get('has_refresh_token'):
+            _note_failure(f'cline/{uid}',
+                          '缺少 refreshToken，无法自动续期（需重新登录）')
+            stats['failed'] += 1
+            continue
+        if not force:
+            expires = _parse_expiry(account.get('refreshExpiredAt'))
+            if expires is None:
+                # 解不出 refresh token 的到期时间：不臆测，交给刷新计划与「刷新」按钮。
+                stats['skipped'] += 1
+                continue
+            # 还没进窗口的号不计数：它既不是跳过（有寿命可判）也不是失败，
+            # 与 MiniMax 那段同一口径，否则任务页每天报一堆「跳过」。
+            # 窗口也沿用同一条（两者判的都是 3 天寿命的一次性 refresh token）。
+            if expires - now_ts > _MINIMAX_RENEW_BEFORE_SECONDS:
+                continue
+        stats['checked'] += 1
+        try:
+            # 适配器按账号加锁、先落盘再使用，绕开它直接调 client 会在落盘前
+            # 就把旧 refresh token 作废。
+            await adapter.refresh_account(uid, force=True)
+        except Exception as exc:  # noqa: BLE001
+            _note_failure(f'cline/{uid}', err_text(exc))
+            stats['failed'] += 1
+            continue
+        stats['renewed'] += 1
+        _last_fail_log.pop(f'cline/{uid}', None)
+        logger.info('Cline token 已续期: %s', uid)
+        _record({'uid': uid, 'nickname': str(account.get('nickname') or ''),
+                 'file': uid}, 1, 'token 自动续期成功（Cline）')
+    return stats
+
+
 #: 平台账号的续期入口：`(平台名, 日志标签, 巡检函数)`。新增平台只加一行——
 #: 巡检循环、计划任务与「立即执行一次」都从这里遍历，避免三处各写一份清单。
 _PLATFORM_RENEWERS = (
     ('trae', 'Trae', refresh_trae_all),
     ('qoder', 'Qoder', refresh_qoder_all),
+    ('minimax', 'MiniMax Code', refresh_minimax_all),
+    ('cline', 'Cline', refresh_cline_all),
 )
 
 
 async def refresh_all_platforms(force: bool = False, now: int | None = None) -> dict:
-    """**全部来源**的全量刷新：WorkBuddy + 平台账号（Trae / Qoder）。
+    """**全部来源**的全量刷新：WorkBuddy + 平台账号（Trae / Qoder / MiniMax Code / Cline）。
 
     「立即执行一次」用它，而不是只调 `refresh_all`：用户按下的是「把所有令牌
     刷一遍」，只刷 WorkBuddy 会让他以为计划对平台账号没生效（计划里的自动执行
@@ -585,8 +747,8 @@ async def _loop() -> None:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning('token 续期巡检异常: %s', exc)
-        # 平台账号（Trae / Qoder）各单独一段：账号目录与刷新协议都与 WorkBuddy
-        # 不同，一段抛错不该让其他段整小时都跑不到。
+        # 平台账号（Trae / Qoder / MiniMax Code / Cline）各单独一段：账号目录与刷新协议
+        # 都与 WorkBuddy 不同，一段抛错不该让其他段整小时都跑不到。
         for _name, label, runner in _PLATFORM_RENEWERS:
             try:
                 pstats = await runner()

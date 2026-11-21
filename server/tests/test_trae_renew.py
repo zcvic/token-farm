@@ -137,6 +137,7 @@ class RefreshAllPlatformsTest(unittest.TestCase):
         with mock.patch.object(renew, 'refresh_all', fake_main), \
              mock.patch.object(renew, '_trae_adapter', lambda: adapter), \
              mock.patch.object(renew, '_qoder_adapter', lambda: None), \
+             mock.patch.object(renew, '_minimax_adapter', lambda: None), \
              mock.patch.object(renew, '_note_failure', lambda *a, **k: None), \
              mock.patch.object(renew, '_record', lambda *a, **k: None):
             stats = asyncio.run(renew.refresh_all_platforms(force=True))
@@ -144,10 +145,11 @@ class RefreshAllPlatformsTest(unittest.TestCase):
         self.assertEqual(stats['checked'], 3)
         self.assertEqual(stats['renewed'], 3)
         self.assertEqual(stats['platforms']['trae']['renewed'], 1)
-        # 没有 Qoder 账号 / 适配器时平台段照样出现在明细里（数字为 0），
+        # 没有 Qoder / MiniMax 账号时平台段照样出现在明细里（数字为 0），
         # 界面才能说明「这一轮把所有平台都看过了」。
         self.assertEqual(stats['platforms']['qoder']['renewed'], 0)
         self.assertEqual(stats['platforms']['qoder']['checked'], 0)
+        self.assertEqual(stats['platforms']['minimax']['renewed'], 0)
 
     def test_trae_failure_does_not_swallow_workbuddy_result(self) -> None:
         async def fake_main(force: bool = False, now=None) -> dict:
@@ -158,7 +160,8 @@ class RefreshAllPlatformsTest(unittest.TestCase):
 
         with mock.patch.object(renew, 'refresh_all', fake_main), \
              mock.patch.object(renew, '_trae_adapter', boom), \
-             mock.patch.object(renew, '_qoder_adapter', lambda: None):
+             mock.patch.object(renew, '_qoder_adapter', lambda: None), \
+             mock.patch.object(renew, '_minimax_adapter', lambda: None):
             stats = asyncio.run(renew.refresh_all_platforms(force=True))
 
         self.assertEqual(stats['renewed'], 2, '平台段异常不能吞掉 WorkBuddy 的结果')

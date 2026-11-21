@@ -34,6 +34,7 @@ import {accountApi, platformApi, statsApi, upstreamApi, upstreamsApi} from '@/li
 import {useRealm} from '@/lib/realm-context';
 import {usePlatform} from '@/lib/platform-context';
 import {filterByPlatformRealm} from '@/lib/platform-realm';
+import {platformExpiryOf} from '@/lib/platform-account-list';
 import type {
   CreditsFlow,
   CreditsMeta,
@@ -99,17 +100,20 @@ const EMPTY_PLATFORM_ACCOUNTS: PlatformAccount[] = [];
 const EMPTY_PLATFORM_CREDITS: PlatformCredits[] = [];
 
 /**
- * ISO 时间串 → 还剩多少秒（负数 = 已过期，null = 没有这个时间/解析不出来）。
+ * 平台账号还剩多少秒（负数 = 已过期，null = 没有这个时间/解析不出来）。
  *
  * 平台账号存的是 ISO 串（`expiredAt`），而 WorkBuddy 账号给的是 epoch 秒数，
- * 两套形状不能混用；`Date.parse` 解析失败时返回 null 而不是 0——「不知道」与
- * 「已过期」在界面上是两句话，后者会让用户去重新登录。
+ * 两套形状不能混用；解析失败时返回 null 而不是 0——「不知道」与「已过期」在
+ * 界面上是两句话，后者会让用户去重新登录。
+ *
+ * 会自动续期的平台（MiniMax Code）access token 只有约 1 小时且由后端按需换新，
+ * 拿它算「已过期」会让首页把正常账号标红；这类账号要看 refresh token 的寿命，
+ * 所以口径交给 `platformExpiryOf`（与账号页同一份判定）。
  */
-function isoRemain(iso: string, now = Date.now() / 1000): number | null {
-  if (!iso) return null;
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return null;
-  return at / 1000 - now;
+function platformRemain(account: PlatformAccount,
+                        now = Date.now() / 1000): number | null {
+  const ms = platformExpiryOf(account);
+  return Number.isNaN(ms) ? null : ms / 1000 - now;
 }
 
 /** 积分收支的取数前空值（理由同 EMPTY_POINTS：必须是稳定引用） */
@@ -377,7 +381,7 @@ export default function DashboardPage() {
     let credits = 0;
     let known = 0;
     for (const a of platAccounts) {
-      const remain = isoRemain(a.expiredAt, now);
+      const remain = platformRemain(a, now);
       if (a.has_token && (remain === null || remain > 0)) valid += 1;
       if (remain !== null && remain > 0 && remain < 3600) expiring += 1;
       const c = platCreditsOf[a.uid]?.credits;
@@ -1257,7 +1261,7 @@ export default function DashboardPage() {
           {platAccounts.length ? (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {platAccounts.slice(0, 9).map((a) => {
-                const remain = isoRemain(a.expiredAt);
+                const remain = platformRemain(a);
                 const cred = platCreditsOf[a.uid]?.credits;
                 return (
                   <div key={a.uid} className="rounded-2xl bg-background/60 p-3">

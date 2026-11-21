@@ -2226,6 +2226,13 @@ export interface PlatformAccount {
   /** ISO 时间串（不是 epoch 秒，与 WorkBuddy 的 `expires_at` 不同） */
   expiredAt: string;
   refreshExpiredAt: string;
+  /**
+   * access token 是否由后端按需自动刷新（MiniMax Code）。
+   *
+   * 为 true 时 `expiredAt` 过期不代表账号不可用——适配器在每次使用前会换一份。
+   * 判断「会不会掉线」要看 `refreshExpiredAt`（前端用 `platformExpiryOf`）。
+   */
+  token_auto_refresh?: boolean;
   has_token: boolean;
   has_refresh_token: boolean;
   token_preview: string;

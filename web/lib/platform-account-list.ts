@@ -34,6 +34,11 @@ export type PlatformGroupFilter = PlatformGroup | 'all';
  * 临时冻结放在最前：它必然导致账号不参与调度，不先判就会落到「过期 /
  * 异常」，把用户自己点的停用显示成故障。冷却只暂停调度、到期自愈，所以
  * 排在凭据问题之前——令牌过期是必须人工处理的事，不能被一个定时冷却盖住。
+ *
+ * `token_auto_refresh`（MiniMax Code）：它的 access token 只有约 1 小时，但
+ * 适配器会在每次使用前自己换一份，所以 `expiredAt` 过期**不代表**账号不可用。
+ * 这类账号的「会不会掉线」看的是 refresh token 的 `refreshExpiredAt`——拿
+ * access token 判会让闲置一小时的号全被标成「需处理」，用户白折腾一轮。
  */
 export function platformAvailabilityOf(
   account: PlatformAccount,
@@ -44,7 +49,10 @@ export function platformAvailabilityOf(
   // 它不是故障也不是全停，签到与平台任务照常）。
   if (account.checkin_only) return 'stopped';
   if (account.cooling && account.cooling_until * 1000 > now) return 'cooling';
-  const expiredAt = Date.parse(account.expiredAt);
+  const expiryField = account.token_auto_refresh
+    ? account.refreshExpiredAt
+    : account.expiredAt;
+  const expiredAt = Date.parse(expiryField);
   const tokenBad = !account.has_token
     || (Number.isFinite(expiredAt) && expiredAt <= now);
   if (tokenBad || account.lastRefreshError) return 'attention';
@@ -73,6 +81,16 @@ export type PlatformSortKey =
   /** 积分少的在前；**没有积分数据的排最后** */
   | 'credits';
 
+/** 该账号真正决定「会不会掉线」的到期时间（epoch 毫秒，拿不到返回 NaN）。 */
+export function platformExpiryOf(account: PlatformAccount): number {
+  // 与 platformAvailabilityOf 同一口径：会自动续期的平台看 refresh token。
+  const value = account.token_auto_refresh
+    ? account.refreshExpiredAt
+    : account.expiredAt;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
 export interface PlatformListQuery {
   q: string;
   group: PlatformGroupFilter;
@@ -95,11 +113,11 @@ export function selectPlatformAccounts(
 
   if (query.sort === 'expires') {
     return [...rows].sort((a, b) => {
-      const at = Date.parse(a.expiredAt);
-      const bt = Date.parse(b.expiredAt);
-      if (!Number.isFinite(at) && !Number.isFinite(bt)) return 0;
-      if (!Number.isFinite(at)) return 1;
-      if (!Number.isFinite(bt)) return -1;
+      const at = platformExpiryOf(a);
+      const bt = platformExpiryOf(b);
+      if (Number.isNaN(at) && Number.isNaN(bt)) return 0;
+      if (Number.isNaN(at)) return 1;
+      if (Number.isNaN(bt)) return -1;
       return at - bt;
     });
   }

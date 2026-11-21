@@ -218,6 +218,9 @@ def _finish(login_id: str, realm: str, token: dict) -> None:
         'access_token': access,
         'refresh_token': refresh,
         'expires_in': token.get('expires_in'),
+        # 上游通常不给 refresh token 的寿命；给了就记下来，续期巡检据此判断
+        # 「还剩多久」（见 services/renew.py:refresh_minimax_all）。
+        'refresh_expires_in': token.get('refresh_expires_in'),
         'realUserID': str(info.get('realUserID') or ''),
         'email': str(info.get('email') or ''),
         'name': str(info.get('name') or ''),

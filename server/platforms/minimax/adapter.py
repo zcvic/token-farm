@@ -193,11 +193,19 @@ class MinimaxAdapter(PlatformAdapter):
                 new_refresh = str(data.get('refresh_token') or '') or refresh
                 new_expires = time.time() + int(data.get('expires_in')
                                                 or C.TOKEN_FALLBACK_SECONDS)
+                # 旧 refresh token 已被上游作废，它记的到期时间随之失效。上游
+                # 通常不回新 refresh token 的寿命，所以拿不到时**清空**而不是
+                # 留着旧值：留着会让「按剩余寿命续期」每小时都判成「快过期」，
+                # 白白多轮换一轮一次性 token（见 services/renew.py）。
+                refresh_expires_in = int(data.get('refresh_expires_in') or 0)
                 try:
                     store.patch_account(uid, {
                         'token': new_access,
                         'refreshToken': new_refresh,
                         'expiredAt': store.iso_from_epoch(new_expires),
+                        'refreshExpiredAt': store.iso_from_epoch(
+                            time.time() + refresh_expires_in)
+                        if refresh_expires_in > 0 else '',
                         'refreshedAt': store.iso_from_epoch(time.time()),
                         'lastRefreshError': '',
                         'loginState': '正常',
@@ -269,17 +277,29 @@ class MinimaxAdapter(PlatformAdapter):
             expires_in = _num(raw.get('expires_in'))
             if expires_in and expires_in > 0:
                 expires = time.time() + expires_in
+        # refresh token 的到期时间：导入方显式给了就记；设备码登录与上游刷新响应
+        # 都不回这个值。换了一份**新的** refresh token 时旧到期时间已无意义，
+        # 必须清掉——留着会让按剩余寿命的巡检误判成「快过期」（见
+        # `services/renew.py:refresh_minimax_all`）。凭证没变则沿用旧值。
+        refresh_expires = store.epoch_from_iso(_pick(
+            raw, 'refreshExpiresAt', 'refresh_expires_at'))
+        if not refresh_expires:
+            refresh_expires_in = _num(raw.get('refresh_expires_in'))
+            if refresh_expires_in and refresh_expires_in > 0:
+                refresh_expires = time.time() + refresh_expires_in
+        next_refresh = refresh or str(old.get('refreshToken') or '')
+        if not refresh_expires and next_refresh == str(old.get('refreshToken') or ''):
+            refresh_expires = store.epoch_from_iso(old.get('refreshExpiredAt'))
         account = {
             **old,
             'uid': uid,
             'realm': realm,
             'token': access or str(old.get('token') or ''),
-            'refreshToken': refresh or str(old.get('refreshToken') or ''),
+            'refreshToken': next_refresh,
             'expiredAt': store.iso_from_epoch(expires)
             if expires else str(old.get('expiredAt') or ''),
-            'refreshExpiredAt': _pick(raw, 'refreshExpiresAt',
-                                      'refresh_expires_at')
-            or str(old.get('refreshExpiredAt') or ''),
+            'refreshExpiredAt': store.iso_from_epoch(refresh_expires)
+            if refresh_expires else '',
             'realUserID': _pick(raw, 'realUserID', 'real_user_id', 'userId',
                                 'user_id') or str(old.get('realUserID') or ''),
             'name': _pick(raw, 'name') or str(old.get('name') or ''),
@@ -983,7 +1003,7 @@ class MinimaxAdapter(PlatformAdapter):
         token = await self._token_for(account, proxy=proxy, force=force_token)
         cap = self._output_cap(model)
         payload = translate.to_anthropic(body, output_cap=cap)
-        payload['model'] = model
+        payload['model'] = self.upstream_model(model)
         # 会话 id 用亲和键的稳定派生值：既是同一段对话的粘性标识，又不会把
         # 原始 prompt 哈希 / 用户输入直接塞进上游请求头。
         session_id = (f'ses_{uuid.uuid5(uuid.NAMESPACE_URL, affinity).hex[:24]}'

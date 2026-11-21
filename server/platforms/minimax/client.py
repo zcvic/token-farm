@@ -169,10 +169,18 @@ def _token_payload(raw: object) -> dict:
         expires_in = int(payload.get('expires_in') or 0)
     except (TypeError, ValueError):
         expires_in = 0
+    # 少数 OAuth 实现会单独给 refresh token 的寿命（`refresh_expires_in`）。
+    # 上游当前版本不给，所以这里只做透传、不臆造：拿不到就留 0，调用方据此
+    # 清空旧的到期时间，而不是沿用已被作废的那一份。
+    try:
+        refresh_expires_in = int(payload.get('refresh_expires_in') or 0)
+    except (TypeError, ValueError):
+        refresh_expires_in = 0
     return {
         'access_token': access,
         'refresh_token': str(payload.get('refresh_token') or '').strip(),
         'expires_in': expires_in if expires_in > 0 else C.TOKEN_FALLBACK_SECONDS,
+        'refresh_expires_in': max(0, refresh_expires_in),
     }
 
 
