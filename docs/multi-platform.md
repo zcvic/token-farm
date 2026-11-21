@@ -712,6 +712,11 @@ Discovery 的目录是 OpenAI schema，`/v1/models` 同时承担**额度探针**
   **当前剩余**（不是包上限），`expire_at` 是 **epoch 秒**。上游给毫秒的平台
   （MiniMax / DuMate）在适配器里折回秒，字段名也在适配器里归一——这两处不一致
   不会报错，只会让界面的有效期整列静默变空，新增平台时注意对齐 `trae`。
+- 快照里**只在余额确实是美元时**才写 `unit: 'usd'`（Kilo、Trae 国际版），积分
+  平台不写这一项——老条目与外部对账脚本读出来的形状与改造前一致。查询失败
+  回退旧值时路由会把该字段带回 `unit`，界面才不会把 `$12.34` 画成「12 积分」。
+  设置页「已登记余额」的合计另给 `credits_unit`：整批都是美元才标 `usd`，
+  混合单位退回 `credits`（那种合计本身没有意义，更不能冒充美元）。
 - **版本的统计口径按平台分两类**。WorkBuddy 的版本是账号池划分，看客户端传的
   `global:` 前缀；Trae 这类分版本的平台，模型名是 `trae/<model>`、本身不含
   版本，版本由**实际选中的账号**决定。适配器在 `PlatformChat.realm` 里回报
@@ -896,6 +901,12 @@ Cline 的免费档有两处硬约束，都写在 `client.py` 里：`deepseek/` /
 `chat.completion`；上游把限流伪装成 200 正常帧时（`Daily free limit` /
 `INFERENCE_CAP_ERROR` / 只有 reasoning 没有正文），按 429 换号而不是把空回复
 交给用户。
+
+余额的**单位**会一路带到界面：`credits()` 给出的 `unit` 字段（`usd` / `credits`）
+也随快照一起存下来，所以查询失败回退「上次登记」时不会把 `$12.34` 画成
+「12 积分」。账号页的列头、首页的平台卡片与设置页的「已登记余额」合计都按同一
+份单位走；同一平台的账号单位一致，取到一个 `usd` 就整列按美元，混合单位退回
+积分口径（那种合计本身没有意义，更不能冒充美元）。
 
 ---
 
@@ -1244,7 +1255,11 @@ Trae 事件 → OpenAI chunk：
   「先落盘再使用」的 token 轮换、401 后同账号换 token 重试一次、SSE 聚合
   （reasoning 兜底 / `tool_calls` / 伪装限流抛 429）、非流式免费档被强制走流式
   且 `max_tokens` 被剥、空模型名兜底。
-- `server/tests/test_platform_credits_snapshot.py`：平台余额快照的登记与回退。
+- `server/tests/test_platform_credits_snapshot.py`：平台余额快照的登记与回退，
+  含美元单位（`unit='usd'`）随快照存取、积分平台不写该字段、设置页合计在整批
+  美元时标 `usd` 而混合单位退回 `credits`。
+- `server/tests/test_platform_credits.py`：前端余额展示口径（借 Node 跑
+  `web/lib/platform-credits.ts`），含美元 `$` 格式化与「没有 unit 按积分」的兜底。
 - `server/tests/test_platform_sse.py`：SSE 拼帧、错误帧、断开时不补错误帧。
 - `server/tests/test_platform_realm.py`：前端版本映射（`global` ↔ `intl`）、
   版本开关的显示条件、账号 / 模型过滤、导入时补 `realm`。

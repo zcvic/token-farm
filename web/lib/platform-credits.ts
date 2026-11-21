@@ -45,6 +45,40 @@ function sourcePacks(
   return stale.length ? stale : live;
 }
 
+/**
+ * 主数字的单位：`usd`（Kilo 的美元余额、Trae 国际版）还是 `credits`（积分）。
+ *
+ * 后端已经用 `unit` 表达了这个区别，前端**必须**照着画：把美元按积分显示
+ * （`12.34` 读成「12 积分」）会让用户以为余额是另一个数量级。
+ * 缺省 / 认不出的值按积分处理——那是绝大多数平台的单位，也是改造前的行为。
+ */
+export function creditUnit(
+  entry: PlatformCredits | undefined | null,
+): 'usd' | 'credits' {
+  return entry?.unit === 'usd' ? 'usd' : 'credits';
+}
+
+/**
+ * 余额数字的展示文本（纯函数，不依赖 i18n 运行时）。
+ *
+ * 美元带 `$` 前缀并按量级给位数：余额常是 `0.0x` 量级，截成整数就等于显示
+ * 成 0（与 `format.ts` 的 `fmtMoney` 同一口径，但那份依赖浏览器 locale，
+ * 这里不能引入运行时 import）。
+ * 积分保持原样（整数为主），不额外加千分位——改口径会让既有平台的显示变样。
+ */
+export function formatCreditValue(
+  value: number,
+  unit: 'usd' | 'credits' = 'credits',
+): string {
+  if (!Number.isFinite(value)) return '—';
+  if (unit !== 'usd') return String(value);
+  const abs = Math.abs(value);
+  if (abs === 0) return '$0';
+  if (abs >= 1) return `$${value.toFixed(2)}`;
+  if (abs >= 0.0001) return `$${value.toFixed(4)}`;
+  return `$${value.toExponential(1)}`;
+}
+
 /** 平台账号的可见权益包，按到期时间升序（最早的排最前）。 */
 export function platformCreditPacks(
   entry: PlatformCredits | undefined | null,

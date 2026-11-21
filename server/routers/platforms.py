@@ -216,12 +216,14 @@ def _platform_overview(name: str, adapter) -> dict:
     进了冷却还是都被停用了，两个原因的处理方式完全不同。
 
     积分合计来自**快照**（最近一次成功查询登记的值），不是实时余额；
-    `snapshot_at` 如实给出登记时刻，界面据此标注「已登记」。
+    `snapshot_at` 如实给出登记时刻，界面据此标注「已登记」。合计的单位由
+    `credits_unit` 给出：Kilo / Trae 国际版的余额是美元，按积分画会差一个
+    数量级；整批都是美元才标 `usd`，混合单位退回 `credits`。
     """
     out = {
         'accounts': 0, 'active': 0, 'checkin_only': 0,
         'disabled': 0, 'cooling': 0,
-        'credits': None, 'credits_known': 0,
+        'credits': None, 'credits_known': 0, 'credits_unit': 'credits',
         'snapshot_at': 0, 'next_expire_at': None,
         'error': None,
     }
@@ -256,12 +258,20 @@ def _platform_overview(name: str, adapter) -> dict:
     rows = snapshot.get('accounts') or []
     total = 0.0
     known = 0
+    usd = 0
     for row in rows:
         value = row.get('credits')
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             total += float(value)
             known += 1
+            if row.get('unit') == 'usd':
+                usd += 1
     out['credits_known'] = known
+    # 合计的单位：整批都是美元才标 `usd`。混合单位（理论不该出现：同一平台
+    # 的余额口径一致）时退回积分口径——把两种单位相加得到的数字本身没有意义，
+    # 但至少不能让它冒充美元。
+    if known and usd == known:
+        out['credits_unit'] = 'usd'
     out['snapshot_at'] = int(snapshot.get('snapshot_at') or 0)
     if known:
         out['credits'] = int(total) if float(total).is_integer() else round(total, 2)
@@ -720,6 +730,10 @@ def _with_last_platform_credits(name: str, item: dict) -> dict:
     if last:
         item['last_credits'] = last['credits']
         item['last_registered_at'] = last['registered_at']
+        if last.get('unit'):
+            # 美元余额（Kilo / Trae 国际版）回退旧值时也要保留单位，否则界面
+            # 会把 `$12.34` 画成「12 积分」。
+            item['unit'] = last['unit']
         if last.get('expires'):
             item['last_expires'] = last['expires']
         if last.get('next_expire_at'):

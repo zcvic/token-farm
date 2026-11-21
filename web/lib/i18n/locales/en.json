@@ -253,10 +253,13 @@
       "other": "expires in {n} days"
     },
     "expiryTipTitle": "Credit expiry (total {total})",
-    "expiryTipNote": "Listed by expiry time; the countdown shows only the nearest one. Unused credits are forfeited at expiry."
+    "expiryTipTitleUsd": "Balance expiry (total {total})",
+    "expiryTipNote": "Listed by expiry time; the countdown shows only the nearest one. Unused credits are forfeited at expiry.",
+    "expiryTipNoteUsd": "Listed by expiry time; the countdown shows only the nearest one. Unused balance is forfeited at expiry."
   },
   "metric": {
     "credits": "Credit balance",
+    "balance": "Balance",
     "creditAmount": {
       "one": "{n} credit",
       "other": "{n} credits"
@@ -2513,6 +2516,7 @@
     "creditsHintTrae": "Read from the Trae entitlement endpoint (read-only); check-in credits are tracked separately",
     "creditsHintQoder": "Read from the Qoder embedded gateway credit snapshot (read-only); check-in credits are tracked separately",
     "creditsHintLoomy": "Read from the Loomy points endpoint (available balance); check-in earnings are the balance delta around check-in",
+    "creditsHintKilo": "Read from the Kilo account endpoint in US dollars (read-only); Kilo has no check-in",
     "creditsLastRecorded": "Last recorded: {when}",
     "creditsLimit": "Total",
     "creditsUsed": "Used",

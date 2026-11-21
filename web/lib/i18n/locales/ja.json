@@ -232,10 +232,13 @@
     "expiresInHours": "{n} 時間後に期限切れ",
     "expiresInDays": "{n} 日後に期限切れ",
     "expiryTipTitle": "有効期限（合計 {total}）",
-    "expiryTipNote": "有効期限の早い順に表示。カウントダウンは直近の 1 件のみ。期限を過ぎた未使用分は失効します。"
+    "expiryTipTitleUsd": "残高の有効期限（合計 {total}）",
+    "expiryTipNote": "有効期限の早い順に表示。カウントダウンは直近の 1 件のみ。期限を過ぎた未使用分は失効します。",
+    "expiryTipNoteUsd": "有効期限の早い順に表示。カウントダウンは直近の 1 件のみ。期限を過ぎた未使用の残高は失効します。"
   },
   "metric": {
     "credits": "クレジット残高",
+    "balance": "残高",
     "creditAmount": "{n} クレジット",
     "requests": "リクエスト数",
     "requestsShort": "リクエスト",
@@ -2486,6 +2489,7 @@
     "creditsHintTrae": "Trae の権益 API から取得（読み取り専用）。チェックイン分は別枠で計算されます",
     "creditsHintQoder": "Qoder 内蔵ゲートウェイのクレジットスナップショットから取得（読み取り専用）。チェックイン分は別枠で計算されます",
     "creditsHintLoomy": "Loomy のポイント API（利用可能残高）から取得。チェックイン収入はチェックイン前後の残高差で計算されます",
+    "creditsHintKilo": "Kilo のアカウント API から取得。単位は米ドル（読み取り専用）。Kilo にチェックインはありません",
     "creditsLastRecorded": "前回の記録：{when}",
     "creditsLimit": "合計",
     "creditsUsed": "使用済み",

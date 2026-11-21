@@ -232,10 +232,13 @@
     "expiresInHours": "{n} 小时后到期",
     "expiresInDays": "{n} 天后到期",
     "expiryTipTitle": "积分到期时间（合计 {total}）",
-    "expiryTipNote": "按到期时间排列，倒计时只显示最近一笔；到期后未用完的积分会作废。"
+    "expiryTipTitleUsd": "余额到期时间（合计 {total}）",
+    "expiryTipNote": "按到期时间排列，倒计时只显示最近一笔；到期后未用完的积分会作废。",
+    "expiryTipNoteUsd": "按到期时间排列，倒计时只显示最近一笔；到期后未用完的余额会作废。"
   },
   "metric": {
     "credits": "积分余额",
+    "balance": "余额",
     "creditAmount": "{n} 积分",
     "requests": "请求数",
     "requestsShort": "请求",
@@ -2241,6 +2244,7 @@
     "creditsHintTrae": "余额来自 Trae 权益接口（只读查询）；签到奖池单独计算",
     "creditsHintQoder": "余额来自 Qoder 内置网关的积分快照（只读查询）；签到积分单独计算",
     "creditsHintLoomy": "余额来自 Loomy 积分接口（可用余额）；签到收入按签到前后的余额差额计算",
+    "creditsHintKilo": "余额来自 Kilo 账户接口，单位是美元（只读查询）；Kilo 没有签到",
     "creditsLastRecorded": "上次登记：{when}",
     "creditsLimit": "总额",
     "creditsUsed": "已用",

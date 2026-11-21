@@ -364,6 +364,18 @@ def _platform_value(raw: object) -> int | float | None:
     return int(number) if number.is_integer() else round(number, 2)
 
 
+def _platform_unit(raw: object) -> str:
+    """快照条目的单位：只有明确的 `usd` 才记下来，其余一律当积分。
+
+    为什么要存：Kilo 的余额与 Trae 国际版都是美元。查询失败回退旧值时，若只
+    交回数字而丢掉单位，界面会把 `$12.34` 画成「12 积分」——数量级完全错。
+    默认值不写进快照（老条目只有 `credits`/`at`），这样升级前后读出来一致。
+    """
+    if isinstance(raw, dict) and raw.get('unit') == 'usd':
+        return 'usd'
+    return 'credits'
+
+
 # 快照里愿意保留的到期包字段：余额是**数字**，到期是**明细**，两者一起存才能
 # 在查询失败回退旧值时把「哪一笔、还有几天到期」一起交代清楚。
 def _platform_expiries(raw: object) -> list[dict]:
@@ -442,8 +454,14 @@ def record_platform_balances(platform: str, entries: dict[str, object]) -> int |
         if not uid or value is None:
             continue
         expiries = _platform_expiries(raw)
-        clean[uid] = {'credits': value, 'expires': expiries,
-                      'next_expire_at': _platform_next_expire(expiries, raw)}
+        entry = {'credits': value, 'expires': expiries,
+                 'next_expire_at': _platform_next_expire(expiries, raw)}
+        # 只在确实是美元时写这一项：老条目 / 积分平台保持原有形状，读出与
+        # 改造前一致（快照是对账用的，多一个恒为 `credits` 的字段只会让
+        # 既有测试与外部脚本无谓地对不上）。
+        if _platform_unit(raw) == 'usd':
+            entry['unit'] = 'usd'
+        clean[uid] = entry
     if not clean:
         return None
     now = int(time.time())
@@ -463,7 +481,8 @@ def platform_snapshot_entry(platform: str, uid: str) -> dict | None:
     """单个平台账号的上次登记值（没有登记过返回 None）。
 
     带上 `expires` / `next_expire_at`：回退旧值时界面照常显示有效期，而不是
-    把「这一笔什么时候到期」这一行整块吞掉。
+    把「这一笔什么时候到期」这一行整块吞掉。美元余额（Kilo / Trae 国际版）
+    另带 `unit='usd'`，否则界面会把旧值按积分画。
     """
     bucket = _load_platform_snapshot().get(_platform_key(platform)) or {}
     raw = bucket.get(str(uid or '').strip())
@@ -471,10 +490,13 @@ def platform_snapshot_entry(platform: str, uid: str) -> dict | None:
     if value is None:
         return None
     expiries = _platform_expiries(raw)
-    return {'uid': str(uid), 'credits': value,
-            'registered_at': _snapshot_time(raw),
-            'expires': expiries,
-            'next_expire_at': _platform_next_expire(expiries, raw)}
+    entry = {'uid': str(uid), 'credits': value,
+             'registered_at': _snapshot_time(raw),
+             'expires': expiries,
+             'next_expire_at': _platform_next_expire(expiries, raw)}
+    if _platform_unit(raw) == 'usd':
+        entry['unit'] = 'usd'
+    return entry
 
 
 def platform_snapshot_entries(platform: str) -> dict:
@@ -487,10 +509,13 @@ def platform_snapshot_entries(platform: str) -> dict:
         if value is None:
             continue
         expiries = _platform_expiries(raw)
-        rows.append({'uid': str(uid), 'credits': value,
-                     'registered_at': _snapshot_time(raw),
-                     'expires': expiries,
-                     'next_expire_at': _platform_next_expire(expiries, raw)})
+        row = {'uid': str(uid), 'credits': value,
+               'registered_at': _snapshot_time(raw),
+               'expires': expiries,
+               'next_expire_at': _platform_next_expire(expiries, raw)}
+        if _platform_unit(raw) == 'usd':
+            row['unit'] = 'usd'
+        rows.append(row)
     rows.sort(key=lambda r: r['uid'])
     newest = max((r['registered_at'] or 0 for r in rows), default=0)
     return {'platform': key, 'snapshot_at': newest,

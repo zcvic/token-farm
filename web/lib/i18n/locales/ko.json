@@ -232,10 +232,13 @@
     "expiresInHours": "{n}시간 후 만료",
     "expiresInDays": "{n}일 후 만료",
     "expiryTipTitle": "크레딧 만료 (합계 {total})",
-    "expiryTipNote": "만료가 빠른 순서로 표시됩니다. 카운트다운은 가장 가까운 항목만 보여줍니다. 만료 후 남은 크레딧은 소멸됩니다."
+    "expiryTipTitleUsd": "잔액 만료 (합계 {total})",
+    "expiryTipNote": "만료가 빠른 순서로 표시됩니다. 카운트다운은 가장 가까운 항목만 보여줍니다. 만료 후 남은 크레딧은 소멸됩니다.",
+    "expiryTipNoteUsd": "만료가 빠른 순서로 표시됩니다. 카운트다운은 가장 가까운 항목만 보여줍니다. 만료 후 남은 잔액은 소멸됩니다."
   },
   "metric": {
     "credits": "크레딧 잔액",
+    "balance": "잔액",
     "creditAmount": "{n} 크레딧",
     "requests": "요청 수",
     "requestsShort": "요청",
@@ -2486,6 +2489,7 @@
     "creditsHintTrae": "Trae 권익 API에서 조회 (읽기 전용). 체크인 크레딧은 별도로 계산됩니다",
     "creditsHintQoder": "Qoder 내장 게이트웨이의 크레딧 스냅샷에서 조회 (읽기 전용). 체크인 크레딧은 별도로 계산됩니다",
     "creditsHintLoomy": "Loomy 포인트 API(사용 가능 잔액)에서 조회. 체크인 수익은 체크인 전후 잔액 차이로 계산됩니다",
+    "creditsHintKilo": "Kilo 계정 API에서 조회하며 단위는 미국 달러입니다(읽기 전용). Kilo에는 체크인이 없습니다",
     "creditsLastRecorded": "마지막 기록: {when}",
     "creditsLimit": "총액",
     "creditsUsed": "사용량",

@@ -32,6 +32,7 @@ import {Switch} from '@/components/ui/switch';
 import {errText, platformApi} from '@/lib/api';
 import {useAuth} from '@/lib/auth-context';
 import {fmtCompact, fmtDateTime} from '@/lib/format';
+import {formatCreditValue} from '@/lib/platform-credits';
 import {useI18n} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
 import type {
@@ -457,12 +458,16 @@ export function PlatformConfigPanel({
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div className="rounded-2xl bg-background/60 px-3 py-2">
                 <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {t('platforms.overviewCredits')}
+                  {settings.overview.credits_unit === 'usd'
+                    ? t('metric.balance')
+                    : t('platforms.overviewCredits')}
                 </p>
                 <p className="mt-0.5 text-sm tabular-nums">
                   {settings.overview.credits === null
                     ? '—'
-                    : fmtCompact(settings.overview.credits)}
+                    : settings.overview.credits_unit === 'usd'
+                      ? formatCreditValue(settings.overview.credits, 'usd')
+                      : fmtCompact(settings.overview.credits)}
                   <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
                     {settings.overview.credits === null
                       ? t('platforms.overviewNoCredits')

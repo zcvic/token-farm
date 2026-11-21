@@ -87,6 +87,23 @@ class RecordPlatformBalanceTest(_DbCase):
         self.assertIsNone(creditsvc.record_platform_balance('', 'u1', 1))
         self.assertIsNone(creditsvc.record_platform_balance('trae', '', 1))
 
+    def test_usd_unit_survives_the_snapshot(self) -> None:
+        """美元余额要连单位一起登记：回退旧值时只交回数字，界面会按积分画。"""
+        creditsvc.record_platform_balances('kilo', {'u1': {
+            'uid': 'u1', 'credits': 12.34, 'unit': 'usd'}})
+        entry = creditsvc.platform_snapshot_entry('kilo', 'u1')
+        self.assertEqual(entry['credits'], 12.34)
+        self.assertEqual(entry['unit'], 'usd')
+        rows = creditsvc.platform_snapshot_entries('kilo')['accounts']
+        self.assertEqual(rows[0]['unit'], 'usd')
+
+    def test_credit_unit_is_not_written(self) -> None:
+        """积分平台不写 `unit`：快照是对账用的，多一个恒为 credits 的字段
+        只会让既有条目与外部脚本无谓地对不上。"""
+        creditsvc.record_platform_balance('trae', 'u1', 4700)
+        self.assertNotIn('unit', creditsvc.platform_snapshot_entry('trae', 'u1'))
+        self.assertNotIn('unit', creditsvc.platform_snapshot_entries('trae')['accounts'][0])
+
     def test_forget_only_clears_that_platform(self) -> None:
         creditsvc.record_platform_balance('trae', 'u1', 10)
         creditsvc.record_platform_balance('qoder', 'u1', 20)
@@ -337,6 +354,37 @@ class PlatformOverviewTest(_DbCase):
         out = platforms_router._platform_overview('qoder', _Boom({}))
         self.assertEqual(out['accounts'], 0)
         self.assertEqual(out['error'], '网关没起来')
+
+    def test_usd_totals_keep_their_unit(self) -> None:
+        """Kilo / Trae 国际版的余额是美元：合计不能标成积分，否则会被读成
+        「几十积分」。整批都是美元才标 `usd`。"""
+        creditsvc.record_platform_balances('kilo', {
+            'a': {'credits': 1.25, 'unit': 'usd'},
+            'b': {'credits': 0.5, 'unit': 'usd'},
+        })
+        out = platforms_router._platform_overview(
+            'kilo', _FakeAdapter({}, accounts=[
+                {'uid': 'a', 'disabled': False}, {'uid': 'b', 'disabled': False}]))
+        self.assertEqual(out['credits'], 1.75)
+        self.assertEqual(out['credits_unit'], 'usd')
+
+    def test_mixed_units_fall_back_to_credits(self) -> None:
+        """混合单位不能标成美元：那种合计本身没有意义，更不能冒充美元。"""
+        creditsvc.record_platform_balances('kilo', {
+            'a': {'credits': 1.25, 'unit': 'usd'},
+            'b': {'credits': 300},
+        })
+        out = platforms_router._platform_overview(
+            'kilo', _FakeAdapter({}, accounts=[
+                {'uid': 'a', 'disabled': False}, {'uid': 'b', 'disabled': False}]))
+        self.assertEqual(out['credits_unit'], 'credits')
+
+    def test_credit_platforms_have_no_usd_unit(self) -> None:
+        creditsvc.record_platform_balances('trae', {'a': {'credits': 100}})
+        out = platforms_router._platform_overview(
+            'trae', _FakeAdapter({}, accounts=[{'uid': 'a', 'disabled': False}]))
+        self.assertEqual(out['credits_unit'], 'credits')
+        self.assertEqual(out['credits'], 100)
 
     def test_no_snapshot_yields_null_credits(self) -> None:
         out = platforms_router._platform_overview('trae', _FakeAdapter({}, []))

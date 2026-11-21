@@ -35,6 +35,7 @@ import {useRealm} from '@/lib/realm-context';
 import {usePlatform} from '@/lib/platform-context';
 import {filterByPlatformRealm} from '@/lib/platform-realm';
 import {platformExpiryOf} from '@/lib/platform-account-list';
+import {formatCreditValue} from '@/lib/platform-credits';
 import type {
   CreditsFlow,
   CreditsMeta,
@@ -392,6 +393,24 @@ export default function DashboardPage() {
     }
     return {total: platAccounts.length, valid, expiring, credits, known};
   }, [platAccounts, platCreditsOf]);
+
+  /**
+   * 平台余额的单位。
+   *
+   * Kilo 的余额是**美元**（`unit='usd'`），Trae 国际版也是。卡片上写「积分」
+   * 会把 `$12.34` 读成「12 积分」，数量级完全错。同平台的账号单位一致，取到
+   * 一个 `usd` 就按美元画；没有 `unit` 的旧数据按积分（改造前的口径）。
+   */
+  const platCreditUnit = useMemo(
+    () => (platCreditsList.some((c) => c?.unit === 'usd')
+        || (platCreditsList.length === 0 && platform === 'kilo')
+      ? 'usd'
+      : 'credits'),
+    [platCreditsList, platform],
+  );
+  const platCreditLabel = platCreditUnit === 'usd'
+    ? t('metric.balance')
+    : t('metric.credits');
 
   /**
    * 账号那一块没取到。
@@ -768,8 +787,12 @@ export default function DashboardPage() {
               delay={0.1}
             />
             <StatCard
-              label={t('metric.credits')}
-              value={platformFailed ? '—' : (platStat.known ? fmtNumber(platStat.credits) : '—')}
+              label={platCreditLabel}
+              value={platformFailed ? '—' : (platStat.known
+                ? (platCreditUnit === 'usd'
+                    ? formatCreditValue(platStat.credits, 'usd')
+                    : fmtNumber(platStat.credits))
+                : '—')}
               hint={
                 // 三种「没有数字」的原因是不同的，必须分开说：平台不提供积分查询 /
                 // 还在等上游返回 / 已经取到了但一个号都没有可用的余额字段。
@@ -1291,9 +1314,11 @@ export default function DashboardPage() {
                     </div>
                     <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px]">
                       <span className="text-muted-foreground">{a.realm_label || a.realm}</span>
-                      <span className="font-medium tabular-nums" title={t('metric.credits')}>
+                      <span className="font-medium tabular-nums" title={platCreditLabel}>
                         {typeof cred === 'number'
-                          ? t('metric.creditAmount', {n: fmtNumber(cred), count: Math.round(cred)})
+                          ? (platCreditUnit === 'usd'
+                              ? formatCreditValue(cred, 'usd')
+                              : t('metric.creditAmount', {n: fmtNumber(cred), count: Math.round(cred)}))
                           : ''}
                       </span>
                     </div>

@@ -1,7 +1,8 @@
 'use client';
 
 import {useT} from '@/lib/i18n/provider';
-import {fmtDateTime, fmtNumber} from '@/lib/format';
+import {fmtDateTime} from '@/lib/format';
+import {formatCreditValue} from '@/lib/platform-credits';
 import {useNow} from '@/lib/use-now';
 import type {CreditExpiry} from '@/lib/types';
 
@@ -24,15 +25,23 @@ import type {CreditExpiry} from '@/lib/types';
  *
  * 颜色按紧迫度分档，让快到期的自己跳出来，而不是等用户逐个去算。
  */
-export function CreditCountdown({expiries}: {expiries?: CreditExpiry[] | null}) {
+export function CreditCountdown({expiries, unit = 'credits'}: {
+  expiries?: CreditExpiry[] | null;
+  /** 金额单位：Trae 国际版与 Kilo 的余额是美元，按积分画会差一个数量级。 */
+  unit?: 'usd' | 'credits';
+}) {
   // 没有到期信息（套餐永不过期 / 尚未查到）时不渲染任何东西 —— 包括不订阅时钟。
   // 拆成两层就是为了这个：useNow 是 hook，不能在提前 return 之后才调用。
   const next = expiries?.[0];
   if (!next) return null;
-  return <Countdown next={next} all={expiries ?? []} />;
+  return <Countdown next={next} all={expiries ?? []} unit={unit} />;
 }
 
-function Countdown({next, all}: {next: CreditExpiry; all: CreditExpiry[]}) {
+function Countdown({next, all, unit}: {
+  next: CreditExpiry;
+  all: CreditExpiry[];
+  unit: 'usd' | 'credits';
+}) {
   const t = useT();
   // 用渲染时刻粗算一次剩余时间，只用来决定刷新频率（精度要求 = 文案变化频率）：
   // 最后一分钟必须秒级，否则「即将到期」出现得不及时；再往后分钟级足够，
@@ -55,22 +64,25 @@ function Countdown({next, all}: {next: CreditExpiry; all: CreditExpiry[]}) {
 
   // 明细：每条「额度 · 到期时刻（本地时区）」。时刻用绝对时间，
   // 用户要拿它跟腾讯官网/客服对账，倒计时只解决紧迫感。
-  const lines = all.map((e) => `${fmtNumber(e.amount)} · ${fmtDateTime(e.at)}`);
+  // 金额按单位走：美元是 `$1.25` 量级，按积分写会被读成「1.25 积分」。
+  const amountText = (v: number) => formatCreditValue(v, unit);
+  const lines = all.map((e) => `${amountText(e.amount)} · ${fmtDateTime(e.at)}`);
   const total = all.reduce((sum, e) => sum + e.amount, 0);
 
   return (
     <span
       className={`rounded-full px-1.5 py-0.5 text-[10px] leading-3 tabular-nums ${cls}`}
       title={[
-        t('credit.expiryTipTitle', {total: fmtNumber(total)}),
+        t(unit === 'usd' ? 'credit.expiryTipTitleUsd' : 'credit.expiryTipTitle',
+          {total: amountText(total)}),
         ...lines,
         '',
-        t('credit.expiryTipNote'),
+        t(unit === 'usd' ? 'credit.expiryTipNoteUsd' : 'credit.expiryTipNote'),
       ].join('\n')}
     >
       {/* 额度在前、时间在后：读作「这么多，还有这么久到期」。反过来只写时间的话
           会被当成整列总额的到期时间（见文件头注释）。 */}
-      {fmtNumber(next.amount)} · {countdownText(t, left)}
+      {amountText(next.amount)} · {countdownText(t, left)}
     </span>
   );
 }

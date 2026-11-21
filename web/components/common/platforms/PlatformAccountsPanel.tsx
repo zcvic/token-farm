@@ -69,7 +69,12 @@ import {useAsyncAll} from '@/lib/use-async-data';
 import {useNow} from '@/lib/use-now';
 import {fmtDateTime, fmtRemain} from '@/lib/format';
 import {paginate} from '@/lib/account-list';
-import {platformCreditExpiries, platformCreditPacks} from '@/lib/platform-credits';
+import {
+  creditUnit,
+  formatCreditValue,
+  platformCreditExpiries,
+  platformCreditPacks,
+} from '@/lib/platform-credits';
 import {
   PLATFORM_GROUPS,
   platformAvailabilityOf,
@@ -107,10 +112,24 @@ import type {
 /** 一页显示多少个账号（与 WorkBuddy 账号页同口径）。 */
 const PAGE_SIZE = 20;
 
-/** 积分显示：加载中 `…`，拿不到实时值就退到「上次登记」（`~` 前缀），都没有给 `—`。 */
-function creditText(entry: PlatformCredits | undefined, loading: boolean): string {
-  if (entry && typeof entry.credits === 'number') return String(entry.credits);
-  if (entry && typeof entry.last_credits === 'number') return `~${entry.last_credits}`;
+/**
+ * 余额显示：加载中 `…`，拿不到实时值就退到「上次登记」（`~` 前缀），都没有给 `—`。
+ *
+ * 按 `unit` 走：Kilo 的余额是**美元**（`$12.34`），按积分画会被读成「12 积分」，
+ * 数量级完全错。`fallback` 是整列的兜底口径：条目自己没带 `unit`（旧后端 /
+ * 刚加载完的空表）时用它，免得同一列里数字与列头单位不一致。
+ */
+function creditText(entry: PlatformCredits | undefined, loading: boolean,
+                    fallback?: 'usd' | 'credits'): string {
+  const unit = creditUnit(entry) === 'usd' || fallback === 'usd'
+    ? 'usd' as const
+    : 'credits' as const;
+  if (entry && typeof entry.credits === 'number') {
+    return formatCreditValue(entry.credits, unit);
+  }
+  if (entry && typeof entry.last_credits === 'number') {
+    return `~${formatCreditValue(entry.last_credits, unit)}`;
+  }
   return loading ? '…' : '—';
 }
 
@@ -125,9 +144,11 @@ function creditTitle(entry: PlatformCredits | undefined, hint: string,
   return entry.error;
 }
 
-/** 数值展示：拿不到给 `—`，小数保留两位（上游金额是浮点）。 */
-function creditNum(value: number | null | undefined): string {
+/** 数值展示：拿不到给 `—`；美元按 `$` 口径，积分小数保留两位（上游金额是浮点）。 */
+function creditNum(value: number | null | undefined,
+                   unit: 'usd' | 'credits' = 'credits'): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  if (unit === 'usd') return formatCreditValue(value, 'usd');
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
@@ -911,7 +932,28 @@ export function PlatformAccountsPanel({
       ? t('platforms.creditsHintTrae')
       : platform === 'loomy'
         ? t('platforms.creditsHintLoomy')
-        : t('platforms.creditsHint');
+        : platform === 'kilo'
+          ? t('platforms.creditsHintKilo')
+          : t('platforms.creditsHint');
+
+  /**
+   * 余额单位：Kilo 的余额是美元（`unit='usd'`），Trae 国际版也是。
+   *
+   * 列头与数字必须一起换：只把数字画成 `$12.34` 而列头还写「积分」，用户仍会
+   * 以为那是积分。同平台账号单位一致，取到一个 `usd` 就整列按美元；没有
+   * `unit` 的旧数据按积分（改造前的口径）。
+   *
+   * 余额还没取回时（首次加载 / 查询失败清空）用平台的固定口径兜底：Kilo 只有
+   * 美元，否则列头会先写「积分」再跳成「余额」。Trae 的单位随版本变，只能等
+   * 数据到了再定。
+   */
+  const creditUnitOf = Object.values(credits).some((c) => c?.unit === 'usd')
+      || (Object.keys(credits).length === 0 && platform === 'kilo')
+    ? 'usd' as const
+    : 'credits' as const;
+  const creditColumnLabel = creditUnitOf === 'usd'
+    ? t('metric.balance')
+    : t('platforms.colCredits');
 
   const loginStatusText = (() => {
     if (!login) return '';
@@ -1340,7 +1382,7 @@ export function PlatformAccountsPanel({
                   )}
                   {supportsCredits && (
                     <TableHead className="hidden text-[11px] text-muted-foreground sm:table-cell">
-                      {t('platforms.colCredits')}
+                      {creditColumnLabel}
                     </TableHead>
                   )}
                   <TableHead className="hidden text-[11px] text-muted-foreground sm:table-cell">
@@ -1472,12 +1514,12 @@ export function PlatformAccountsPanel({
                               title={creditTitle(credits[a.uid], creditsHint,
                                 (when) => t('platforms.creditsLastRecorded', {when}))}
                             >
-                              {creditText(credits[a.uid], creditsLoading)}
+                              {creditText(credits[a.uid], creditsLoading, creditUnitOf)}
                               {typeof credits[a.uid]?.checkin_credits === 'number'
                                 && (credits[a.uid]?.checkin_credits as number) > 0 && (
                                   <span className="ml-1 text-[10px] text-muted-foreground">
                                     {t('platforms.creditsCheckinShort', {
-                                      n: creditNum(credits[a.uid]?.checkin_credits),
+                                      n: creditNum(credits[a.uid]?.checkin_credits, creditUnitOf),
                                     })}
                                   </span>
                                 )}
@@ -1486,7 +1528,7 @@ export function PlatformAccountsPanel({
                                 「多少分 · 还有几天到期」，悬停给出逐包明细与合计。
                                 只画最近一笔（单元格放不下多行），但金额必须带上 ——
                                 只写日期会被读成「余额整体那天到期」。 */}
-                            <CreditCountdown expiries={creditExpiries} />
+                            <CreditCountdown expiries={creditExpiries} unit={creditUnitOf} />
                           </div>
                         </TableCell>
                       )}
@@ -1874,28 +1916,30 @@ export function PlatformAccountsPanel({
                     <div className="rounded-[12px] border border-border/60 bg-muted/30 px-3 py-2">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs text-muted-foreground">
-                          {t('platforms.creditsBalance')}
+                          {creditUnitOf === 'usd'
+                            ? t('metric.balance')
+                            : t('platforms.creditsBalance')}
                         </span>
                         <span
                           className="text-sm font-medium tabular-nums"
                           title={creditTitle(usageCredit, creditsHint,
                             (when) => t('platforms.creditsLastRecorded', {when}))}
                         >
-                          {creditText(usageCredit, creditsLoading)}
+                          {creditText(usageCredit, creditsLoading, creditUnitOf)}
                         </span>
                       </div>
                       <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                         <span>{t('platforms.creditsLimit')}</span>
                         <span className="text-right tabular-nums text-foreground">
-                          {creditNum(usageCredit?.limit)}
+                          {creditNum(usageCredit?.limit, creditUnitOf)}
                         </span>
                         <span>{t('platforms.creditsUsed')}</span>
                         <span className="text-right tabular-nums text-foreground">
-                          {creditNum(usageCredit?.used)}
+                          {creditNum(usageCredit?.used, creditUnitOf)}
                         </span>
                         <span>{t('platforms.creditsCheckin')}</span>
                         <span className="text-right tabular-nums text-foreground">
-                          {creditNum(usageCredit?.checkin_credits)}
+                          {creditNum(usageCredit?.checkin_credits, creditUnitOf)}
                           {usageCredit?.checked_in
                             ? ` · ${t('platforms.checkinAlready')}`
                             : ''}
@@ -1917,7 +1961,7 @@ export function PlatformAccountsPanel({
                                   {pack.label || t('platforms.creditsPack')}
                                 </span>
                                 <span className="shrink-0 tabular-nums text-foreground">
-                                  {creditNum(pack.amount)} · {fmtDateTime(pack.expire_at * 1000)}
+                                  {creditNum(pack.amount, creditUnitOf)} · {fmtDateTime(pack.expire_at * 1000)}
                                 </span>
                               </li>
                             ))}

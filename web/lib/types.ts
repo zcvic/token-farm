@@ -2397,6 +2397,11 @@ export interface PlatformSettingsOverview {
   cooling: number;
   /** 已登记余额的合计；没有任何登记时为 null */
   credits: number | null;
+  /**
+   * 合计的单位：`usd`（Kilo / Trae 国际版的美元额度）或 `credits`（积分）。
+   * 整批账号都是美元时才标 `usd`，混合单位退回 `credits`。
+   */
+  credits_unit?: 'usd' | 'credits';
   /** 有余额登记的账号数 */
   credits_known: number;
   /** 积分快照的登记时刻（epoch 秒；0 = 还没登记过） */
@@ -2585,7 +2590,7 @@ export interface PlatformCredits {
   next_expire_at?: number | null;
   /** 主数字来源：entitlement / entitlement+checkin / checkin */
   source?: string;
-  /** 数值单位：国际版 `usd`（美元额度），国内版 `credits`（积分） */
+  /** 数值单位：`usd`（Kilo / Trae 国际版的美元余额），其余为 `credits`（积分） */
   unit?: 'usd' | 'credits';
   realm?: string;
   /** 本次查询成功时的登记时刻（epoch 秒） */

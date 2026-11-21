@@ -11,6 +11,8 @@
  */
 import {
   creditExpiryVisible,
+  creditUnit,
+  formatCreditValue,
   platformCreditExpiries,
   platformCreditPacks,
 } from './platform-credits.ts';
@@ -87,6 +89,23 @@ check('恰好在到期的包不算可见', creditExpiryVisible(
   {amount: 1, expire_at: at(NOW), label: ''}, NOW), false);
 check('未到期的包可见', creditExpiryVisible(
   {amount: 1, expire_at: at(NOW + 1000), label: ''}, NOW), true);
+
+/* ── 单位：美元 vs 积分 ────────────────────────────────────────────
+   Kilo 的余额是美元（`unit='usd'`），Trae 国际版也是。若按积分画，用户会
+   把 $12.34 读成「12 积分」——数量级完全错。缺省 / 认不出的值必须退回积分，
+   那是既有平台的单位，也是改造前的行为。 */
+check('unit=usd 认成美元', creditUnit({uid: 'u1', unit: 'usd'}), 'usd');
+check('unit=credits 是积分', creditUnit({uid: 'u1', unit: 'credits'}), 'credits');
+check('没有 unit 时按积分', creditUnit({uid: 'u1'}), 'credits');
+check('条目为 null 时按积分', creditUnit(null), 'credits');
+
+check('积分原样显示', formatCreditValue(1234, 'credits'), '1234');
+check('美元带符号并保留两位', formatCreditValue(12.34, 'usd'), '$12.34');
+check('小额美元保留四位', formatCreditValue(0.0034, 'usd'), '$0.0034');
+check('零美元不写成空', formatCreditValue(0, 'usd'), '$0');
+check('极小额美元用科学计数', formatCreditValue(0.00001, 'usd'), '$1.0e-5');
+check('非有限值给破折号', formatCreditValue(Number.NaN, 'usd'), '—');
+check('单位缺省时按积分', formatCreditValue(42), '42');
 
 if (failed) {
   console.log(`\n${failed} failed`);

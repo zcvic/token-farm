@@ -232,10 +232,13 @@
     "expiresInHours": "{n} 小時後到期",
     "expiresInDays": "{n} 天後到期",
     "expiryTipTitle": "積分到期時間（合計 {total}）",
-    "expiryTipNote": "按到期時間排列，倒數只顯示最近一筆；到期後未用完的積分會作廢。"
+    "expiryTipTitleUsd": "餘額到期時間（合計 {total}）",
+    "expiryTipNote": "按到期時間排列，倒數只顯示最近一筆；到期後未用完的積分會作廢。",
+    "expiryTipNoteUsd": "按到期時間排列，倒數只顯示最近一筆；到期後未用完的餘額會作廢。"
   },
   "metric": {
     "credits": "積分餘額",
+    "balance": "餘額",
     "creditAmount": "{n} 積分",
     "requests": "請求數",
     "requestsShort": "請求",
@@ -2486,6 +2489,7 @@
     "creditsHintTrae": "餘額來自 Trae 權益介面（唯讀查詢）；簽到獎池另外計算",
     "creditsHintQoder": "餘額來自 Qoder 內建閘道的積分快照（唯讀查詢）；簽到積分另外計算",
     "creditsHintLoomy": "餘額來自 Loomy 積分介面（可用餘額）；簽到收入按簽到前後的餘額差額計算",
+    "creditsHintKilo": "餘額來自 Kilo 帳戶介面，單位是美元（唯讀查詢）；Kilo 沒有簽到",
     "creditsLastRecorded": "上次登記：{when}",
     "creditsLimit": "總額",
     "creditsUsed": "已用",
