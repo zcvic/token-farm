@@ -1,8 +1,9 @@
 # token-farm
 
 **多平台 token 农场**：一套面板同时管理 **WorkBuddy（腾讯 CodeBuddy）**、
-**Trae**、**Qoder**、**Loomy（讯飞星火）**、**DuMate（百度搭子）** 与
-**MiniMax Code** 六类账号，统一对外提供 OpenAI 兼容接口。
+**Trae**、**Qoder**、**Loomy（讯飞星火）**、**DuMate（百度搭子）**、
+**MiniMax Code**、**Discovery（Intern TokenPlan）**、**Kilo** 与 **Cline**
+九类账号，统一对外提供 OpenAI 兼容接口。
 
 本项目派生自 [`workbuddy-manager`](https://github.com/ithtelab/workbuddy-manager)
 （MIT）。上游的全部能力都保留且行为不变 —— 账号池、扫码纳管、签到保活、密钥分发、
@@ -10,13 +11,16 @@ IP / 模型白名单、用量与日志。在此之上新增：
 
 | 新增 | 位置 | 说明 |
 |---|---|---|
-| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code 为原生实现，Qoder 用内置网关 |
+| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline 为原生实现，Qoder 用内置网关 |
 | Trae 适配器 | `server/platforms/trae/` | 账号存储 / 令牌刷新 / 签到 / 额度 / 模型 / 对话（SSE → OpenAI chunk） |
 | Qoder 适配器 | `server/platforms/qoder/` | 账号 / 签到 / 额度 / 模型 / 对话；协议层内置在 `_vendor/`，无需额外部署 |
 | Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录（含手机号补绑）/ 手机验证码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
 | DuMate 适配器 | `server/platforms/dumate/` | 账号（网页 Cookie）/ 百度 Passport 扫码登录 / token 兑换与缓存 / 签到 / 积分 / 模型（桌面端 → 缓存 → 快照）/ 对话；网关 OpenAI 兼容，单区域前缀 `dumate/` |
 | MiniMax Code 适配器 | `server/platforms/minimax/` | 账号（OAuth 设备码 + 一次性 refresh token）/ 双区（`minimaxcn/`、`minimaxcom/`）/ 签到 / 积分 / M Plan 窗口 / 模型 / 对话；Anthropic Messages 端点由适配器内部翻译成 OpenAI 形状 |
-| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
+| Discovery 适配器 | `server/platforms/discovery/` | 账号（Intern TokenPlan API Key）/ `/v1/models` 额度探针（耗尽 → 402 冻 1 小时）/ 模型（在线目录 → 内置 8 条）/ 对话；单区域前缀 `discovery/`，无签到、无网页登录 |
+| Kilo 适配器 | `server/platforms/kilo/` | 账号（官方设备授权码 → 一年期 token）/ 资料与余额（**美元**）/ 模型（免鉴权 OpenRouter schema → 自动路由兜底）/ 对话；单区域前缀 `kilo/`，无签到、无 refresh |
+| Cline 适配器 | `server/platforms/cline/` | 账号（WorkOS 设备码 → 一次性 refresh token）/ token 轮换（先落盘再使用）/ 模型（免费档 + 全量合并）/ 对话；免费档强制流式并聚合，伪装限流判成 429；单区域前缀 `cline/` |
+| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
 | 多平台接口 | `server/routers/platforms.py` | `/api/platforms/*`：账号、导入、刷新、签到、额度、模型 |
 | 多平台页面 | `web/app/(main)/accounts/page.tsx`、`models/page.tsx` | 顶部平台下拉切换；账号 / 模型页随平台更换数据源，分版本的平台（Trae / Qoder / MiniMax Code）再按国内版 / 国际版过滤，统计与日志按平台过滤 |
 | 设计文档 | [`docs/multi-platform.md`](docs/multi-platform.md) | 契约、路由、凭据安全、已知限制 |
@@ -48,6 +52,9 @@ token-farm/
 │  ├─ loomy-ref.txt     # Loomy 参考源的基线、取用范围与「有意不跟」
 │  ├─ dumate-ref.txt    # DuMate 参考源的端点、形状与「有意不跟」
 │  ├─ minimax-ref.txt   # MiniMax Code 参考源的 OAuth / 对话 / 签名事实
+│  ├─ discovery-ref.txt # Discovery 参考源的 Key 池 / 额度探针 / 「有意不跟」
+│  ├─ kilo-ref.txt      # Kilo 官方客户端的设备码 / 余额 / 目录事实
+│  ├─ cline-ref.txt     # Cline 参考源的 WorkOS 设备码 / 强制流式 / 伪装限流
 │  ├─ install.sh        # 上游原版：装依赖 + systemd（Linux 服务器）
 │  └─ windows-native/   # 上游原版：原生 Windows（无需 Docker）
 ├─ docs/                # 用户文档与维护者手册
@@ -329,6 +336,9 @@ MANAGER_REPO = os.environ.get('WB_MANAGER_REPO') or 'zcvic/token-farm'
 | `loomy-ref` | [loomy2api](https://github.com/xingluoyuankong/loomy2api)（MIT） | Loomy 协议事实来源，**原生重写**、无副本 | 对照提交，改 `server/platforms/loomy/`，永不 merge |
 | `dumate-ref` | [dumate2api](https://github.com/wearetheone777/dumate2api)（MIT） | DuMate 协议事实来源，**原生重写**、无副本 | 对照端点与业务码，改 `server/platforms/dumate/`，永不 merge |
 | `minimax-ref` | [opencode-minimax-auth](https://www.npmjs.com/package/@magpie-community/opencode-minimax-auth)（MIT） | MiniMax Code 协议事实来源，**原生重写**、无副本 | 对照 OAuth / 签名 / 对话形状，改 `server/platforms/minimax/` |
+| `discovery-ref` | [discovery2api](https://github.com/ZFXing-lite/discovery2api)（MIT） | Discovery 协议事实来源，**原生重写**、无副本 | 对照 Key 池 / 额度探针 / 目录，改 `server/platforms/discovery/` |
+| `kilo-ref` | [kilocode](https://github.com/Kilo-Org/kilocode)（Apache-2.0） | Kilo **官方客户端**的协议事实来源，**原生重写**、无副本 | 对照 `packages/kilo-gateway` 的设备码 / 余额 / 目录，改 `server/platforms/kilo/` |
+| `cline-ref` | [cline2api](https://github.com/luawei1/cline2api)（MIT） | Cline 协议事实来源，**原生重写**、无副本 | 对照 `worker.js` 的设备码 / 伪装头 / 强制流式，改 `server/platforms/cline/` |
 
 上游 Go 源码（workbuddy2api）已经并入本仓库的 `upstream/`，日常直接在这里改，
 不再从外部仓库 fetch / merge。面板侧新能力的参考来源是
@@ -369,6 +379,26 @@ MiniMax Code 的协议参考是
 `minimax-cloud` 签到 / 积分。请求 / 响应 / SSE 的双向翻译在
 `server/platforms/minimax/translate.py`，不引入参考包的 OpenCode 插件形态，
 也不复制它的运行时。已核对的范围记在 `deploy/minimax-ref.txt`。
+
+Discovery、Kilo、Cline 三个平台都是「OpenAI 兼容直连 + 账号池」，接入时没有
+引入任何第三方运行时，只按协议事实原生重写：
+
+- **Discovery**（[`ZFXing-lite/discovery2api`](https://github.com/ZFXing-lite/discovery2api)，
+  MIT）：只取 Key 池的形状、`/v1/models` 额度探针与目录来源。参考仓的
+  `force-model` 静默改写**不采纳**——把客户端要的模型换掉，报错完全指不回
+  适配器。已核对范围见 `deploy/discovery-ref.txt`。
+- **Kilo**：参考源是**官方客户端**
+  [`Kilo-Org/kilocode`](https://github.com/Kilo-Org/kilocode) 的
+  `packages/kilo-gateway`（Apache-2.0），不是第三方 2api 项目。设备码登录、
+  资料、余额（美元）、OpenRouter schema 目录都按协议事实重写；
+  `deanxv/kilo2api` 的 cookie 抓取方案因源码不公开**不作参考源**。已核对范围见
+  `deploy/kilo-ref.txt`。
+- **Cline**（[`luawei1/cline2api`](https://github.com/luawei1/cline2api)，MIT）：
+  取 WorkOS 设备码 → `/auth/register` 换 refresh token 的两段式登录、伪装客户端
+  头、免费档强制流式与「限流伪装成 200 正常帧」的识别。Cloudflare Worker 运行时
+  与 KV 存储一律不引入。已核对范围见 `deploy/cline-ref.txt`。
+
+三者都**没有**桌面端导入：不读也不回写本机客户端，`import_from_desktop` 不存在。
 
 所有参考源都没有共享提交历史，`git merge` / `git pull` 不成立 ——
 只能挑单个提交，导出成补丁再应用。流程与注意事项见

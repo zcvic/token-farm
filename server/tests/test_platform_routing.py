@@ -81,6 +81,24 @@ class RouteModelTest(unittest.TestCase):
         self.assertIsNone(platforms.route_model(''))
         self.assertIsNone(platforms.route_model(None))
 
+    def test_new_platform_prefixes_split_one_level(self) -> None:
+        """Discovery / Kilo / Cline 都是单区域，但模型名本身可能带斜杠。
+
+        前缀只剥**一层**：`kilo/kilo-auto/free` → `('kilo', 'kilo-auto/free')`，
+        再剥一次会把上游的自动路由名拼坏。
+        """
+        self.assertEqual(platforms.route_model('discovery/auto'),
+                         ('discovery', 'auto', None))
+        self.assertEqual(platforms.route_model('kilo/kilo-auto/free'),
+                         ('kilo', 'kilo-auto/free', None))
+        self.assertEqual(platforms.route_model('cline/cline-free/x'),
+                         ('cline', 'cline-free/x', None))
+        self.assertEqual(platforms.route_model('cline/openai/gpt-4o'),
+                         ('cline', 'openai/gpt-4o', None))
+        # 单区域平台没有区域后缀，`discoverycn/x` 不是前缀。
+        self.assertIsNone(platforms.route_model('discoverycn/auto'))
+        self.assertIsNone(platforms.route_model('kilocn/kilo-auto/free'))
+
     def test_registered_names_are_stable(self) -> None:
         self.assertIn('trae', platforms.names())
         adapter = platforms.get('trae')

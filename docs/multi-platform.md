@@ -13,6 +13,18 @@
 **MiniMax Code**（双区域，`minimaxcn/` / `minimaxcom/` 前缀，OAuth 设备码 +
 一次性 refresh token）。
 
+最新一批是三个「OpenAI 兼容直连 + 账号池」平台，都不引入第三方运行时：
+
+- **Discovery**（Intern TokenPlan，`discovery/` 前缀）：凭证是 API Key，没有
+  refresh；额度只能靠 `GET /v1/models` 探针判断。
+- **Kilo**（`kilo/` 前缀）：官方设备授权码登录拿一年期 token，对话走
+  `ai-gateway.kilo.ai/api/v1`（OpenRouter schema）。
+- **Cline**（`cline/` 前缀）：WorkOS 设备授权码换一次性 refresh token；免费档
+  只认流式，适配器强制走流式再聚合。
+
+三者都是单区域（`realm_aware=False`），共用一套「权重 SWRR + LRU + 会话亲和」
+选号策略。
+
 ---
 
 ## 1. 目标与非目标
@@ -66,10 +78,19 @@ client ──/v1/chat/completions──> token-farm
                                     ├── model = "dumate/xxx" ─> DuMateAdapter
                                     │                           ├── 账号池（网页 Cookie）
                                     │                           └── 百度搭子网关（OpenAI 兼容 SSE）
-                                    └── model = "minimaxcn/xxx" / "minimaxcom/xxx" ─> MinimaxAdapter
-                                                                ├── 双区账号池（OAuth refresh token）
-                                                                ├── Anthropic Messages 端点（内部翻译）
-                                                                └── 签到 / 积分 / M Plan 窗口
+                                    ├── model = "minimaxcn/xxx" / "minimaxcom/xxx" ─> MinimaxAdapter
+                                    │                                           ├── 双区账号池（OAuth refresh token）
+                                    │                                           ├── Anthropic Messages 端点（内部翻译）
+                                    │                                           └── 签到 / 积分 / M Plan 窗口
+                                    ├── model = "discovery/xxx" ─> DiscoveryAdapter
+                                    │                           ├── 账号池（API Key）
+                                    │                           └── /v1/models 额度探针（429 quota_exceeded → 402）
+                                    ├── model = "kilo/xxx" ─> KiloAdapter
+                                    │                           ├── 账号池（设备码换来的 token）
+                                    │                           └── ai-gateway.kilo.ai（OpenAI 兼容 SSE）
+                                    └── model = "cline/xxx" ─> ClineAdapter
+                                                                ├── 账号池（一次性 refresh token）
+                                                                └── api.cline.bot（免费档强制流式 + 聚合）
 ```
 
 平台路由**只由模型名决定**，不由密钥决定。原因：一把密钥可能既想调
@@ -141,6 +162,29 @@ server/platforms/
     client.py            # OAuth 设备码 / 签名账号接口 / 对话端点
     login.py             # 设备码登录后台线程（PKCE + 轮询）
     adapter.py           # 实现 PlatformAdapter：双区选号 / 轮换 / 签到 / 积分 / 对话
+  discovery/
+    __init__.py
+    constants.py         # 网关地址、默认模型 `auto`、额度探针错误码
+    store.py             # API Key 账号文件（原子写 + 文件锁 + 脱敏）
+    catalog.py           # 在线目录解析 + 内置 8 条兜底
+    client.py            # `/v1/models` 额度探针 / 对话（流式与非流式）
+    adapter.py           # 实现 PlatformAdapter：选号 / 冷却 / 探活 / 对话
+  kilo/
+    __init__.py
+    constants.py         # 账号侧 / 模型侧两套域名、伪装头、一年期 token
+    store.py             # token 账号文件（原子写 + 文件锁 + 脱敏）
+    catalog.py           # OpenRouter schema 目录归一 + 自动路由兜底
+    client.py            # 设备码（同步 / 异步）/ 资料 / 余额（美元）/ 对话
+    login.py             # 设备授权码登录后台线程（用 `code` 轮询）
+    adapter.py           # 实现 PlatformAdapter：选号 / 余额 / 探活 / 对话
+  cline/
+    __init__.py
+    constants.py         # 上游 / WorkOS 设备码、伪装头、强制流式前缀
+    store.py             # refresh token 账号文件（原子写 + 文件锁 + 脱敏）
+    catalog.py           # 免费档 + 全量目录合并（免费排前面）
+    client.py            # WorkOS 设备码 / register / token 轮换 / SSE 聚合
+    login.py             # WorkOS 设备码登录后台线程
+    adapter.py           # 实现 PlatformAdapter：选号 / 轮换 / 强制流式 / 对话
 server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
 ```
 
@@ -182,6 +226,8 @@ registry.register(FooAdapter())
 | `usage(id)` | 额度 / 用量快照 |
 | `list_models()` | 该平台可调模型（`id` 为区域化前缀 + 裸名，`model_name` 为裸名） |
 | `chat(model, body, ctx)` | 返回 `PlatformChat`；`ctx` 是请求上下文（`key` / `ip` / `ua` / `upstream_path` / `realm`），不需要的平台忽略 |
+| `upstream_model(model)` | **可选**：成员名 → 上游线上名（Loomy 的别名映射、Qoder 剥 `global:` 前缀）。默认原样 |
+| `chat_body(model, body)` | 复制请求体并写入线上名。**适配器不要自己写 `body['model']`**：漏改会让组合把 `combo/fast` 原样发给上游，而报错完全指不到这里 |
 | `ui_visible` / `combo_member` / `routable` | 是否出现在平台下拉 / 组合成员候选 / `<平台>[cn|com]/<模型>` 前缀解析（见 §12.1） |
 | `pool_weight` | 账号权重是否只在上游**池内**生效（WorkBuddy 为 `True`，界面标注「池级权重」） |
 | `record_name(bare_model)` | 记账用的 `mapped_model`：默认 `<平台>/<模型>`；WorkBuddy 为裸名 |
@@ -309,6 +355,11 @@ registry.register(FooAdapter())
   网页登录：MiniMax Code 走 OAuth 设备码，DuMate 走百度 Passport 扫码（见下节）。
   DuMate 的凭证仍是网页 Cookie，手工导入后**不联网**校验，首次刷新或对话时才
   向上游换 token。
+- **Discovery / Kilo / Cline 的设置集**：同一组选号 / 缓存 / 冷却参数，集中在
+  `server/platforms/settings.py` 的 `_NATIVE_POOL`（= `_LOOMY` 去掉 `min_credits`）。
+  三者都没有 `min_credits`（余额口径不是积分）、没有 `desktop_sync`（不读本机
+  客户端）、没有协议兼容开关。Kilo 与 Cline 保留 `catalog_timeout`（在线目录），
+  Discovery 也一样——它的目录拉取同时是额度探针，超时同样要能中断。
 
 三种状态都只写平台自己的账号文件（`data/platforms/<平台>/accounts/*.json`），
 不会改动 WorkBuddy 的 `auths/`，也不会删除凭据。
@@ -454,6 +505,39 @@ DuMate 的网页登录本质就是百度账号登录：官方登录页
   `BDUSS=...; bce-long-term-sessionid=...`（前端会替你包成 JSON）；空状态里
   同时给出「网页登录」和「手工导入」两个入口，不再只提示从本机导入。
 
+### 网页登录（Kilo，官方设备授权码）
+
+Kilo 的登录与官方 CLI 同一套协议，没有二维码，也没有回调地址：
+
+- `login_start()` 先**同步**向 `api.kilo.ai/api/device-auth/codes` 申请设备码，
+  拿到 `verificationUrl` 再返回，前端可以立刻打开浏览器；`login_start` **不声明
+  `mode` 参数**（那是 Loomy 独有的），路由按签名判断后不会传。
+- 后台线程按 `interval` 轮询 `GET /api/device-auth/codes/{code}`：202 等待、
+  403 拒绝、410 过期、200 通过并带 `token`。⚠️ 轮询用的是响应里的 **`code`**，
+  不是 `device_code`——实测拿 `device_code` 会直接 410。
+- 设备码（`user_code`）放在 `message` 文案里，前端目前没有单独渲染它的字段，
+  所以文案必须自带代码，否则用户不知道要在授权页确认什么。
+- 拿到 token 后读一次 `/api/profile` 补邮箱 / 组织，落盘时按一年期推算
+  `expiredAt`（上游不回到期时间），界面因此有「何时该重登」的依据。
+
+### 网页登录（Cline，WorkOS 设备授权码）
+
+Cline 的登录是两段：先 WorkOS 授权，再用 WorkOS token 换 Cline 凭证。
+
+- `POST api.workos.com/user_management/authorize/device`（`client_id` 是公开值）
+  拿 `device_code` / `user_code` / `verification_uri_complete`；
+- 后台线程 `POST .../authenticate`（`grant_type=…:device_code`）：
+  `authorization_pending` 继续等、`slow_down` 拉长间隔、`access_denied` /
+  `expired_token` 结束会话；
+- 通过后调 `POST api.cline.bot/api/v1/auth/register`
+  `{accessToken, refreshToken}` 换 Cline 的 **refresh token**——后续所有对话都
+  靠它，WorkOS token **不进账号文件**；
+- 换来的 refresh token 一次性轮换：适配器每次刷新都先落盘新的，再拿去发请求。
+
+三个新平台都不实现 `login_submit_callback` / `login_submit_code`，所以前端不会
+显示「粘回调 / 粘验证码」的输入框，也不会提示「必须与浏览器同机」——这两项能力
+是按 `hasattr(adapter, ...)` 推导的，不是按平台名硬编码。
+
 ### 前端：国内版 / 国际版切换（Trae）
 
 Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBuddy 已有的版本开关：
@@ -508,6 +592,11 @@ Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBudd
   `realm='cn'`。
 - `minimaxcn/<model>` / `minimaxcom/<model>` 走 MiniMax Code（国内站 /
   国际站）；旧式 `minimax/<model>` 不带区域提示，按目录 / 账号推断。
+- `discovery/<model>` 走 Discovery（Intern TokenPlan，单区域，账号是 API Key）。
+- `kilo/<model>` 走 Kilo（单区域，模型名本身含 `kilo-auto/…` 这类斜杠，前缀
+  仍然只剥一层：`kilo/kilo-auto/free` → 上游 `kilo-auto/free`）。
+- `cline/<model>` 走 Cline（单区域，模型名含 `cline-free/…`、`openai/…` 这类
+  厂商前缀，同样只剥一层）。
 - 其他模型名 → 原样走 WorkBuddy（与今天完全一致）。
 - `/v1/models` 会把 Trae 的模型**按区域**并入列表（`traecn/` / `traecom/`），
   `owned_by` 标成 `trae`、`realm` 标出所属区域，客户端据此区分来源。
@@ -571,6 +660,28 @@ Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBudd
 服务器部署没有客户端快照时，第 1 层（面板导入）和第 4 层（内置默认值）仍然
 保证目录不空——这正是「与倍率同构」的意思，细节见第 7 节。
 
+#### Discovery / Kilo / Cline 的目录
+
+这三个平台的目录都是**在线拉取**（没有桌面端快照那一层），降级链只有两级：
+
+| 平台 | 在线来源 | 离线兜底 |
+| --- | --- | --- |
+| Discovery | `GET /v1/models`（要任意一把可用 Key） | 内置 8 条（含 `auto`） |
+| Kilo | `GET ai-gateway.kilo.ai/api/v1/models`（免鉴权） | `kilo-auto/free` / `balanced` / `efficient` |
+| Cline | `/models` + `/ai/cline/recommended-models` 的 `free` 分组 | 4 条 `cline-free/*` |
+
+三者的缓存 / 失败冷却口径与 Trae 一致（`catalog_ttl` / `catalog_retry_ttl` /
+`catalog_timeout` 都在平台设置里）。差别只在兜底内容：**兜底只放免费档与自动
+路由**——付费模型的可用性取决于账号余额，放进兜底等于把一堆点了必然失败的
+模型推给用户。
+
+Cline 的合并规则是「免费档优先」：`recommended` 的 `free` 分组是官方标记的
+权威来源，`/models` 补其余条目，同 id 以免费档为准，合并后免费排前面（账号
+没余额时用户最该先看到能用的那几条）。Kilo 的目录是 OpenRouter schema，
+`pricing` 是按 token 的字符串价，只用来判断「是不是免费」，不做金额换算。
+Discovery 的目录是 OpenAI schema，`/v1/models` 同时承担**额度探针**的角色
+（见 §6.3），所以拉目录本身就要用一把真 Key。
+
 ### 平台归属与用量统计
 
 平台归属落库，不靠前端按模型名前缀猜：
@@ -628,6 +739,23 @@ data/platforms/trae/accounts/<uid>.json
 
 与 WorkBuddy 的 `auths/` 严格分开：两边文件格式、刷新语义、失效判断都不同，
 混放会让「账号页显示一个、上游池里是另一个」这类不一致重新出现。
+
+每个平台一个目录，文件名是 `<uid>.json`，uid 由凭据派生（同一份凭据重复导入
+会覆盖同一条账号）：
+
+| 平台 | 目录 | uid 前缀 | 凭据字段 |
+| --- | --- | --- | --- |
+| Trae | `platforms/trae/` | 上游 uid | `token` / `refreshToken` |
+| Loomy | `platforms/loomy/` | `s_` | `session` |
+| DuMate | `platforms/dumate/` | `dm_` | `cookie`（BDUSS 为核心） |
+| MiniMax Code | `platforms/minimax/` | `mm_` | `token` / `refreshToken` |
+| Discovery | `platforms/discovery/` | `dc_` | `apiKey` |
+| Kilo | `platforms/kilo/` | `kl_` | `token`（一年期，无 refresh） |
+| Cline | `platforms/cline/` | `cl_` | `refreshToken`（+ 缓存的 `token`） |
+
+三个新平台（Discovery / Kilo / Cline）都**没有** `desktopPath`：它们不读也不
+回写本机客户端，`import_from_desktop` 不存在，管理端的「从本机导入」入口不会
+出现。
 
 单账号文件字段：
 
@@ -688,6 +816,27 @@ access token、不能刷新，也没有 userId，导入时按 token 摘要生成
 `storage.json.bak-trae-gateway`，用临时文件 + `os.replace` 原子替换。回写失败
 只记日志，绝不让「同步失败」连累刷新结果。手工粘贴 token 的账号（没有
 `desktopPath`）不会去碰客户端的文件。
+
+### 6.2 三个新平台的能力边界：签到 / 余额 / 续期
+
+| 平台 | 签到 | 余额接口 | 续期 | 说明 |
+| --- | --- | --- | --- | --- |
+| Discovery | 无 | 无 | 无 | 额度只能用 `/v1/models` 探针：200 有额度、429 `quota_exceeded` 耗尽 |
+| Kilo | 无 | 有（**美元**） | 无 | token 一年期、不可刷新；余额走 `/api/profile/balance` |
+| Cline | 无 | 无 | 有（refresh token） | 余额不足由 402 `insufficient_credits` 表达 |
+
+Discovery 的「额度」在界面上是**三态**，不是数字：`ok` / `rate_limited` /
+`quota_exhausted`。把 `429 quota_exceeded` 当成普通限流（几十秒冷却）会让已经
+耗尽的账号被反复重打，所以适配器把它映射成 **402** 并冻 1 小时；`rate_limit_exceeded`
+仍按 429 + `retry-after` 处理。这条区分是整个 Discovery 适配里最容易被「顺手
+简化」掉的地方。
+
+Cline 的免费档有两处硬约束，都写在 `client.py` 里：`deepseek/` / `cline-free/` /
+`cline-pass/` 前缀**只认流式**（非流式会被回 500 `empty response content`），
+请求体也**不能带 `max_tokens`**。适配器因此对这几类前缀强制走流式、再聚合成
+`chat.completion`；上游把限流伪装成 200 正常帧时（`Daily free limit` /
+`INFERENCE_CAP_ERROR` / 只有 reasoning 没有正文），按 429 换号而不是把空回复
+交给用户。
 
 ---
 
@@ -1016,6 +1165,21 @@ Trae 事件 → OpenAI chunk：
 - `server/tests/test_platform_minimax_adapter.py`：MiniMax Code 的账号脱敏、目录解析、
   双区选号、refresh token 轮换落盘、401 重试、签到 / 积分、OpenAI ↔ Anthropic
   请求 / 响应 / 流式翻译。
+- `server/tests/test_platform_discovery_adapter.py`：Discovery 的 Key 脱敏与
+  `dc_` uid 派生、目录归一与 8 条兜底、`quota_exceeded` → 402 冻 1 小时 /
+  `rate_limit_exceeded` → 429 的区分、空模型名补 `auto`、`max_tokens` 原样透传、
+  流式透传与 `usage` / 首字统计、`credits` / `checkin` 不支持。
+- `server/tests/test_platform_kilo_adapter.py`：Kilo 的 token 脱敏与 `kl_` uid
+  派生、资料两种形状、余额坏值返回 None、OpenRouter schema 目录（`isFree` /
+  `pricing=0` / `supported_parameters`）、选号跳过 disabled / checkinOnly /
+  冷却、`stream_options` 保留而 `store` / `service_tier` 被剥、美元额度与 60 秒
+  缓存、空模型名兜底 `kilo-auto/free`。
+- `server/tests/test_platform_cline_adapter.py`：Cline 的 refresh token 脱敏与
+  `cl_` uid 派生、免费档合并顺序、`needs_force_stream` / `limit_signal`、
+  「先落盘再使用」的 token 轮换、401 后同账号换 token 重试一次、SSE 聚合
+  （reasoning 兜底 / `tool_calls` / 伪装限流抛 429）、非流式免费档被强制走流式
+  且 `max_tokens` 被剥、空模型名兜底。
+- `server/tests/test_platform_credits_snapshot.py`：平台余额快照的登记与回退。
 - `server/tests/test_platform_sse.py`：SSE 拼帧、错误帧、断开时不补错误帧。
 - `server/tests/test_platform_realm.py`：前端版本映射（`global` ↔ `intl`）、
   版本开关的显示条件、账号 / 模型过滤、导入时补 `realm`。

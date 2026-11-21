@@ -107,6 +107,17 @@ class DefaultsTest(_DbCase):
         # 拉取超时」只会是保存成功但不生效的假开关。MiniMax 是真在线拉取。
         self.assertFalse(runtime_settings.capabilities('dumate')['catalog_timeout'])
         self.assertTrue(runtime_settings.capabilities('minimax')['catalog_timeout'])
+        # Discovery / Kilo / Cline 共用 `_NATIVE_POOL`：与 Loomy 同一组选号 /
+        # 缓存 / 冷却，但都**没有**保底积分（余额口径不是积分），目录则都是
+        # 真在线拉取（Discovery 的目录拉取同时是额度探针），所以留 timeout。
+        for name in ('discovery', 'kilo', 'cline'):
+            caps = runtime_settings.capabilities(name)
+            self.assertTrue(caps['max_accounts_try'], name)
+            self.assertTrue(caps['session_affinity'], name)
+            self.assertTrue(caps['catalog_timeout'], name)
+            self.assertTrue(caps['credits_ttl'], name)
+            self.assertFalse(caps['min_credits'], name)
+            self.assertFalse(caps['desktop_sync'], name)
         # Qoder 的目录 / 冷却 / 换号都在内置网关里，适配器只做透传。
         self.assertFalse(qoder['catalog_ttl'])
         self.assertFalse(qoder['cooldown_429'])

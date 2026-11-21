@@ -23,7 +23,10 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from server import config  # noqa: E402
+from server.platforms.cline import store as cline_store  # noqa: E402
+from server.platforms.discovery import store as discovery_store  # noqa: E402
 from server.platforms.dumate import store as dumate_store  # noqa: E402
+from server.platforms.kilo import store as kilo_store  # noqa: E402
 from server.platforms.loomy import store as loomy_store  # noqa: E402
 from server.platforms.minimax import store as minimax_store  # noqa: E402
 from server.platforms.trae import store as trae_store  # noqa: E402
@@ -34,6 +37,9 @@ _STORES = {
     'loomy': loomy_store,
     'dumate': dumate_store,
     'minimax': minimax_store,
+    'discovery': discovery_store,
+    'kilo': kilo_store,
+    'cline': cline_store,
 }
 
 

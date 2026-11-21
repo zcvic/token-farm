@@ -21,6 +21,15 @@
   · MiniMax Code —— 原生实现（mcode），分国内 / 国际两站，模型名以
     `minimaxcn/` / `minimaxcom/` 为前缀。凭证是 OAuth refresh token，
     对话端点是 Anthropic Messages 兼容（适配器内部翻译成 OpenAI 形状）。
+  · Discovery —— 原生实现（Intern TokenPlan），单区域平台，模型名以
+    `discovery/` 为前缀。凭证是一把 API Key，`Bearer` 直连，OpenAI 兼容；
+    上游没有余额接口，额度靠 `GET /v1/models` 探。
+  · Kilo —— 原生实现（kilo.ai），单区域平台，模型名以 `kilo/` 为前缀。
+    凭证是设备授权码换来的一年期 API token，对话走 `ai-gateway.kilo.ai`
+    （OpenRouter schema 的 OpenAI 兼容层），余额是**美元**。
+  · Cline —— 原生实现（cline.bot），单区域平台，模型名以 `cline/` 为前缀。
+    凭证是 WorkOS 设备码换来的 refresh token（**一次性轮换**），对话要带
+    Cline 客户端伪装头；免费档只认流式，适配器内部聚合。
   · 组合（combo）—— **虚拟平台**：没有账号，只把 `combo/<name>` 按权重
     分发给上面这些真实平台。因此不在界面里露出（`ui_visible=False`）。
 """
@@ -37,6 +46,9 @@ from .qoder import adapter as qoder_adapter
 from .loomy import adapter as loomy_adapter
 from .dumate import adapter as dumate_adapter
 from .minimax import adapter as minimax_adapter
+from .discovery import adapter as discovery_adapter
+from .kilo import adapter as kilo_adapter
+from .cline import adapter as cline_adapter
 from .combo import adapter as combo_adapter
 
 # 注册内置平台。放在 import 之后而不是模块顶层逐个 register，是为了让
@@ -47,6 +59,9 @@ register(qoder_adapter)
 register(loomy_adapter)
 register(dumate_adapter)
 register(minimax_adapter)
+register(discovery_adapter)
+register(kilo_adapter)
+register(cline_adapter)
 register(combo_adapter)
 
 __all__ = [

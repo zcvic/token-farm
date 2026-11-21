@@ -1,0 +1,81 @@
+# 已人工核对过的 Cline 协议事实 —— 本仓库 Cline 适配层的参考
+#
+# 仓库：https://github.com/luawei1/cline2api （MIT）
+#       参考范围：Cloudflare Worker 版的 `worker.js`（设备码登录、伪装头、
+#       免费档强制流式、限流伪装识别）。
+# 形态：不是 fork，也没有共享历史；**不是源码副本**，仓库里没有 vendor 目录。
+#       WorkOS 设备码 / register 换 refresh token / 对话透传 / SSE 聚合都在
+#       server/platforms/cline/ 里按参考实现重写（httpx + 标准库，不新增依赖）；
+#       参考仓的 Cloudflare Worker 运行时、KV 存储与面板一律不引入。
+#
+# 记录方式：一次同步写一段；未核对的提交号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/qoder-ref.txt、deploy/loomy-ref.txt 同一约定）。
+#
+# 升级流程：clone 参考仓 → 看 worker.js 的协议段 diff → 在本仓库对应文件里
+# 重写 → 跑 server/tests/test_platform_cline_adapter.py → 更新本文件的锚点与
+# 差异说明。
+#
+# ---- 2026-11 首次接入
+#      基线：首次接入时参考仓 HEAD（具体提交号待补）。
+#
+#      已取（按能力，不是逐行移植）：
+#        · WorkOS 设备授权码：
+#            POST https://api.workos.com/user_management/authorize/device
+#                 client_id=client_01K3A541FN8TA3EPPHTD2325AR（公开值，与官方
+#                 客户端一致）
+#              → device_code / user_code / verification_uri_complete / interval
+#            POST https://api.workos.com/user_management/authenticate
+#                 grant_type=urn:ietf:params:oauth:grant-type:device_code
+#              → authorization_pending / slow_down / access_denied /
+#                expired_token / access_token
+#          → client.start_device / poll_device、login.py
+#        · 换 Cline 凭证：POST {api}/auth/register
+#            {accessToken, refreshToken}（WorkOS token）
+#              → data.refreshToken（后续对话全靠它；WorkOS token 不进账号文件）
+#          → client.register_sync（`device_exchange_sync` 是它的别名）
+#        · 上游：https://api.cline.bot/api/v1，OpenAI 兼容。
+#          授权头是 `Bearer workos:<accessToken>`（注意 `workos:` 前缀）。
+#          → client.chat_headers
+#        · **必须伪装 Cline 客户端头**，缺了会被 403
+#          `only available via Cline product surfaces`：
+#            User-Agent: Cline/3.0.47、X-CLIENT-TYPE: cline-sdk、
+#            X-CLIENT-VERSION: 3.0.47、X-PLATFORM: terminal、
+#            X-PLATFORM-VERSION: 3.0.47、X-CORE-VERSION: 0.0.66、
+#            X-Task-ID（会话 id）、HTTP-Referer: https://cline.bot、
+#            X-Title: Cline、X-IS-MULTIROOT: false、Accept-Encoding: identity。
+#          → constants（伪装头组）+ client.chat_headers
+#        · refresh token 是**一次性**的：`/auth/refresh` 换发后旧的立即作废，
+#          必须**先落盘再使用**；并发刷新由账号级锁串行。
+#          响应 `data.accessToken` / `data.refreshToken` / `data.expiresAt`
+#          （可能是 epoch 毫秒或 ISO 串）。
+#          → adapter._token_for、client.parse_refresh、store
+#        · 免费档（`deepseek/`、`cline-free/`、`cline-pass/` 前缀）**只认流式**：
+#          非流式请求会被回 500 `empty response content`。客户端要非流式时，
+#          适配器仍按流式发，再用 `sse_to_completion` 聚合成 `chat.completion`。
+#          → client.needs_force_stream / sse_to_completion、adapter._chat_once
+#        · 免费档请求体**不能带 `max_tokens` / `max_completion_tokens`**
+#          （上游直接 500）；`cline-free/` 前缀一律剥掉。
+#          → client.chat_body
+#        · 上游把限流伪装成 200 正常帧：正文是 `empty response content` /
+#          `Daily free limit` / `INFERENCE_CAP_ERROR`，或只有 reasoning 没有
+#          正文。这类响应必须判成 429（换号 + 冷却），不能当成功回复交出去。
+#          → client.limit_signal / sse_to_completion、adapter._scan_sse
+#        · 对话体带客户端自有字段：`session_id`、`reasoning_effort`（默认
+#          `high`）。
+#          → client.chat_body
+#        · 模型目录（两个接口都免鉴权）：
+#            GET {api}/models                         全量（含付费档、`:batch`）
+#            GET {api}/ai/cline/recommended-models    只取 `free` 分组
+#          `recommended` 的免费条目优先，`/models` 补其余；合并后免费排前面。
+#          `:batch` 变体丢弃（不是对话模型）。
+#          → client.parse_models / fetch_models / fetch_recommended、catalog.merge
+#        · 没有余额接口：余额不足由 402 `insufficient_credits` 表达；
+#          `credits()` 沿用基类的「不支持」。
+#
+#      有意不跟：
+#        · 不引入 Cloudflare Worker / KV / Durable Objects 运行时。
+#        · 不引入参考仓的账号池与面板；选号 / 冷却 / 亲和按 token-farm 口径。
+#        · 不实现签到：上游没有签到入口（`supports_checkin=False`）。
+#
+# ---- 同类实现（阅读用，不引入代码）----
+#   · Cline 官方扩展与 CLI 是伪装头的原始来源（版本号按它抄）。

@@ -1,0 +1,66 @@
+# 已人工核对过的 Kilo 协议事实 —— 本仓库 Kilo 适配层的参考
+#
+# 仓库：https://github.com/Kilo-Org/kilocode （Apache-2.0）
+#       参考范围：`packages/kilo-gateway` 的 `api/constants.ts`、`auth/device.ts`、
+#       `api/profile.ts`、`api/balance.ts`、`headers.ts`。
+# 形态：**官方客户端**，不是第三方 2api 项目；本仓库不 fork、不共享历史，
+#       也不复制运行时。设备码登录 / 资料 / 余额 / 模型目录 / 对话都在
+#       server/platforms/kilo/ 里按协议事实重写（httpx + 标准库，不新增依赖）；
+#       官方客户端的 VS Code / CLI 形态、遥测与自动更新一律不引入。
+#
+# 记录方式：一次同步写一段；未核对的提交号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/qoder-ref.txt、deploy/loomy-ref.txt 同一约定）。
+#
+# 升级流程：看官方仓 packages/kilo-gateway 的 diff → 在本仓库对应文件里重写 →
+# 跑 server/tests/test_platform_kilo_adapter.py → 更新本文件的锚点与差异说明。
+#
+# ---- 2026-11 首次接入
+#      基线：首次接入时官方仓 HEAD（具体提交号待补）。
+#
+#      已取（按能力，不是逐行移植）：
+#        · 两套域名，职责不同：
+#            - `api.kilo.ai` —— 账号侧：设备授权码、资料、余额、默认模型；
+#            - `ai-gateway.kilo.ai/api/v1` —— 模型侧：对话 + 目录，OpenRouter
+#              schema 的 OpenAI 兼容层。
+#          → constants.API_BASE / GATEWAY_BASE
+#        · 设备授权码：
+#            POST {api}/api/device-auth/codes  → {code, user_code,
+#                 verificationUrl, expiresIn}
+#            GET  {api}/api/device-auth/codes/{code}
+#                 202 = 等待、403 = 拒绝、410 = 过期、200 = 通过 + {token}
+#          ⚠️ 轮询用响应里的 **`code`**，不是 `device_code`：实测拿 `device_code`
+#          去轮询会直接 410。两个字段都在响应里，别拿错。
+#          → client.start_device(_sync) / poll_device(_sync)、login.py
+#        · 凭证是设备码换来的**一年期 API token**（`TOKEN_EXPIRATION_MS`），
+#          没有 refresh token：过期只能重新登录。`refresh_account` 因此是
+#          「读一次资料 + 余额」，不是续期；401 只标失效，不尝试换 token。
+#          → adapter.refresh_account / store.expiredAt 按一年期推算
+#        · 对话头：`Authorization: Bearer <token>`，外加两个客户端标记
+#          `User-Agent: opencode-kilo-provider` 与
+#          `X-KILOCODE-EDITORNAME: Kilo CLI`——上游按它们识别「官方客户端」。
+#          → client._headers
+#        · 余额：GET {api}/api/profile/balance → `{balance: number}`，单位是
+#          **美元**（不是积分）。可选 `x-kilocode-organizationid`。
+#          拿不到余额返回 None（不抛），用量页只记一条 errors。
+#          → client.parse_balance / fetch_balance、adapter.credits(unit='usd')
+#        · 资料：GET {api}/api/profile → user{email,name} + organizations /
+#          selectedOrganizationId / hasPersonalAccount。选中的组织不在列表里
+#          时不认（避免把请求打到无权访问的组织）。
+#          → client.parse_profile / fetch_profile
+#        · 模型目录：GET {gateway}/models 免鉴权可读（OpenRouter schema，
+#          `pricing` 是按 token 的字符串价，只用来判断免费与否）。
+#          → client.parse_models + catalog
+#        · 离线兜底只放 `kilo-auto/free` / `balanced` / `efficient`：付费模型
+#          的可用性取决于账号余额，不在兜底里猜。
+#
+#      有意不跟：
+#        · 不采用 `deanxv/kilo2api` 的 cookie 抓取方案（其源码不公开，已不作
+#          参考源）；只走官方 device-auth。
+#        · 不引入官方客户端的遥测、自动更新与 VS Code 扩展宿主。
+#        · 不实现签到：上游没有签到入口（`supports_checkin=False`）。
+#
+# ---- 实测记录（2026-11）
+#   · GET  https://ai-gateway.kilo.ai/api/v1/models      → 200（OpenRouter schema）
+#   · GET  https://api.kilo.ai/api/profile（无效 token） → 401
+#   · POST https://api.kilo.ai/api/device-auth/codes     → 200
+#         {code, user_code, device_code, verificationUrl, expiresIn: 599}

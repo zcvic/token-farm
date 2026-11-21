@@ -249,6 +249,38 @@ class PlatformAdapter(ABC):
         """
         return f'{self.model_prefix}{bare_model}'
 
+    # ── 模型 id 下发 ────────────────────────────────────────
+    #
+    # 一次调用的模型名有两层：网关解析出来的**成员名**（`chat(model, ...)` 的
+    # `model`）与真正写进上游请求体的**线上名**。这两层大多相同，但并非总是：
+    # Loomy 要做别名映射（`glm-5.2` → 上游的 `xopglm52`），Qoder 要剥掉
+    # `global:` 版本前缀。
+    #
+    # 以前每个适配器各自写 `{**body, 'model': ...}`，于是「新平台忘了改 model」
+    # 会变成把 `combo/fast` 原样发给上游——一种只在组合路径上出现、且上游报错
+    # 完全指不到这里的故障。所以把下发收敛成两个钩子：
+    #
+    #   · `upstream_model()` —— 成员名 → 线上名（只有需要翻译的平台覆盖）；
+    #   · `chat_body()`      —— 复制请求体并写入线上名（**唯一**写 `body['model']`
+    #                          的地方，适配器不要再手写）。
+    #
+    # Trae 是例外：它的协议体由 `client.build_chat_body()` 从 `messages` 重建，
+    # 根本不读 `body['model']`，所以它只覆盖 `chat_body()` 的返回值用途即可。
+    def upstream_model(self, model: str) -> str:
+        """成员名 → 上游线上模型名。默认原样（去掉首尾空白）。"""
+        return str(model or '').strip()
+
+    def chat_body(self, model: str, body: dict | None) -> dict:
+        """复制一份请求体，并把 `model` 换成线上名。
+
+        复制而不是原地改：`body` 由网关持有，组合会在多个成员之间复用同一个对象，
+        原地改写会让「第二个成员的模型名」污染第一个成员已经发出的请求（流式场景
+        下尤其明显，因为请求对象在生成器里还被引用着）。
+        """
+        payload = dict(body or {})
+        payload['model'] = self.upstream_model(model)
+        return payload
+
     def realm_of_model(self, model: str) -> str | None:
         """模型名能确定的版本（db 口径 `cn` / `global`）。
 

@@ -1,0 +1,48 @@
+# 已人工核对过的 Discovery 协议事实 —— 本仓库 Discovery 适配层的参考
+#
+# 仓库：https://github.com/ZFXing-lite/discovery2api （MIT）
+# 形态：不是 fork，也没有共享历史；**不是源码副本**，仓库里没有 vendor 目录。
+#       API Key 池 / 额度探针 / 模型目录 / 对话透传都在
+#       server/platforms/discovery/ 里按参考实现重写（httpx + 标准库，不新增
+#       依赖）；参考仓自己的 HTTP 服务、账号池、Docker 与面板一律不引入。
+#
+# 记录方式：一次同步写一段；未核对的提交号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/qoder-ref.txt、deploy/loomy-ref.txt 同一约定）。
+#
+# 升级流程：clone 参考仓 → 看 internal/keypool、internal/credits、
+# internal/config 与 server.go 的 diff → 在本仓库对应文件里重写 → 跑
+# server/tests/test_platform_discovery_adapter.py → 更新本文件的锚点与差异说明。
+#
+# ---- 2026-11 首次接入
+#      基线：首次接入时参考仓 HEAD（具体提交号待补）。
+#
+#      已取（按能力，不是逐行移植）：
+#        · 凭证：Intern TokenPlan 的 **API Key**（约 6 个月有效），直接
+#          `Authorization: Bearer <key>` 打上游。没有 OAuth、没有 refresh
+#          token，所以 `refresh_account` 只是探活，不是续期。
+#          → server/platforms/discovery/store.py + adapter.import_account
+#        · 对话：POST https://discovery-api.intern-ai.org.cn/v1/chat/completions
+#          （OpenAI 兼容，流式 / 非流式都支持）。请求体原样透传，只在模型名
+#          为空时补 `auto`；参考仓的 `force-model` 静默改写**不采纳**——把
+#          客户端要的 A 换成 B，报错完全指不回这里。
+#          → client.chat / open_chat，adapter._chat_once
+#        · 模型目录：GET /v1/models，OpenAI schema；拿不到时退回内置的 8 条
+#          （与参考仓 `knownDiscoveryModels` 同源）。
+#          → client.parse_models + catalog
+#        · 额度：**没有余额接口**。唯一可靠的探针是 `GET /v1/models`：
+#            200 = 还有额度；
+#            429 `quota_exceeded`      = 额度耗尽（映射成 402，冻 1 小时）；
+#            429 `rate_limit_exceeded` = 只是被限流（保留 429，按 retry-after）。
+#          把两者混成一个状态码，等于每分钟重打一次已经耗尽的账号。
+#          → client.probe + adapter._cool_down + constants.QUOTA_COOLDOWN_SECONDS
+#        · 按账户限流：同一账户下的多把 Key **共享余额与配额**，多 Key 不叠加。
+#          所以账号池里多放几把同一账户的 Key 不会有额外吞吐。
+#
+#      有意不跟：
+#        · 不引入参考仓的 HTTP 服务 / 账号池 / 管理面板。
+#        · 不做 `force-model` 静默改写（见上）。
+#        · 不实现签到：上游没有签到入口（`supports_checkin=False`）。
+#        · 不实现网页登录：凭证只能从控制台复制（`supports_web_login=False`）。
+#
+# ---- 同类实现（阅读用，不引入代码）----
+#   · Intern-AI 的 TokenPlan 控制台是唯一的凭证来源（API Key 页）。

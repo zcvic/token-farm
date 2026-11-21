@@ -192,6 +192,14 @@ _DUMATE = _LOOMY - {'min_credits', 'catalog_timeout'}
 # 额外支持网页设备码登录（路由不按能力表过滤登录，这里只是保持与适配器声明
 # 一致）。
 _MINIMAX = _LOOMY - {'min_credits'}
+# Discovery / Kilo / Cline 与 Loomy 同一组策略（原生选号 / 目录缓存 / 冷却），
+# 没有桌面端回写，也没有保底积分。三者的目录都是**在线**拉取，所以保留
+# `catalog_timeout`；`min_credits` 只在 Loomy 的选号里实现，不要顺手开给它们。
+#
+# Kilo 的余额是美元、Cline 没有余额接口——但 `credits_ttl` / `credits_timeout`
+# 仍保留：Kilo 用它缓存余额与给查询定超时，Cline 的 `credits()` 走基类「不支持」，
+# token 轮换用的是 `request_timeout`（见 `_session_timeout`）。
+_NATIVE_POOL = _LOOMY - {'min_credits'}
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -202,6 +210,9 @@ _BY_PLATFORM: dict[str, frozenset[str]] = {
     'loomy': _LOOMY,
     'dumate': _DUMATE,
     'minimax': _MINIMAX,
+    'discovery': _NATIVE_POOL,
+    'kilo': _NATIVE_POOL,
+    'cline': _NATIVE_POOL,
     'combo': _COMBO,
 }
 

@@ -152,10 +152,15 @@ class GatewayPassthroughTest(unittest.TestCase):
         #   · platforms/minimax/adapter.py：上一条的**流式收尾器**——它只读
         #     OpenAI chunk 里的 `delta.tool_calls` 判断「这一帧算不算首字」，
         #     不改变内容；真正的协议翻译仍在 translate.py。
+        #   · platforms/cline/client.py：Cline 的免费档只认流式，客户端要非流式
+        #     时适配器强制走 stream 再由这里聚合回 `chat.completion`。聚合必须
+        #     把 `delta.tool_calls` 收进 `message.tool_calls`，否则「强制流式」
+        #     这条兜底路径会静默丢工具调用。它只作用于 `cline/` 前缀。
         allow = {'routers/anthropic.py', 'routers/responses.py', 'services/tencent.py',
                  'platforms/trae/chat.py', 'platforms/trae/client.py',
                  'platforms/trae/text_tools.py',
-                 'platforms/minimax/translate.py', 'platforms/minimax/adapter.py'}
+                 'platforms/minimax/translate.py', 'platforms/minimax/adapter.py',
+                 'platforms/cline/client.py'}
         root = Path(__file__).resolve().parents[2] / 'server'
         # Qoder 的内置网关是**第三方源码副本**（vendor 自 qoder2api-hub），它的
         # `tool_calls` 处理属于 Qoder 私有协议 ↔ OpenAI 的翻译层，与 trae/chat.py
