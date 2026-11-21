@@ -38,6 +38,7 @@ from server import db, keysvc, platforms  # noqa: E402
 from server.platforms.trae import catalog as trae_catalog  # noqa: E402
 from server.routers import gateway as G  # noqa: E402
 from server.routers import keys as keys_router  # noqa: E402
+from server.services import combo  # noqa: E402
 from server.services import modelcatalog  # noqa: E402
 
 # 上游 /v1/models 的形状：国内版裸名，国际版带 `global:` 前缀
@@ -587,12 +588,14 @@ class PlatformCachedModelIdsTest(unittest.TestCase):
                   {'name': 'off', 'enabled': False,
                    'members': [{'platform': 'trae', 'model': 'glm-5.2',
                                 'weight': 1, 'enabled': True}]}]
+        combo.invalidate()
         with mock.patch.object(db, 'get_setting',
                                lambda k, d=None: combos if k == 'model_combos' else d):
             self.assertEqual(platforms.get('combo').cached_model_ids(), {'combo/fast'})
 
     def test_combo_without_combos_is_empty_not_none(self) -> None:
         """没有组合时返回空集合：`combo/x` 确实无效，应当被点出来。"""
+        combo.invalidate()
         with mock.patch.object(db, 'get_setting', lambda k, d=None: []):
             self.assertEqual(platforms.get('combo').cached_model_ids(), set())
 

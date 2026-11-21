@@ -57,6 +57,17 @@ class _Acc:
 _by_model: dict[str, _Acc] = {}
 _dropped_models: set[str] = set()
 
+# 组合选路计数：(组合名, 成员键, 结果) → 次数。
+#
+# 为什么单独一张表而不是并进 `_by_model`：组合的**入口名**（`combo/fast`）与
+# **实际去向**（`trae/deepseek-V3`）是两个维度，网关记账只写后者（`mapped_model`）。
+# 想知道「fast 这个组合最近是不是一直落到同一个成员 / 某个成员一直失败」，只能
+# 在这里按 (组合, 成员) 交叉计数。结果只有 ok / failed 两种，基数可控。
+_by_route: dict[tuple[str, str, str], int] = {}
+# 与模型清单同一个上限理由：组合名与成员名都是外部输入（面板配置），不设上限时
+# 一份异常配置能撑大每次抓取。
+MAX_ROUTES = 256
+
 
 def _label(value: object, limit: int = 128) -> str:
     """标签值清洗：Prometheus 文本格式里反斜杠、引号、换行都要转义。
@@ -137,11 +148,31 @@ def note_request(*, model: object, status: int, stream: bool = False,
         return
 
 
+def note_route(*, combo: object, member: object, ok: bool) -> None:
+    """记一次组合选路结果（`combo/<name>` → 成员）。
+
+    只数「这次落到了谁、成没成」，不记耗时 / token（那些在 `note_request` 里，
+    按实际去向统计）。它回答的是组合特有的问题：某个成员是不是在被反复选中后
+    一直失败（冷却阈值 / 权重配错），以及一个组合的流量到底分摊到了哪些成员。
+    """
+    try:
+        name = _label(combo)
+        target = _label(member)
+        key = (name, target, 'ok' if ok else 'failed')
+        with _lock:
+            if key not in _by_route and len(_by_route) >= MAX_ROUTES:
+                return
+            _by_route[key] = _by_route.get(key, 0) + 1
+    except Exception:  # noqa: BLE001 — 指标绝不影响业务
+        return
+
+
 def reset() -> None:
     """清空累计（测试用；生产不要调用 —— counter 倒退会触发假 reset）。"""
     with _lock:
         _by_model.clear()
         _dropped_models.clear()
+        _by_route.clear()
 
 
 class _Writer:
@@ -169,6 +200,7 @@ def render(version: str = '') -> str:
     with _lock:
         snapshot = {name: _Acc(**vars(acc)) for name, acc in _by_model.items()}
         dropped = len(_dropped_models)
+        routes = dict(_by_route)
 
     total = _Acc()
     for acc in snapshot.values():
@@ -256,4 +288,12 @@ def render(version: str = '') -> str:
     w.family('tokenfarm_metrics_dropped_models',
              'Models omitted because the label-cardinality cap was reached.', 'gauge')
     w.sample('tokenfarm_metrics_dropped_models', dropped)
+
+    # 组合选路：入口名 × 实际成员 × 结果。入口名保留 `combo/<name>` 原样，
+    # 与日志的 `model` 列一致，排查时能直接对照。
+    w.family('tokenfarm_combo_route_total',
+             'Combo routing outcomes by combination and member.', 'counter')
+    for (combo_name, member, result) in sorted(routes):
+        w.sample('tokenfarm_combo_route_total', routes[(combo_name, member, result)],
+                 combo=combo_name, member=member, result=result)
     return '\n'.join(w.lines) + '\n'

@@ -59,14 +59,28 @@ def _oai_error(message: str, status: int = 400, err_type: str = 'invalid_request
                         headers=_retry_after_header(retry_after))
 
 
+# 「额度用尽」的几种叫法：各适配器与组合聚合结果用的 code 不完全一致，
+# 但客户端看到的 `error.type` 必须是同一个，否则同一件事在不同平台上
+# 会表现为「改参数重试」与「等一会儿再试」两种完全不同的处置。
+_QUOTA_CODES = frozenset({'quota_exceeded', 'quota_exhausted',
+                          'combo_quota_exhausted'})
+
+
 def _platform_err_type(status: int, code: str | None = None) -> str:
     """平台错误 → OpenAI `error.type`。
 
     「额度用尽」是 429 而不是 5xx，但它和参数错误不是一类：给
     `insufficient_quota`，客户端才会按 `Retry-After` 退避而不是改参数重试。
+    组合全部成员都没额度时是 402（见 `combo.adapter._aggregate_failure`），
+    语义相同，同样给 `insufficient_quota`——402 若落到 `invalid_request_error`，
+    客户端会去改一个没写错的请求体。
     """
-    if code == 'quota_exceeded':
+    if code in _QUOTA_CODES or status == 402:
         return 'insufficient_quota'
+    # 组合全部成员都被限流（`_aggregate_failure` 回 429）。与「请求写错了」
+    # 无关，给 `rate_limit_error` 客户端才会退避。
+    if code == 'combo_rate_limited':
+        return 'rate_limit_error'
     return 'api_error' if status >= 500 else 'invalid_request_error'
 
 

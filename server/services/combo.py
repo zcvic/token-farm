@@ -25,10 +25,46 @@
 设置里的值可能是历史写入、手工改库、或将来字段改名留下的。这里的口径与
 `modelmap` 一致：**坏条目只影响它自己**，整体按「没有这一条」处理，绝不让网关
 因为一份坏配置 5xx。
+
+## 为什么有缓存
+
+组合配置在**每个组合请求**上都要读一次（选路前必须知道成员表），而它一天改不了
+几次。`load()` 对每个成员都要做字符串清洗 / 版本归一 / 权重钳制，读路径上重复
+做这些没有意义。所以这里加一层进程内缓存：
+
+  · 保存配置、从 PG 恢复后调用 `invalidate()`，改完立即生效（不必等 TTL）；
+  · `CACHE_TTL` 只兜「别的进程 / 手工改库」这一类情况——单进程部署里走不到；
+  · 返回的对象是**共享的只读快照**：调用方只能读，不要就地改成员（选路游标、
+    冷却表都以 `member_key` 另存，不需要改成员本身）。
+
+失效挂在 `db` 的写入通知上（`on_setting_change`），而不是只挂在保存路由里：
+`settings.model_combos` 有两个写入方——面板保存（`set_setting`）与 PG 恢复
+（`replace_database` 整库替换）。只挂前者的话，「从 PG 恢复后网关还用旧组合」
+这种最难查的状态就会留下来。挂在 db 层之后，任何写路径（包括将来的）都覆盖到。
+
+失效**不清掉旧值**，只把时间戳打成过期：读库失败时它还要当兜底用（见
+`snapshot`）。清成 None 的话，一次短暂的读库失败就会让所有组合 404。
 """
 from __future__ import annotations
 
 import re
+import threading
+import time
+
+from .. import db
+
+SETTING_KEY = 'model_combos'
+
+# 缓存有效期（秒）。与 `platforms/limiter.py` 同一口径：配置类读路径用短 TTL，
+# 再配合写路径的显式失效，既不会每请求读库，也不会「保存了但请求还用旧值」。
+CACHE_TTL = 5.0
+
+_cache_lock = threading.Lock()
+# (写入时刻, 归一化后的组合列表)。None = 尚未缓存。
+_cache: tuple[float, list[dict]] | None = None
+# 每次失效 +1。排障时能看出「这份配置是哪一代」，也是测试里确认失效已发生的
+# 廉价手段（不必去读库）。
+_generation = 0
 
 # 组合名会成为 `combo/<name>` 的后半段：限制成最小字符集，避免斜杠、空格与
 # 大小写带来的「列表里有、调用时对不上」。
@@ -189,6 +225,84 @@ def validate(raw: object) -> list[dict]:
     return out
 
 
+# ── 进程内快照（热路径）──────────────────────────────────
+#
+# 下面这几个函数是**网关读路径**用的：组合适配器、`/v1/models`、密钥白名单校验
+# 都走它们，不再各自 `db.get_setting` + `load()`。`find` / `names` / `load` 保留
+# 纯函数形态（测试与写路径仍用它们，也便于单独验证归一化规则）。
+def snapshot() -> list[dict]:
+    """当前生效的组合配置（归一化后的只读快照）。
+
+    读库失败时**退回上一份快照**（没有就空列表）：一份读不到的配置不该让网关
+    500，而「按没有组合」处理会让正在跑的请求突然 404——两种都不对，但后者更糟。
+
+    **读库在锁外做**。这一点不是风格问题：`invalidate()` 会被 `db` 在持着
+    `db._lock` 时调用（PG 恢复走整库替换），如果这里持着 `_cache_lock` 去读库，
+    两条路径的加锁顺序就相反了，并发下会互等。读库与存缓存分开之后，`_cache_lock`
+    只保护一次赋值，持有时间可以忽略。
+
+    代价是并发未命中时会有多个线程各读一次库（SQLite 主键查询，可接受）。
+    「读到的值已经被别人改掉」用代数挡住：读之前记下 `_generation`，回来发现
+    变了就不写缓存——否则一次早于保存的读会把旧配置又存回去，直到 TTL 过期。
+    """
+    global _cache
+    cached = _cache
+    if cached is not None and time.monotonic() - cached[0] < CACHE_TTL:
+        return cached[1]
+    generation_before = _generation
+    try:
+        value = load(db.get_setting(SETTING_KEY, []))
+    except Exception:  # noqa: BLE001 —— 配置旁路不能把数据面打挂
+        return cached[1] if cached is not None else []
+    with _cache_lock:
+        # 期间有保存 / 整库替换：这份是旧值，不能写进缓存（下一次读会重来）。
+        if generation_before == _generation:
+            _cache = (time.monotonic(), value)
+    return value
+
+
+def invalidate() -> None:
+    """让下一次读取重新读库（保存 / 恢复后调用，改完立即生效）。
+
+    只把时间戳打成「已过期」，**保留旧值**：读库失败时它是唯一的兜底
+    （`snapshot` 里「退回上一份快照」）。若直接把 `_cache` 清成 None，一次
+    短暂读库失败就会让组合全部 404——比用一份旧配置糟糕得多。
+    """
+    global _cache, _generation
+    with _cache_lock:
+        if _cache is not None:
+            # `-inf` 而不是 `0.0`：`time.monotonic()` 在某些平台是开机时长，
+            # 刚开机时它本身就可能小于 `CACHE_TTL`，`0.0` 会被当成「刚写入」。
+            _cache = (float('-inf'), _cache[1])
+        _generation += 1
+
+
+def generation() -> int:
+    """配置代数：每次 `invalidate()` +1（排障 / 测试用，不参与路由）。"""
+    return _generation
+
+
+def cached(name: object) -> dict | None:
+    """按名字取一个**启用**的组合（等价于 `find(db.get_setting(...), name)`）。
+
+    直接在快照上找，不再走 `find` → `load`：快照已经是归一化后的结果，
+    再归一化一遍等于每次请求都把每个成员清洗两遍。
+    """
+    target = str(name or '').strip().lower()
+    if not target:
+        return None
+    for combo in snapshot():
+        if combo['name'] == target and combo['enabled']:
+            return combo
+    return None
+
+
+def cached_names() -> list[str]:
+    """全部启用组合的名字（等价于 `names(db.get_setting(...))`）。"""
+    return [c['name'] for c in snapshot()
+            if c['enabled'] and enabled_members(c)]
+
+
 def find(raw: object, name: object) -> dict | None:
     """按名字查一个**启用**的组合；找不到或未启用返回 None。"""
     target = str(name or '').strip().lower()
@@ -235,3 +349,13 @@ def alternatives(members: list[dict], chosen: dict) -> list[dict]:
 def names(raw: object) -> list[str]:
     """全部启用组合的名字（供 `/v1/models` 与界面使用）。"""
     return [c['name'] for c in load(raw) if c['enabled'] and enabled_members(c)]
+
+
+def _on_setting_change(key: str | None) -> None:
+    """存储层的写通知 → 清缓存。`key=None` 表示整库被替换（PG 恢复）。"""
+    if key is None or key == SETTING_KEY:
+        invalidate()
+
+
+db.on_setting_change(_on_setting_change)
+

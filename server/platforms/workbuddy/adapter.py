@@ -154,7 +154,7 @@ class WorkBuddyMemberAdapter(PlatformAdapter):
         except upstreamsvc.UpstreamUnavailable as exc:
             raise PlatformError(str(exc), status=503, code='upstream_unavailable') from exc
 
-        payload = {**body, 'model': str(model).strip()}
+        payload = self.chat_body(model, body)
         stream = bool(payload.get('stream'))
         try:
             outcome = await wbforward.forward(

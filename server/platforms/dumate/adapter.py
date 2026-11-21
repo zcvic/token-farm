@@ -841,8 +841,7 @@ class DumateAdapter(PlatformAdapter):
                                 code='login_expired')
         token = await self._token_for(account, proxy=proxy)
 
-        payload = dict(body or {})
-        payload['model'] = model
+        payload = self.chat_body(model, body)
         # 上游按真实模型限制 max_tokens；超过真值会整轮 400，钳到实测上限。
         cap = self._output_cap(model)
         if cap > 0:

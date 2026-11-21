@@ -513,6 +513,14 @@ class QoderAdapter(PlatformAdapter):
             return realms[0], bare
         return None, bare
 
+    def upstream_model(self, model: str) -> str:
+        """Qoder 网关认裸模型名：`global:Qwen3.8-Max` → `Qwen3.8-Max`。
+
+        版本通过请求体之外的头 / 查询参数传给内置网关（见 `client.post_chat`
+        的 `realm` 参数），写进 `model` 反而会被当成模型 id 查不到。
+        """
+        return _split_realm_hint(model)[1]
+
     # ── 对话 ────────────────────────────────────────────────
     async def chat(self, model: str, body: dict,
                    ctx: ChatContext | None = None) -> PlatformChat:
@@ -533,9 +541,11 @@ class QoderAdapter(PlatformAdapter):
             released = True
             self._limiter.release(lease)
 
-        realm, bare = self._realm_for(model, ctx)
+        realm, _bare = self._realm_for(model, ctx)
         wrapper_model = f'{self.model_prefix}{model}'
-        payload_body = {**body, 'model': bare}
+        # 线上名由 `upstream_model()` 统一给出（剥掉 `global:` / `cn:` 版本前缀）；
+        # 不要再手写 `{**body, 'model': ...}`——那是模型名下发会分叉的入口。
+        payload_body = self.chat_body(model, body)
         runtime = runtime_settings.load(self.name)
         # 没显式设置时传 None，让 QoderClient 沿用 `QODER_TIMEOUT`（运维可能改过）。
         timeout = (runtime['request_timeout']

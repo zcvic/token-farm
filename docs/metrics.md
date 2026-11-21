@@ -50,6 +50,7 @@ scrape_configs:
 | `tokenfarm_model_avg_latency_seconds{model}` | gauge | 平均总延迟 |
 | `tokenfarm_model_tokens_per_second{model}` | gauge | 生成段速率（非流式不计入分母） |
 | `tokenfarm_metrics_dropped_models` | gauge | 因标签上限未跟踪的模型数 |
+| `tokenfarm_combo_route_total{combo,member,result}` | counter | 组合选路结果，`result` 为 `ok` / `failed` |
 
 ## 口径与限制
 
@@ -61,3 +62,8 @@ scrape_configs:
   上游 429 计为 failed；要看限流原因请到日志页。
 - 默认最多跟踪 512 个模型，避免外部模型目录把内存撑大。超出后新模型不再
   跟踪，可通过 `tokenfarm_metrics_dropped_models` 观察。
+- **组合选路**（`tokenfarm_combo_route_total`）由组合适配器直接打点，不是
+  `gateway._record`：它要区分「入口名 `combo/fast`」与「实际去向
+  `trae/deepseek-V3`」，而记账只记后者。一个成员失败后换下一个成功，会同时
+  留下一条 `failed` 和一条 `ok`——这正是排查「某个成员是不是被反复选中后一直
+  失败」要看的。最多跟踪 256 组（组合 × 成员 × 结果），超出后新组合不再计入。

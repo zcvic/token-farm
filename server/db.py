@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from . import config
 
@@ -678,6 +678,10 @@ def replace_database(staging: Path) -> None:
             except Exception:
                 logger.exception('数据库替换回滚失败，需要人工检查：%s', target)
             raise
+        # 整库换了：所有「设置读缓存」都必须作废，否则网关会用旧库里的组合 /
+        # 价格继续跑。留在锁内通知：换库与清缓存之间若插进一次读，正好会读到
+        # 「新库 + 旧缓存」。回调只清内存、不读库，放在这里不会拖长持锁时间。
+        _notify_setting_change(None)
 
 
 # 增量迁移：SQLite 的 CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，
@@ -1214,6 +1218,43 @@ def get_setting(key: str, default: Any = None) -> Any:
         return default
 
 
+# ── 设置变更通知 ──────────────────────────────────────────
+#
+# 有些设置被**热路径**反复读取（组合配置就是典型），读路径上自己做缓存是必然的。
+# 缓存失效若只挂在「保存」这一个路由里，另一条写路径（PG 恢复走整库替换，不经过
+# `set_setting`）就会留下「保存了但网关还用旧值」的状态——那是最难查的一类问题。
+#
+# 所以把通知放在**存储层**：任何一次设置写入 / 整库替换都会叫一遍监听者，写路径
+# 有几个、将来新增几个，都不需要再回来补失效。回调只拿到 key（`None` = 整库被
+# 替换），由监听者自己判断是否关心。
+_setting_listeners: list[Callable[[str | None], None]] = []
+
+
+def on_setting_change(callback: Callable[[str | None], None]) -> None:
+    """注册设置变更回调（`key=None` 表示整库被替换，应清空全部缓存）。"""
+    if callback not in _setting_listeners:
+        _setting_listeners.append(callback)
+
+
+def _notify_setting_change(key: str | None) -> None:
+    # 监听者是自己人（同进程内的服务模块），但缓存失效失败绝不能冒泡到写路径：
+    # 一次保存因为「某个缓存清不掉」而 500，比多用 5 秒旧配置糟得多。
+    for callback in list(_setting_listeners):
+        try:
+            callback(key)
+        except Exception:  # noqa: BLE001
+            logger.exception('设置变更回调失败：%s', key)
+
+
+def set_setting(key: str, value: Any) -> None:
+    execute(
+        'INSERT INTO settings(key, value) VALUES(?, ?) '
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        (key, json.dumps(value, ensure_ascii=False)),
+    )
+    _notify_setting_change(key)
+
+
 # ── 账号备注（issue #67）────────────────────────────────
 #
 # 备注按 **uid** 关联，不按文件名：临时停用会把文件改成 `.disabled`，按文件名存
@@ -1253,14 +1294,6 @@ def move_account_added(uid: str, source: Path, target: Path) -> None:
             SELECT ?,uid,added_at FROM account_additions WHERE scope=? AND uid=?''',
             (str(target.resolve()), str(source.resolve()), uid))
         execute('DELETE FROM account_additions WHERE scope=? AND uid=?', (str(source.resolve()), uid))
-
-
-def set_setting(key: str, value: Any) -> None:
-    execute(
-        'INSERT INTO settings(key, value) VALUES(?, ?) '
-        'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-        (key, json.dumps(value, ensure_ascii=False)),
-    )
 
 
 # ── 用量累计 ─────────────────────────────────────────────

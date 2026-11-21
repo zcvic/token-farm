@@ -49,8 +49,9 @@ import logging
 import time
 from dataclasses import replace
 
-from ... import db, keysvc
+from ... import keysvc
 from ...services import combo as combo_svc
+from ...services import metrics
 from ...services.session_affinity import (SessionAffinity, affinity_key,
                                           content_key)
 from .. import settings as runtime_settings
@@ -59,8 +60,12 @@ from ..registry import get as get_platform
 
 logger = logging.getLogger('workbuddy.combo')
 
-# 换一个成员**可能**成功的状态：凭据 / 模型下线 / 限流 / 上游故障。
-_SWITCHABLE_STATUS = frozenset({401, 403, 404, 408, 409, 425, 429})
+# 换一个成员**可能**成功的状态：凭据 / 模型下线 / 限流 / 配额耗尽 / 上游故障。
+#
+# 402 一定要在列表里：成员平台「积分用完」是组合最典型的分摊场景——一个成员
+# 没额度了，换一个成员就能成。漏掉它会让整个组合在某个成员余额归零后持续
+# 503，而实际上其它成员都健康。
+_SWITCHABLE_STATUS = frozenset({401, 402, 403, 404, 408, 409, 425, 429})
 
 # 换平台一定也失败的错误码：请求本身不合法（参数、上下文、不支持的字段）。
 # 文档里明确这几种不切换，避免把确定性的 400 变成「全部失败」的 503。
@@ -70,7 +75,25 @@ _NO_SWITCH_CODES = frozenset({
     'unsupported_parameter',
 })
 
+# 状态码是 4xx、但**换成员有意义**的错误码：平台不认识这个模型 id（各平台对
+# 同一个模型的命名不同，成员配错或目录换了都会这样）、模型已下线。它们通常是
+# 400 / 404，单看状态码会被当成「请求写错了」而原样抛出。
+_MODEL_MISSING_CODES = frozenset({
+    'unsupported_model',
+    'model_not_found',
+})
+_SWITCHABLE_CODES = frozenset({
+    *_MODEL_MISSING_CODES,
+    'not_found',
+    'quota_exceeded',
+    'quota_exhausted',
+    'login_expired',
+    'session_invalid',
+    'no_account',
+})
+
 # 确定「这个成员本身不可用」的状态：换一次不会好，继续探测只会白花积分。
+# 402 不在里面：额度会恢复，只是不该在 15 秒后再撞一次（见 `_cool`）。
 _PERMANENT_STATUS = frozenset({401, 403, 404})
 
 # 一次请求最多尝试几个成员（含首选）。
@@ -79,6 +102,7 @@ MAX_ATTEMPTS = 3
 # 成员冷却（秒）：连续失败按 2 的幂退避，封顶 10 分钟。
 _COOLDOWN_START = 15.0        # 5xx / 超时 / 网络类
 _COOLDOWN_RATE_LIMIT = 30.0   # 429：通常要等配额窗口
+_COOLDOWN_QUOTA = 120.0       # 402：额度耗尽，短退避只会白撞
 _COOLDOWN_MAX = 600.0
 # 绑定的成员连续失败到这个次数，认为它对当前会话已不可用：允许改绑，
 # 避免「每轮探测一次坏成员 → 换走 → 冷却结束再探测」的长期抖动。
@@ -89,7 +113,49 @@ def _switchable(exc: PlatformError) -> bool:
     """这个失败换一个成员还值得再试吗？"""
     if exc.code in _NO_SWITCH_CODES:
         return False
+    if exc.code in _SWITCHABLE_CODES:
+        return True
     return exc.status in _SWITCHABLE_STATUS or exc.status >= 500
+
+
+def _aggregate_failure(errors: list[PlatformError]) -> tuple[int, str]:
+    """所有成员都失败时，回给客户端的状态码与错误码。
+
+    默认 503（「稍后重试」）；但如果失败原因**一致**且更具体，就用它：
+
+      · 全是 429 → 429 `combo_rate_limited`（带 Retry-After，客户端才知道等多久）
+      · 全是 402 → 402 `combo_quota_exhausted`（额度耗尽，重试没用）
+      · 全是 404 / 全是「模型不认识」→ 404 `combo_model_not_found`
+      · 其余 → 503 `combo_all_failed`
+
+    为什么值得区分：503 会被客户端当成「网关暂时抽风」而立刻重试，面对额度
+    耗尽只会雪上加霜；而 429 不带 Retry-After 同样会引发立即重试。反过来，
+    「所有成员都报模型不存在」是**配置问题**，回 503 会让人一直重试一个永远
+    不会成功的请求。
+
+    「模型不认识」不能只看 404：Loomy / DuMate 报的是 400 `unsupported_model`，
+    只看状态码会漏成 503。所以同时认 `_MODEL_MISSING_CODES`——它们表达的是同一
+    件事（这个成员不认这个模型 id），与状态码无关。
+
+    **不**把「全 401/403」翻成 403：那是成员侧的账号 / 凭据坏了，不是调用方的
+    密钥无效。对客户端说 403 会让人去改一个没写错的 token，503 才是实话。
+    """
+    if not errors:
+        return 503, 'combo_all_failed'
+    statuses = {e.status for e in errors}
+    codes = {e.code for e in errors}
+    if statuses == {429}:
+        return 429, 'combo_rate_limited'
+    if statuses == {402}:
+        return 402, 'combo_quota_exhausted'
+    # 「模型不认识」不一定带 404：Loomy / DuMate 报的是 400 `unsupported_model`。
+    # 只在 4xx 且错误码确实都是「模型/接口找不到」时才归到这一类，避免把
+    # 「参数写错了」也报成模型不存在。
+    if statuses == {404} or (
+            statuses <= {400, 404}
+            and codes <= _MODEL_MISSING_CODES | {'not_found'}):
+        return 404, 'combo_model_not_found'
+    return 503, 'combo_all_failed'
 
 
 class ComboAdapter(PlatformAdapter):
@@ -150,6 +216,7 @@ class ComboAdapter(PlatformAdapter):
             delay = _COOLDOWN_MAX
         else:
             start = (_COOLDOWN_RATE_LIMIT if exc.status == 429
+                     else _COOLDOWN_QUOTA if exc.status == 402
                      else _COOLDOWN_START)
             delay = min(_COOLDOWN_MAX, start * (2 ** (streak - 1)))
         hint = getattr(exc, 'retry_after', None)
@@ -196,17 +263,16 @@ class ComboAdapter(PlatformAdapter):
     # ── 模型 ────────────────────────────────────────────────
     async def list_models(self, *, refresh: bool = False) -> list[dict]:
         """只列出**启用**的组合；停用的组合不出现在 `/v1/models` 里。"""
-        return [self._public_model(name)
-                for name in combo_svc.names(db.get_setting('model_combos', []))]
+        return [self._public_model(name) for name in combo_svc.cached_names()]
 
     def cached_model_ids(self) -> set[str] | None:
         """已定义的组合名（`combo/<name>`）；没有组合时返回空集合（= 都不认）。
 
-        组合清单就在库里，读一次很便宜，所以这里**不返回 None**：没有组合时
-        白名单里写 `combo/x` 确实是个无效名字，应当被点出来。
+        组合清单读的是 `combo_svc` 的进程内快照（保存 / PG 恢复后立即失效），
+        所以这里**不返回 None**：没有组合时白名单里写 `combo/x` 确实是个无效
+        名字，应当被点出来。
         """
-        return {f'{self.model_prefix}{name}'
-                for name in combo_svc.names(db.get_setting('model_combos', []))}
+        return {f'{self.model_prefix}{name}' for name in combo_svc.cached_names()}
 
     def _public_model(self, name: str) -> dict:
         return {
@@ -227,8 +293,9 @@ class ComboAdapter(PlatformAdapter):
     # ── 网关 ────────────────────────────────────────────────
     async def chat(self, model: str, body: dict,
                    ctx: ChatContext | None = None) -> PlatformChat:
-        raw = db.get_setting('model_combos', [])
-        target = combo_svc.find(raw, model)
+        # 读进程内快照（保存 / PG 恢复后立即失效），不再每请求 `get_setting` +
+        # 全量 `load()`。`find` 仍按名字过滤，未知 / 停用的组合照旧 404。
+        target = combo_svc.cached(model)
         if target is None:
             raise PlatformError(f'未知组合 {model!r}', status=404,
                                 code='combo_not_found')
@@ -296,20 +363,36 @@ class ComboAdapter(PlatformAdapter):
                 for candidate in candidates:
                     self._bind(combo_name, candidate, chosen)
         attempts = ([chosen] + rest if chosen else rest)[:MAX_ATTEMPTS]
+        # 一行说清「这次为什么落到这里」：命中粘性 / 粘性成员在冷却 / 新会话加权。
+        # 排障时最常见的两个问题——「流量为什么全在同一个成员」与「某个成员为什么
+        # 一直没被选中」——都只能靠这一行回答（后者看 cooling 列表）。
         logger.debug(
-            'combo %s: affinity=%s pinned=%s chosen=%s attempts=%s',
+            'combo %s: affinity=%s reason=%s pinned=%s chosen=%s cooling=%s attempts=%s',
             combo_name, 'yes' if candidates else 'no',
+            ('pinned' if had_pin and pinned in available
+             else 'pinned-cooling' if had_pin
+             else 'weighted'),
             combo_svc.member_key(pinned) if pinned else '-',
             combo_svc.member_key(chosen) if chosen else '-',
+            [combo_svc.member_key(m) for m in members
+             if self._cooling(combo_name, combo_svc.member_key(m), now)],
             [combo_svc.member_key(m) for m in attempts])
 
         failures: list[str] = []
+        errors: list[PlatformError] = []
+        # 指标里的入口名用对外的完整写法（`combo/fast`），与日志 `model` 列一致，
+        # 排查时可以直接对照；`model` 本身是去掉前缀的裸名。
+        route_label = f'{self.model_prefix}{combo_name}'
         for member in attempts:
             key = f'{member["platform"]}/{member["model"]}'
             adapter = get_platform(member['platform'])
             if adapter is None:
                 # 成员平台被卸载 / 配置里写了不存在的平台：跳过它，继续下一个。
                 failures.append(f'{key}: 未知平台')
+                # 这条不是「上游故障」，而是配置与代码不一致，必须能在日志里
+                # 看见——否则表现只是「这个成员从来没被用过」。
+                logger.warning('combo %s: 成员平台 %s 未注册，已跳过',
+                               combo_name, member['platform'])
                 continue
             # 版本校验必须在**调用成员之前**做。
             #
@@ -339,12 +422,30 @@ class ComboAdapter(PlatformAdapter):
                 member_ctx = (replace(ctx, realm=member_realm)
                               if ctx is not None
                               else ChatContext(realm=member_realm))
+            # 模型 id 下发：**在这一层就换成成员名**，不指望每个成员适配器都记得改。
+            #
+            # `body['model']` 进组合时是 `combo/fast`——它不是任何上游认识的模型
+            # 名字。以前靠各成员适配器自己 `{**body, 'model': ...}` 覆盖，于是
+            # 「新平台忘了改」的表现是把 `combo/fast` 原样发给上游：一个只在组合
+            # 路径上出现、且上游报错完全指不到这里的故障。
+            #
+            # 现在用基类的 `chat_body()`（见 `platforms/base.py`，唯一写
+            # `body['model']` 的地方）把入口名换成成员名；成员适配器内部再调一次
+            # 自己的 `chat_body()`，把成员名翻译成真正的线上名（Loomy 的别名、
+            # Qoder 的 `global:` 前缀），两步都是幂等的。
+            #
+            # 每个成员各拿一份**副本**：`body` 在多个成员之间复用，原地改写会让
+            # 第一个成员已经发出的请求被第二个成员的模型名污染（流式场景下请求
+            # 对象在生成器里还被引用着）。
+            member_body = self.chat_body(member['model'], body)
             try:
                 # `ctx` 原样透传：WorkBuddy 成员要靠它拿到调用方的密钥与来源 IP
                 # （分组绑定 / 粘性会话都在这两条上）。真实平台忽略这个参数。
-                outcome = await adapter.chat(member['model'], body, member_ctx)
+                outcome = await adapter.chat(member['model'], member_body, member_ctx)
             except PlatformError as exc:
                 failures.append(f'{key}: {exc.message}')
+                errors.append(exc)
+                metrics.note_route(combo=route_label, member=key, ok=False)
                 if not _switchable(exc):
                     # 请求本身的问题：换平台也一样失败，把原始状态码与错误码
                     # 透给客户端，它才知道该改哪里。
@@ -363,13 +464,21 @@ class ComboAdapter(PlatformAdapter):
                         self._affinity.unbind(
                             self._binding(combo_name, candidate))
                     had_pin = False
-                logger.debug('combo %s: %s 失败（%s %s），连续第 %s 次',
-                             combo_name, key, exc.status, exc.code, streak)
+                # 成员失败是**运维要看的**事件（不是调试细节）：一行里带齐
+                # 成员、状态码、错误码、连续失败次数与本次冷却，才能回答
+                # 「为什么这个组合一直落到同一个成员 / 为什么它被跳过了」。
+                until, _ = self._cooldowns.get(
+                    (combo_name, member_key), (0.0, 0))
+                logger.warning(
+                    'combo %s: 成员 %s 失败（status=%s code=%s），连续第 %s 次，'
+                    '冷却 %ss', combo_name, key, exc.status, exc.code, streak,
+                    max(0, int(until - time.monotonic())))
                 continue
             # 成员适配器不一定填 model（WorkBuddy 那条老路径没有）。补成真实
             # 去向，网关记账才能记出「这次到底走了哪个平台」。
             if not outcome.model:
                 outcome.model = key
+            metrics.note_route(combo=route_label, member=key, ok=True)
             self._recover(combo_name, member)
             if candidates:
                 same = (had_pin and pinned is not None
@@ -387,12 +496,26 @@ class ComboAdapter(PlatformAdapter):
                 # 已建立绑定 + 临时故障切换：保留原绑定。
             return outcome
 
-        # 全部失败（或一个候选都没有）：503 让客户端知道可以稍后重试，
-        # 而不是 4xx 暗示请求写错了。
+        # 全部失败（或一个候选都没有）。状态码按**失败原因**决定，而不是一律
+        # 503：成员全都没额度（402）时回 503 会让客户端以为「稍后重试就好」，
+        # 实际要等额度恢复；全被限流（429）时不给 Retry-After，客户端会立刻
+        # 重试并把冷却中的成员再撞一遍。详见 `_aggregate_failure`。
         detail = '；'.join(failures) or '没有可尝试的成员'
+        status, code = _aggregate_failure(errors)
+        retry_after = None
+        if status in (402, 429, 503):
+            # 取该组合里**最早**结束的冷却作为等待提示：它是最可能先恢复的成员。
+            # 用 `list(...)` 取快照再筛，避免与其它协程改写冷却表时迭代出错。
+            waits = [int(until - time.monotonic())
+                     for (name, _member), (until, _streak)
+                     in list(self._cooldowns.items())
+                     if name == combo_name]
+            waits = [w for w in waits if w > 0]
+            if waits:
+                retry_after = min(waits)
         raise PlatformError(
-            f'组合「{target["name"]}」全部失败：{detail}', status=503,
-            code='combo_all_failed')
+            f'组合「{target["name"]}」全部失败：{detail}', status=status,
+            code=code, retry_after=retry_after)
 
 
 adapter = ComboAdapter()

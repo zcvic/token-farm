@@ -998,6 +998,10 @@ class LoomyAdapter(PlatformAdapter):
                             for m in models if m.get('id')}
         return [self._public_model(m) for m in models if m.get('id')]
 
+    def upstream_model(self, model: str) -> str:
+        """Loomy 的对外名与上游名不完全一样（见 `constants.MODEL_ALIASES`）。"""
+        return C.wire_model(model)
+
     def _public_model(self, raw: dict) -> dict:
         model_id = str(raw.get('id') or '')
         modalities = raw.get('modalities')
@@ -1315,8 +1319,7 @@ class LoomyAdapter(PlatformAdapter):
                                 code='session_invalid')
         uid = str(account.get('uid') or '')
 
-        payload = dict(body or {})
-        payload['model'] = C.wire_model(model)
+        payload = self.chat_body(model, body)
         # 「不思考」：上游只认正文里的 `/no_think`，没有开关字段。
         messages = _no_think_messages(payload)
         if messages is not None:

@@ -231,8 +231,12 @@ def save_pricing(body: Any = Body(None),
 # ── 模型组合 ─────────────────────────────────────────────
 @router.get('/settings/combos')
 def get_combos(user: dict = Depends(security.current_user)) -> dict:
-    """组合配置。读路径用 `load`：历史坏条目被跳过，不让配置页整页打不开。"""
-    return {'combos': combo.load(db.get_setting('model_combos', []))}
+    """组合配置。读路径走进程内快照：历史坏条目被跳过，不让配置页整页打不开。
+
+    与网关用同一份快照（`combo.snapshot()`），所以这里看到的就是正在生效的
+    配置——两边各自读库迟早会出现「保存了但网关还用旧值」。
+    """
+    return {'combos': combo.snapshot()}
 
 
 @router.post('/settings/combos')
