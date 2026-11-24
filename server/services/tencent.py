@@ -1523,14 +1523,30 @@ async def probe_account(auth: dict, model: str = 'glm-5.2') -> tuple[bool, str]:
         headers['X-Device-Token'] = _dt
     # 会话头族（issue #193）：上游 2026-10-16 起对**部分账号**灰度启用渠道校验，
     # 缺 X-Conversation-ID 即判 11-128「conversation id missing」—— 被灰度到的账号在
-    # 探测里必红（真实对话走网关，同一族头由上游补）。这里补齐官方客户端那几支；
-    # 四个 ID 各有语义（会话 / 轮 / 消息 / 根），不要图省事复用成同一个值。
+    # 探测里必红（真实对话走网关，同一族头由上游补）。这里补齐官方客户端那几支。
+    #
+    # **同族里各 ID 的等值关系是有语义的**（对齐上游 `injectConversationHeaders`）：
+    #   · X-Conversation-ID        会话级，多轮稳定（探测只有一轮，随机即可）
+    #   · X-Conversation-Request-ID 轮级聚合主键，后台按它把一次发送聚成一条
+    #   · X-Request-ID == X-Conversation-Message-ID  消息级，两者**必须同值**——
+    #     不同值会让一次发送被后台记成两次请求
+    #   · X-Root-Request-ID == X-Conversation-Request-ID  根追踪就是轮级键
+    #   · B3 链路族：TraceId 取轮级键（32 hex 合法），SpanId 取消息键前 16 位
+    # 早先这里发了五个互不相关的 uuid，形态和官方客户端不一致（缺 X-Request-ID
+    # 与 B3 三头、Root 也不等于轮级键），是显眼的「非官方客户端」特征。
+    conv_id = uuid.uuid4().hex
+    turn_id = uuid.uuid4().hex
+    msg_id = uuid.uuid4().hex
     headers.update({
-        'X-Conversation-ID': uuid.uuid4().hex,
-        'X-Conversation-Request-ID': uuid.uuid4().hex,
-        'X-Conversation-Message-ID': uuid.uuid4().hex,
-        'X-Root-Request-ID': uuid.uuid4().hex,
-        'X-Trace-ID': uuid.uuid4().hex,
+        'X-Conversation-ID': conv_id,
+        'X-Conversation-Request-ID': turn_id,
+        'X-Conversation-Message-ID': msg_id,
+        'X-Request-ID': msg_id,
+        'X-Root-Request-ID': turn_id,
+        'X-Trace-ID': turn_id,
+        'X-B3-TraceId': turn_id,
+        'X-B3-SpanId': msg_id[:16],
+        'X-B3-Sampled': '1',
     })
 
     payload = {
@@ -1692,15 +1708,57 @@ def _is_channel_check(code: object, raw: str) -> bool:
     low = raw.lower()
     return ('渠道校验' in raw or 'channel verification' in low or 'official client' in low)
 
+def _walk_error_envelope(root: object) -> tuple[object | None, str]:
+    """广度优先在整棵 JSON 里找业务码与可读文案，返回 (code|None, msg)。
+
+    上游的判据是「**任意嵌套层**出现 code」（Go 侧 `hasBusinessCode` 是深度
+    遍历整棵 JSON），而不是只读顶层。这里用 BFS 而不是 DFS：越浅的 code 越可能
+    是真正的业务码，DFS 会先钻进 `data.list[0].code` 这类无关字段。
+
+    文案与码分开找：即使没有业务码，嵌套的 `message`（`{"error":{"message":…}}`）
+    也是唯一可读的成因，丢掉它等于把「积分不足」变成「上游返回 code=400」。
+    """
+    queue: list[tuple[object, str]] = [(root, '')]
+    first_msg = ''
+    while queue:
+        node, inherited = queue.pop(0)
+        if isinstance(node, dict):
+            msg = str(node.get('msg') or node.get('message') or inherited or '')
+            if msg and not first_msg:
+                first_msg = msg
+            if 'code' in node:
+                code = node.get('code')
+                if code is not None and str(code).strip() != '':
+                    return code, msg or first_msg
+            for key, child in node.items():
+                if key != 'code':
+                    queue.append((child, msg))
+        elif isinstance(node, list):
+            for child in node:
+                queue.append((child, inherited))
+    return None, first_msg
+
+
 def _parse_error_body(raw: str, status: int) -> tuple[int | str, str]:
-    """错误响应可能是 {code,msg} 信封，也可能是纯文本。"""
+    """错误响应可能是 {code,msg} 信封、纯文本，或把信封套在 `error` / `data` 里。
+
+    为什么不能只读顶层：实测上游会把业务码塞进 `error.data.code`（
+    `{"error":{"data":{"code":14018}}}`）。旧实现只读顶层 `code`，于是这种
+    响应被报成 `code=400`——探测结果落 `error` 而不是 `credit`，界面上只说
+    「上游返回 code=400」，真正的成因（14018 积分耗尽）被吞掉。
+    """
     try:
         env = json.loads(raw)
-        if isinstance(env, dict):
-            return env.get('code', status), str(env.get('msg') or env.get('message') or '')
     except Exception:  # noqa: BLE001
-        pass
-    return status, raw.strip()[:200]
+        return status, raw.strip()[:200]
+    code, msg = _walk_error_envelope(env)
+    if code is not None:
+        return code, msg
+    # 没有业务码：沿用 HTTP 状态码，文案尽量用嵌套 message（见函数注释）。
+    if msg:
+        return status, msg
+    # 非 dict（数组 / 标量）且无文案：保留原文，便于排查。
+    return status, ('' if isinstance(env, dict) else raw.strip()[:200])
 
 
 # 已知业务码 -> 可读说明（来源：workbuddy2api 源码与实测）

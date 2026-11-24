@@ -90,6 +90,78 @@ class ClassifyProbeResultTest(unittest.TestCase):
         )
 
 
+class NestedErrorEnvelopeTest(unittest.TestCase):
+    """业务码可能套在 `error` / `error.data` 里，解析器必须挖到它。
+
+    实测上游有这种形态（`{"error":{"data":{"code":14018}}}`）。只读顶层 `code`
+    会把它报成 `code=400`，探测结果落 `error` 而不是 `credit`——界面上只说
+    「上游返回 code=400」，真正的成因（积分耗尽 / 会话失效）被吞掉。
+    """
+
+    def test_top_level_envelope(self) -> None:
+        self.assertEqual(
+            tencent._parse_error_body('{"code":14018,"msg":"credit exhausted"}', 400),
+            (14018, 'credit exhausted'),
+        )
+
+    def test_error_wrapped_code(self) -> None:
+        code, msg = tencent._parse_error_body(
+            '{"error":{"code":14018,"message":"credit exhausted"}}', 400)
+        self.assertEqual(code, 14018)
+        self.assertEqual(msg, 'credit exhausted')
+
+    def test_error_data_wrapped_code(self) -> None:
+        """`error.data.code` —— 上游最深的一种嵌套。"""
+        code, msg = tencent._parse_error_body(
+            '{"error":{"data":{"code":14018},"message":"credit exhausted"}}', 400)
+        self.assertEqual(code, 14018)
+        self.assertEqual(msg, 'credit exhausted', 'msg 从父节点继承')
+
+    def test_string_code_preserved(self) -> None:
+        """`11-128` 这类带横线的字符串码不能被 int() 化。"""
+        code, _ = tencent._parse_error_body('{"code":"11-128","msg":"x"}', 400)
+        self.assertEqual(code, '11-128')
+
+    def test_nested_code_classifies_as_credit(self) -> None:
+        """端到端：嵌套码经 _explain_code 后必须分类成 credit。"""
+        code, msg = tencent._parse_error_body(
+            '{"error":{"data":{"code":14018},"message":"credit exhausted"}}', 429)
+        status, got = tencent.classify_probe_result(False, tencent._explain_code(code, msg))
+        self.assertEqual((status, got), ('credit', '14018'))
+
+    def test_nested_code_classifies_as_auth(self) -> None:
+        code, msg = tencent._parse_error_body(
+            '{"error":{"code":12153,"message":"session expired"}}', 401)
+        status, got = tencent.classify_probe_result(False, tencent._explain_code(code, msg))
+        self.assertEqual((status, got), ('auth', '12153'))
+
+    def test_plain_text_falls_back_to_status(self) -> None:
+        self.assertEqual(tencent._parse_error_body('upstream boom', 502), (502, 'upstream boom'))
+
+    def test_json_without_code_falls_back_to_status(self) -> None:
+        """能解析成 JSON 但没有业务码：用 HTTP 状态码，不把整段 JSON 当文案。"""
+        self.assertEqual(tencent._parse_error_body('{"detail":"nope"}', 403), (403, ''))
+
+    def test_nested_message_without_code_is_kept(self) -> None:
+        """没有业务码时，嵌套的 message 是唯一可读成因，不能丢。
+
+        丢掉它会把 `{"error":{"message":"insufficient credit"}}` 变成
+        「上游返回 code=400」，额度不足就归不到 credit。
+        """
+        code, msg = tencent._parse_error_body(
+            '{"error":{"message":"insufficient credit"}}', 400)
+        self.assertEqual(code, 400)
+        self.assertEqual(msg, 'insufficient credit')
+        self.assertEqual(
+            tencent.classify_probe_result(False, tencent._explain_code(code, msg))[0],
+            'credit')
+
+    def test_shallow_code_wins_over_deep_one(self) -> None:
+        """BFS 而非 DFS：浅层的 code 才是业务码，别先钻进列表里的无关 code。"""
+        raw = '{"data":{"items":[{"code":999}]},"code":11158,"msg":"no permission"}'
+        self.assertEqual(tencent._parse_error_body(raw, 400), (11158, 'no permission'))
+
+
 class ProbeEndpointTest(unittest.TestCase):
     RAW = {
         'account': {'uid': 'u1', 'nickname': '猫猫', 'enterpriseId': ''},

@@ -365,6 +365,17 @@ git diff --stat cb27afd...loomy-ref/HEAD                # 只看协议文件有�
 >   `none`/`high`，effort 档位去重后按上游 schema 白名单过滤，认不出的条目逐条
 >   丢弃；档位经适配器与测试台下拉透出）。legacy `variants` 不取（语义是「变体名
 >   → 参数覆盖」，不是档位集合）；auto-routing worker / 计费 / 遥测不取。
+>
+> **复核（2026-11-24，`git fetch --all --prune` 之后）**：其余七个来源
+> （`upstream` / `trae-ref` / `qoder-ref` / `discovery-ref` / `cline-ref` /
+> `kilo-ref` / `loomy-ref`）相对各自锚点**均无新提交**。dumate 有 14 个新提交
+> （`9f02228e` → `db5c4348`），其中 5 个上一批已判过，其余为一份 WIP 快照
+> （`878ea2c3`）、两个文档提交、四个 merge 与一个发版提交，**逐项核对后无新增
+> 可取项**：413 排空方案已用三种客户端形态实测本仓不存在「RST 吞响应」问题；
+> 指纹清洗归上游 `workbuddy2api` 负责（本仓只做组合转发）；其余是参考仓的池 /
+> 面板 / 调度组件。详细理由与实测结论见 `deploy/dumate-ref.txt` 第三批。
+> 核对过程中另外发现并修掉两个真实缺口（嵌套业务码解析、探测会话头族的等值
+> 关系），见该文件同段。
 
 这些来源的仓库布局与运行时都不同，**不要互相 cherry-pick**，按能力在本项目
 对应文件重写。

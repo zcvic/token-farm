@@ -117,11 +117,35 @@ class ProbeRequestShapeTest(unittest.TestCase):
         h = _Client.sent['headers'] or {}
         self.assertIn('X-Conversation-ID', h, '缺这个头会被判 11-128（渠道校验）')
         for name in ('X-Conversation-Request-ID', 'X-Conversation-Message-ID',
-                     'X-Root-Request-ID', 'X-Trace-ID'):
+                     'X-Request-ID', 'X-Root-Request-ID', 'X-Trace-ID',
+                     'X-B3-TraceId', 'X-B3-SpanId', 'X-B3-Sampled'):
             self.assertIn(name, h, f'会话头族缺 {name}')
         ids = {h['X-Conversation-ID'], h['X-Conversation-Request-ID'],
                h['X-Conversation-Message-ID']}
         self.assertEqual(len(ids), 3, '会话 / 轮 / 消息三个 ID 语义不同，不该复用同一个值')
+
+    def test_probe_conversation_header_equalities(self) -> None:
+        """同族里的**等值关系**有语义，不是随便几个随机值（对齐上游 injectConversationHeaders）。
+
+        上游后台按 X-Conversation-Request-ID 把「一次用户发送」聚成一条。若
+        X-Request-ID 与 X-Conversation-Message-ID 不同值，这次发送会被记成两次请求；
+        若 X-Root-Request-ID 不等于轮级键，根追踪与轮级聚合就断了。这些都是
+        上游 Go 测试逐条断言过的口径（handler_ids_test.go），形态不对不会报错，
+        只是后台数据悄悄变脏 —— 所以只能在这里钉住。
+        """
+        self._probe()
+        h = _Client.sent['headers'] or {}
+        self.assertEqual(h['X-Request-ID'], h['X-Conversation-Message-ID'],
+                         'X-Request-ID 必须与 X-Conversation-Message-ID 同值')
+        self.assertEqual(h['X-Root-Request-ID'], h['X-Conversation-Request-ID'],
+                         'X-Root-Request-ID 必须等于轮级聚合键')
+        self.assertEqual(h['X-B3-TraceId'], h['X-Conversation-Request-ID'],
+                         'B3 TraceId 取轮级键（32 hex，B3 合法）')
+        self.assertEqual(h['X-B3-SpanId'], h['X-Conversation-Message-ID'][:16],
+                         'B3 SpanId 取消息键前 16 位')
+        self.assertEqual(h['X-B3-Sampled'], '1')
+        self.assertNotEqual(h['X-Conversation-ID'], h['X-Conversation-Request-ID'],
+                            '会话级与轮级键必须不同（同会话多轮共享前者、每轮换后者）')
 
     def test_probe_succeeds(self) -> None:
         ok, msg = self._probe()
