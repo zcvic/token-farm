@@ -512,7 +512,16 @@ class ClineAdapterTest(unittest.TestCase):
 
     # ── 模型目录 ──────────────────────────────────────────
     def test_list_models_adds_prefix_and_falls_back(self) -> None:
-        models = asyncio.run(self.adapter.list_models())
+        # 这个用例要的是「拿不到线上目录 → 退回内置免费档」。**必须把两个抓取
+        # 函数都堵住**：本文件开头就写明全部离线，之前漏了这层 patch，于是
+        # 网络通的时候会真的拉线上目录，断言的内置模型自然不在里面 —— 同一份
+        # 代码在有网机器上红、没网机器上绿，是最难查的那种不稳定。
+        async def boom(**kwargs):
+            raise PlatformError('offline', status=502, code='upstream_error')
+
+        with mock.patch.object(client, 'fetch_recommended', new=boom), \
+                mock.patch.object(client, 'fetch_models', new=boom):
+            models = asyncio.run(self.adapter.list_models(refresh=True))
         ids = {m['id'] for m in models}
         self.assertIn('cline/cline-free/nemotron-3.5-super-vl', ids)
         self.assertTrue(all(m['realm'] == 'cn' for m in models))
@@ -544,6 +553,23 @@ class ClineAdapterTest(unittest.TestCase):
                 mock.patch.object(client, 'fetch_models', new=fake_models):
             models = asyncio.run(self.adapter.list_models(refresh=True))
         self.assertEqual([m['model_name'] for m in models], ['openai/gpt-4o'])
+
+    def test_both_endpoints_down_falls_back_to_builtin_free_tier(self) -> None:
+        """两个目录接口都挂时，内置免费档必须顶上（模型页不能整片空白）。
+
+        `_live_models` 按设计返回**空表**而不是 None，所以调用方只能按
+        「空 / 没有」判断。这里钉住那条兜底：把判据改回 `is None` 本用例就红。
+        """
+        async def boom(**kwargs):
+            raise PlatformError('down', status=502, code='upstream_error')
+
+        with mock.patch.object(client, 'fetch_recommended', new=boom), \
+                mock.patch.object(client, 'fetch_models', new=boom):
+            models = asyncio.run(self.adapter.list_models(refresh=True))
+        self.assertTrue(models, '两个目录接口都失败时必须退回内置免费档')
+        self.assertEqual({m['id'] for m in models},
+                         {f'cline/{m["id"]}' for m in C.DEFAULT_MODELS})
+        self.assertTrue(all(m['free'] for m in models))
 
     # ── 选号 ──────────────────────────────────────────────
     def test_candidates_skip_disabled_cooling_and_refreshless(self) -> None:

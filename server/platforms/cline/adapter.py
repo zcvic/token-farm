@@ -572,7 +572,11 @@ class ClineAdapter(PlatformAdapter):
             self._note_implicit_attempt()
             if models:
                 self._save_models(models)
-        if models is None:
+        # `not models` 而不是 `is None`：`_live_models` 在**两个接口都失败**时按
+        # 设计返回空表（它的 docstring 就写着「调用方降级到内置免费档」），只判
+        # None 会让那条兜底永远走不到 —— 现场表现是模型页整片空白，而日志里只有
+        # 两条抓取失败，看不出「本该有内置免费档」。
+        if not models:
             models = catalog.default_models()
         # 按被动可用性信号排序：可用置顶、未知居中、失败沉底。稳定排序，
         # 没有信号时顺序与目录原序完全一致（不会让下拉莫名跳动）。
