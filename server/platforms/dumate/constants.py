@@ -36,6 +36,31 @@ DRAW_STATUS_PATH = '/api/dumate/activity/growth-plan/draw/status'
 DRAW_PATH = '/api/dumate/activity/growth-plan/draw'
 TASKS_PATH = '/api/dumate/activity/growth-plan/tasks'
 TASK_COMPLETE_PATH = '/api/dumate/activity/growth-plan/task/complete'
+PRIZE_CLAIM_PATH = '/api/dumate/activity/growth-plan/prize/claim'
+ACTIVITY_STATUS_PATH = '/api/dumate/activity/status'
+
+# 「成长计划」当前活动 id / 版本（前端 bundle 与参考实现同口径）。
+ACTIVITY_ID = 'growth_plan_2026'
+ACTIVITY_VERSION = 2
+# 任务列表要带 device，否则上游会按未知终端裁掉一部分任务。
+TASKS_QUERY = '?device=web'
+# 抽奖 / 领取接口的来源标记（与网页客户端一致）。
+ACTIVITY_SOURCE = 'web'
+
+# 邀请码（「邀请有礼」）：网页端 5090 bundle 的 `/api/dumate/invitation_code/*`。
+#   · GET  /get?activityId=        → {invitationCode, type, createdAt, inviteMessage}
+#   · GET  /invited/count?activityId= → {invitedCount, totalPoints}
+#   · POST /redeem                → body {invitationCode, timezone, source?, activityId?}
+# 邀请码区分大小写；新用户 7 天内可填一次，不能填自己的码。
+INVITATION_CODE_BASE = '/api/dumate/invitation_code'
+INVITATION_CODE_GET_PATH = INVITATION_CODE_BASE + '/get'
+INVITATION_CODE_REDEEM_PATH = INVITATION_CODE_BASE + '/redeem'
+INVITATION_CODE_INVITED_COUNT_PATH = INVITATION_CODE_BASE + '/invited/count'
+INVITATION_TIMEZONE = 'Asia/Shanghai'
+# 完成任务时上游用这个业务码表示「该任务次数已发放」（不是失败）。
+TASK_ALREADY_GRANTED_CODE = 410121
+# 客户端里能自动完成的任务类型（见参考实现 task-runner.js）。
+AUTO_TASK_TYPES = ('QUERY_INPUT', 'USE_SKILL')
 
 # 积分概览要带 clientType/timezone，否则上游按网页默认口径回（时区不同，
 # 「今日」边界会漂）。

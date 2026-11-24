@@ -1,7 +1,7 @@
 """DuMate（百度搭子）平台：账号存储、模型目录、适配器策略。
 
-全部离线：token / 对话 / 签到 / 积分都替换成假客户端，测的是
-「上游字段 → token-farm 形状」的翻译与选号 / 续期策略。
+全部离线：token / 对话 / 签到 / 积分 / 成长任务 / 抽奖 / 邀请码都替换成假客户端，
+测的是「上游字段 → token-farm 形状」的翻译、选号 / 续期策略与任务编排。
 """
 from __future__ import annotations
 
@@ -455,6 +455,343 @@ class DumateAdapterTest(unittest.TestCase):
             {'amount': 70, 'expire_at': 1765000000, 'label': 'monthly'}])
         self.assertEqual(out['next_expire_at'], 1765000000)
         self.assertTrue(out['subscribed'])
+
+    # ── 平台任务（成长任务 / 抽奖 / 邀请码）────────────────
+    def test_supports_tasks(self) -> None:
+        self.assertTrue(self.adapter.supports_tasks())
+
+    def test_task_status_merges_sources_and_caches(self) -> None:
+        self._seed()
+        created_at = int(time.time()) - 86400
+
+        async def fake_tasks(cookie, **kwargs):
+            return {'groups': [{'group_code': 'g1', 'group_name': '每日',
+                                'tasks': [{'task_id': 't1', 'task_type': 'QUERY_INPUT',
+                                           'title': '问一句', 'done': False,
+                                           'auto': True, 'repeat_count': 1,
+                                           'completed_count': 0}]}],
+                    'tasks': [{'task_id': 't1', 'task_type': 'QUERY_INPUT',
+                               'title': '问一句', 'done': False, 'auto': True,
+                               'repeat_count': 1, 'completed_count': 0,
+                               'raw': {'task_id': 't1', 'secret': 'x'}}]}
+
+        async def fake_draw(cookie, **kwargs):
+            return {'remaining_draws': 2, 'prizes': [{'prize_name': '积分'}],
+                    'my_prizes': [], 'winning_records': []}
+
+        async def fake_invite(cookie, **kwargs):
+            return {'invitation_code': 'ABC123', 'type': 'normal',
+                    'created_at': created_at, 'invite_message': '来玩'}
+
+        async def fake_count(cookie, **kwargs):
+            return {'invited_count': 3, 'total_points': 6000}
+
+        with mock.patch.object(client, 'tasks', new=fake_tasks), \
+                mock.patch.object(client, 'draw_status', new=fake_draw), \
+                mock.patch.object(client, 'invitation_code', new=fake_invite), \
+                mock.patch.object(client, 'invited_count', new=fake_count):
+            out = asyncio.run(self.adapter.task_status('dm_1'))
+
+        self.assertEqual(out['tasks'][0]['task_id'], 't1')
+        self.assertNotIn('raw', out['tasks'][0], '协议层的 raw 不往接口吐')
+        self.assertEqual(out['task_groups'][0]['group_name'], '每日')
+        self.assertEqual(out['draw']['remaining_draws'], 2)
+        self.assertEqual(out['invite']['invitation_code'], 'ABC123')
+        self.assertEqual(out['invite']['invited_count'], 3)
+        self.assertTrue(out['invite']['within_7_days'])
+        self.assertEqual(out['invite_codes'][0]['inviteCode'], 'ABC123')
+        self.assertEqual(out['errors'], [])
+        cached = store.read_account('dm_1')['taskCache']
+        self.assertEqual(cached['tasks'][0]['task_id'], 't1')
+        self.assertEqual(cached['draw']['remaining_draws'], 2)
+        self.assertEqual(cached['invite']['invitation_code'], 'ABC123')
+
+    def test_task_status_surfaces_checkin_from_account_page(self) -> None:
+        """签到发生在账号页（批量签到）时，任务面板也要显示上次结果。"""
+        self._seed(checkin={'last_at': 1700000000,
+                            'last_result': '签到成功 +5'},
+                   points={'left': 120, 'at': 1700000000})
+
+        async def empty_tasks(cookie, **kwargs):
+            return {'tasks': [], 'groups': []}
+
+        async def empty_draw(cookie, **kwargs):
+            return {'remaining_draws': 0, 'prizes': [], 'my_prizes': [],
+                    'winning_records': []}
+
+        async def empty_invite(cookie, **kwargs):
+            return {'invitation_code': '', 'type': '', 'created_at': 0,
+                    'invite_message': ''}
+
+        async def empty_count(cookie, **kwargs):
+            return {'invited_count': 0, 'total_points': 0}
+
+        with mock.patch.object(client, 'tasks', new=empty_tasks), \
+                mock.patch.object(client, 'draw_status', new=empty_draw), \
+                mock.patch.object(client, 'invitation_code', new=empty_invite), \
+                mock.patch.object(client, 'invited_count', new=empty_count):
+            out = asyncio.run(self.adapter.task_status('dm_1'))
+
+        self.assertTrue(out['checkin']['ok'])
+        self.assertEqual(out['checkin']['balance'], 120)
+        self.assertIn('签到成功', out['checkin']['message'])
+
+    def test_task_status_falls_back_to_cache_when_all_reads_fail(self) -> None:
+        cache = {
+            'tasks': [{'task_id': 'old', 'title': '缓存任务'}],
+            'taskGroups': [], 'draw': {'remaining_draws': 1},
+            'invite': {'invitation_code': 'OLD'}, 'syncedAt': 1700000000,
+        }
+        self._seed(taskCache=cache)
+
+        async def boom(*args, **kwargs):
+            raise PlatformError('登录态已失效', status=401, code='login_expired')
+
+        with mock.patch.object(client, 'tasks', new=boom), \
+                mock.patch.object(client, 'draw_status', new=boom), \
+                mock.patch.object(client, 'invitation_code', new=boom), \
+                mock.patch.object(client, 'invited_count', new=boom):
+            out = asyncio.run(self.adapter.task_status('dm_1'))
+
+        self.assertEqual(out['tasks'][0]['task_id'], 'old')
+        self.assertEqual(out['draw']['remaining_draws'], 1)
+        self.assertEqual(out['synced_at'], 1700000000)
+        self.assertEqual(len(out['errors']), 4)
+
+    def test_complete_tasks_auto_runs_and_treats_410121_as_done(self) -> None:
+        self._seed()
+        tasks_data = {
+            'tasks': [
+                {'task_id': 't1', 'task_type': 'QUERY_INPUT', 'title': '提问',
+                 'auto': True, 'done': False, 'repeat_count': 1,
+                 'completed_count': 0},
+                {'task_id': 't2', 'task_type': 'QUERY_INPUT', 'title': '再问',
+                 'auto': True, 'done': False, 'repeat_count': 1,
+                 'completed_count': 0},
+                {'task_id': 't3', 'task_type': 'PC_PUSH', 'title': '推送到桌面',
+                 'auto': False, 'done': False, 'repeat_count': 1,
+                 'completed_count': 0},
+            ],
+            'groups': [],
+        }
+        sent: list[str] = []
+
+        async def fake_tasks(cookie, **kwargs):
+            return tasks_data
+
+        async def fake_complete(cookie, task_id, **kwargs):
+            if task_id == 't2':
+                raise PlatformError('该任务次数已发放', status=502,
+                                    code='web_biz_failed',
+                                    payload={'code': C.TASK_ALREADY_GRANTED_CODE})
+            return {'result': {'reward_count': 1, 'reward_points': 100}}
+
+        async def fake_query(account, task, **kwargs):
+            sent.append(task['task_id'])
+
+        with mock.patch.object(client, 'tasks', new=fake_tasks), \
+                mock.patch.object(client, 'complete_task', new=fake_complete), \
+                mock.patch.object(self.adapter, '_send_task_query', new=fake_query):
+            out = asyncio.run(self.adapter.run_task('dm_1', 'complete_task'))
+
+        self.assertEqual(sent, ['t1', 't2'], '两条自动任务各先发一条消息')
+        self.assertEqual(out['done_count'], 2)
+        self.assertEqual(out['already_count'], 1)
+        self.assertEqual(out['fail_count'], 0, '一键完成只跑可自动任务，跳过的不算失败')
+        by_id = {item['task_id']: item for item in out['results']}
+        self.assertTrue(by_id['t1']['ok'])
+        self.assertTrue(by_id['t2']['already'])
+        self.assertNotIn('t3', by_id, '需要客户端的任务不发起完成请求')
+
+    def test_complete_tasks_rejects_unknown_task_id(self) -> None:
+        self._seed()
+
+        async def fake_tasks(cookie, **kwargs):
+            return {'tasks': [], 'groups': []}
+
+        with mock.patch.object(client, 'tasks', new=fake_tasks):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter.run_task(
+                    'dm_1', 'complete_task', task_id='missing'))
+        self.assertEqual(ctx.exception.code, 'task_not_found')
+
+    def test_draw_uses_fresh_request_id_and_returns_prize(self) -> None:
+        self._seed()
+        keys: list[str] = []
+
+        async def fake_status(cookie, **kwargs):
+            return {'remaining_draws': 2, 'prizes': [], 'my_prizes': [],
+                    'winning_records': []}
+
+        async def fake_draw(cookie, request_id, **kwargs):
+            keys.append(request_id)
+            return {'draw_record_id': f'dr-{len(keys)}', 'remaining_draws': 1,
+                    'prize_name': '会员 3 天', 'prize_type': 'VIRTUAL',
+                    'prize': {'prize_name': '会员 3 天', 'prize_type': 'VIRTUAL'},
+                    'raw': {}}
+
+        with mock.patch.object(client, 'draw_status', new=fake_status), \
+                mock.patch.object(client, 'draw', new=fake_draw):
+            first = asyncio.run(self.adapter.run_task('dm_1', 'draw'))
+            second = asyncio.run(self.adapter.run_task('dm_1', 'draw'))
+
+        self.assertEqual(len(keys), 2)
+        self.assertNotEqual(keys[0], keys[1], '幂等键必须每次新生成')
+        self.assertEqual(first['prize_name'], '会员 3 天')
+        self.assertFalse(first['needs_claim'])
+        self.assertEqual(second['draw_record_id'], 'dr-2')
+
+    def test_draw_rejects_empty_pool(self) -> None:
+        self._seed()
+
+        async def fake_status(cookie, **kwargs):
+            return {'remaining_draws': 0, 'prizes': [], 'my_prizes': [],
+                    'winning_records': []}
+
+        async def fail_draw(*args, **kwargs):
+            raise AssertionError('没有次数时不该请求上游')
+
+        with mock.patch.object(client, 'draw_status', new=fake_status), \
+                mock.patch.object(client, 'draw', new=fail_draw):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter.run_task('dm_1', 'draw'))
+        self.assertEqual(ctx.exception.code, 'no_draws')
+
+    def test_draw_body_carries_uuid_in_both_keys(self) -> None:
+        """网页 bundle 用 `x-bce-request-id`，参考实现用 `request_id`；两个都带。"""
+        seen: dict = {}
+
+        async def fake_web(method, path, cookie, *, proxy=None, timeout=20,
+                           body=None):
+            seen.update({'method': method, 'path': path, 'body': body})
+            return {'code': 0, 'result': {
+                'draw_record_id': 'dr-1', 'remaining_draws': 2,
+                'prize_name': '会员 3 天', 'prize_type': 'VIRTUAL'}}
+
+        with mock.patch.object(client, '_web_json', new=fake_web):
+            out = asyncio.run(client.draw('cookie', 'uuid-1'))
+
+        self.assertEqual(seen['method'], 'POST')
+        self.assertEqual(seen['path'], C.DRAW_PATH)
+        self.assertEqual(seen['body']['x-bce-request-id'], 'uuid-1')
+        self.assertEqual(seen['body']['request_id'], 'uuid-1')
+        self.assertEqual(seen['body']['source'], 'web')
+        self.assertEqual(out['prize_name'], '会员 3 天')
+        self.assertEqual(out['prize_type'], 'VIRTUAL')
+
+    def test_normalize_task_uses_count_ratio_and_auto_types(self) -> None:
+        done = client._normalize_task(
+            {'task_id': 't1', 'task_type': 'QUERY_INPUT', 'title': '提问',
+             'repeat_count': '2', 'completed_count': 2, 'reward_points': '100'},
+            {'group_code': 'g1', 'group_name': '每日'})
+        self.assertTrue(done['done'])
+        self.assertTrue(done['auto'])
+        self.assertEqual(done['repeat_count'], 2)
+        self.assertEqual(done['reward_points'], 100)
+        self.assertEqual(done['group_name'], '每日')
+
+        pending = client._normalize_task(
+            {'task_id': 't2', 'task_type': 'PC_PUSH', 'repeat_count': 0},
+            {})
+        self.assertEqual(pending['repeat_count'], 1, 'repeat_count 缺省按 1')
+        self.assertFalse(pending['done'])
+        self.assertFalse(pending['auto'], '需要客户端的任务不代跑')
+
+    def test_draw_allows_when_remaining_is_unknown(self) -> None:
+        """上游没回次数不等于 0 次：不能因此把抽奖按钮锁死。"""
+        self._seed()
+
+        async def fake_status(cookie, **kwargs):
+            return {'remaining_draws': None, 'prizes': [], 'my_prizes': [],
+                    'winning_records': []}
+
+        async def fake_draw(cookie, request_id, **kwargs):
+            return {'draw_record_id': 'dr-1', 'remaining_draws': 1,
+                    'prize_name': '积分', 'prize_type': 'POINTS'}
+
+        with mock.patch.object(client, 'draw_status', new=fake_status), \
+                mock.patch.object(client, 'draw', new=fake_draw):
+            out = asyncio.run(self.adapter.run_task('dm_1', 'draw'))
+        self.assertEqual(out['draw_record_id'], 'dr-1')
+        self.assertEqual(out['prize_name'], '积分')
+
+    def test_draw_status_missing_count_stays_none(self) -> None:
+        async def fake_web(method, path, cookie, *, proxy=None, timeout=20,
+                           body=None):
+            return {'code': 0, 'result': {'prizes': [], 'my_prizes': [],
+                                          'winning_records': []}}
+
+        with mock.patch.object(client, '_web_json', new=fake_web):
+            out = asyncio.run(client.draw_status('cookie'))
+        self.assertIsNone(out['remaining_draws'], '缺字段不能被读成 0 次')
+
+    def test_bind_invite_rejects_own_code(self) -> None:
+        self._seed()
+
+        async def fake_invite(cookie, **kwargs):
+            return {'invitation_code': 'MINE', 'type': '', 'created_at': 0,
+                    'invite_message': ''}
+
+        async def fail_redeem(*args, **kwargs):
+            raise AssertionError('自己的邀请码不该发到上游')
+
+        with mock.patch.object(client, 'invitation_code', new=fake_invite), \
+                mock.patch.object(client, 'redeem_invitation_code',
+                                  new=fail_redeem):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter.run_task(
+                    'dm_1', 'bind_invite', invite_code='MINE'))
+        self.assertEqual(ctx.exception.code, 'self_invite_code')
+
+    def test_bind_invite_redeems_and_clears_credits(self) -> None:
+        self._seed()
+        self.adapter._credits['dm_1'] = (time.time() + 60, {'credits': 1})
+        seen: dict = {}
+
+        async def fake_invite(cookie, **kwargs):
+            return {'invitation_code': 'MINE', 'type': '', 'created_at': 0,
+                    'invite_message': ''}
+
+        async def fake_redeem(cookie, code, **kwargs):
+            seen['code'] = code
+            return {'message': '领取成功，双方各得 2000 积分',
+                    'notice': {'content': '领取成功'}, 'raw': {}}
+
+        with mock.patch.object(client, 'invitation_code', new=fake_invite), \
+                mock.patch.object(client, 'redeem_invitation_code',
+                                  new=fake_redeem):
+            out = asyncio.run(self.adapter.run_task(
+                'dm_1', 'bind_invite', invite_code=' FRIEND '))
+
+        self.assertEqual(seen['code'], 'FRIEND', '只 strip，不改大小写')
+        self.assertEqual(out['invite_code'], 'FRIEND')
+        self.assertIn('2000', out['desc'])
+        self.assertNotIn('dm_1', self.adapter._credits)
+
+    def test_claim_prize_requires_draw_record_id(self) -> None:
+        self._seed()
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(self.adapter.run_task('dm_1', 'claim_prize'))
+        self.assertEqual(ctx.exception.code, 'missing_draw_record_id')
+
+    def test_claim_prize_passes_contact_and_clears_credits(self) -> None:
+        self._seed()
+        self.adapter._credits['dm_1'] = (time.time() + 60, {'credits': 1})
+        seen: dict = {}
+
+        async def fake_claim(cookie, record, *, contact='', **kwargs):
+            seen.update({'record': record, 'contact': contact})
+            return {'result': {}, 'raw': {'code': 0}}
+
+        with mock.patch.object(client, 'claim_prize', new=fake_claim):
+            out = asyncio.run(self.adapter.run_task(
+                'dm_1', 'claim_prize', draw_record_id='dr-9',
+                contact=' 13800000000 '))
+
+        self.assertEqual(seen, {'record': 'dr-9', 'contact': '13800000000'})
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['action'], 'claim_prize')
+        self.assertNotIn('dm_1', self.adapter._credits)
 
     def test_usage_collects_errors_without_raising(self) -> None:
         self._seed()

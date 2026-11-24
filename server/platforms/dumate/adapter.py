@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from datetime import datetime
 from typing import Any, AsyncIterator, Callable
 
@@ -48,6 +49,16 @@ def _pick(raw: dict, *keys: str) -> str:
         if value not in (None, ''):
             return str(value).strip()
     return ''
+
+
+def _without_raw(value: Any) -> Any:
+    """去掉协议层附带的 `raw`（仅供排障），避免任务缓存把账号文件撑大。"""
+    if isinstance(value, list):
+        return [_without_raw(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _without_raw(item) for key, item in value.items()
+                if key != 'raw'}
+    return value
 
 
 def _num(value: object) -> float | None:
@@ -179,9 +190,16 @@ class DumateAdapter(PlatformAdapter):
     # 单区域平台（百度搭子国内站）。
     realm_aware = False
 
+    def supports_tasks(self) -> bool:
+        """DuMate 客户端里有成长任务 / 抽奖 / 邀请码。"""
+        return True
+
     def __init__(self) -> None:
         # uid -> 账号级锁（token 强刷串行，避免并发把同一账号打两次）。
         self._locks: dict[str, asyncio.Lock] = {}
+        # uid -> 任务写操作锁。**不能**与 `_locks` 合并：完成任务要先发一条
+        # 对话，途中 `_token_for` 会拿 `_locks`，同一把锁不可重入会死锁。
+        self._task_locks: dict[str, asyncio.Lock] = {}
         # uid -> 最近使用时刻（LRU 兜底排序）。
         self._last_used: dict[str, float] = {}
         # uid -> (过期时间, token)：纯运行态，不落盘（与参考实现同口径）。
@@ -203,6 +221,12 @@ class DumateAdapter(PlatformAdapter):
         lock = self._locks.get(account_id)
         if lock is None:
             lock = self._locks[account_id] = asyncio.Lock()
+        return lock
+
+    def _task_lock(self, account_id: str) -> asyncio.Lock:
+        lock = self._task_locks.get(account_id)
+        if lock is None:
+            lock = self._task_locks[account_id] = asyncio.Lock()
         return lock
 
     def _require(self, account_id: object) -> dict:
@@ -447,6 +471,431 @@ class DumateAdapter(PlatformAdapter):
             'total_times': info.get('total_times'),
             'sign_in_days': info.get('sign_in_days') or [],
             'month_points': info.get('month_points'),
+        }
+
+    # ── 任务面板（成长任务 / 抽奖 / 邀请码）────────────────
+    def _task_cache(self, account: dict) -> dict:
+        cached = account.get('taskCache')
+        return dict(cached) if isinstance(cached, dict) else {}
+
+    def _write_task_cache(self, account_id: str, **fields: Any) -> None:
+        """把任务面板的最新快照写进账号文件（失败不影响本次结果）。"""
+        try:
+            account = self._require(account_id)
+            cache = self._task_cache(account)
+            cache.update(_without_raw(fields))
+            cache['syncedAt'] = int(time.time())
+            store.patch_account(account_id, {'taskCache': cache})
+        except (PlatformError, OSError, ValueError):
+            pass
+
+    @staticmethod
+    async def _safe_read(coro) -> tuple[Any, PlatformError | None]:
+        """任务面板是**尽力而为**：单个接口失败只记录，不拖垮整页。"""
+        try:
+            return await coro, None
+        except PlatformError as exc:
+            return None, exc
+        except Exception as exc:  # noqa: BLE001 —— 网络层异常同样不该炸整页
+            return None, PlatformError(str(exc) or '任务状态读取失败',
+                                       status=502, code='task_read_failed')
+
+    async def _task_snapshot(self, account: dict) -> dict:
+        """并发读取成长任务 / 抽奖 / 邀请码，失败项回落到缓存。"""
+        uid = str(account.get('uid') or '')
+        proxy = self._proxy_for(account)
+        timeout = self._session_timeout()
+        cookie = str(account.get('cookie') or '')
+        cached = self._task_cache(account)
+
+        (tasks_live, tasks_err), (draw_live, draw_err), \
+            (invite_live, invite_err), (count_live, count_err) = await asyncio.gather(
+                self._safe_read(client.tasks(cookie, proxy=proxy, timeout=timeout)),
+                self._safe_read(client.draw_status(cookie, proxy=proxy,
+                                                   timeout=timeout)),
+                self._safe_read(client.invitation_code(cookie, proxy=proxy,
+                                                       timeout=timeout)),
+                self._safe_read(client.invited_count(cookie, proxy=proxy,
+                                                     timeout=timeout)),
+            )
+
+        errors: list[dict] = []
+        for endpoint, exc in (('tasks', tasks_err), ('draw', draw_err),
+                              ('invitation_code', invite_err),
+                              ('invited_count', count_err)):
+            if exc is not None:
+                errors.append({'endpoint': endpoint, 'code': exc.code,
+                               'message': exc.message})
+
+        tasks_data = tasks_live if isinstance(tasks_live, dict) else {
+            'groups': cached.get('taskGroups')
+            if isinstance(cached.get('taskGroups'), list) else [],
+            'tasks': cached.get('tasks')
+            if isinstance(cached.get('tasks'), list) else [],
+        }
+        draw = draw_live if isinstance(draw_live, dict) else (
+            cached.get('draw') if isinstance(cached.get('draw'), dict) else None)
+
+        invite: dict[str, Any] = {}
+        cached_invite = cached.get('invite') if isinstance(
+            cached.get('invite'), dict) else {}
+        invitation = invite_live if isinstance(invite_live, dict) else {}
+        counts = count_live if isinstance(count_live, dict) else {}
+        # 成功但返回空（例如账号还没生成邀请码）应视为权威结果，不能拿缓存
+        # 里的旧码顶上；只有该路**失败**（None）时才回落缓存。
+        code = str((invitation.get('invitation_code') if invite_live is not None
+                    else cached_invite.get('invitation_code')) or '')
+        created = (invitation.get('created_at') if invite_live is not None
+                   else cached_invite.get('created_at'))
+        invited = (counts.get('invited_count', 0) if count_live is not None
+                   else cached_invite.get('invited_count'))
+        points = (counts.get('total_points', 0) if count_live is not None
+                  else cached_invite.get('total_points'))
+        within = None
+        if created:
+            within = (time.time() - float(created)) <= 7 * 86400
+        invite.update({
+            'invitation_code': code,
+            'type': str((invitation.get('type') if invite_live is not None
+                         else cached_invite.get('type')) or ''),
+            'created_at': int(created or 0),
+            'invite_message': str(
+                (invitation.get('invite_message') if invite_live is not None
+                 else cached_invite.get('invite_message')) or ''),
+            'invited_count': invited,
+            'total_points': points,
+            'within_7_days': within,
+        })
+        if invite_err is not None:
+            invite['error'] = invite_err.message
+
+        # 只有至少一路成功才刷新磁盘缓存；全失败时保留上一次快照。
+        if any(source is not None for source in (tasks_live, draw_live,
+                                                 invite_live, count_live)):
+            self._write_task_cache(
+                uid, tasks=tasks_data.get('tasks') or [],
+                taskGroups=tasks_data.get('groups') or [],
+                draw=draw, invite=invite)
+            synced_at = int(time.time())
+        else:
+            synced_at = int(cached.get('syncedAt') or 0)
+
+        codes: list[dict] = []
+        if code:
+            codes.append({
+                'inviteCode': code,
+                'status': 'active',
+                'type': invite.get('type') or '',
+                'createdAt': invite.get('created_at') or 0,
+                'invitedCount': invited,
+                'totalPoints': points,
+            })
+        # 签到也可能发生在账号页（批量签到），那时结果写在账号的 `checkin` /
+        # `points` 上而不是 `taskCache`；面板照样要能显示上次签到。
+        checkin = (cached.get('checkin')
+                   if isinstance(cached.get('checkin'), dict) else None)
+        if checkin is None and isinstance(account.get('checkin'), dict):
+            last = account['checkin']
+            points = (account.get('points')
+                      if isinstance(account.get('points'), dict) else {})
+            checkin = {
+                'ok': True,
+                'already': False,
+                'balance': points.get('left'),
+                'message': str(last.get('last_result') or ''),
+                'last_at': last.get('last_at'),
+            }
+        return {
+            'uid': uid,
+            'nickname': str(account.get('nickname') or ''),
+            'realm': 'cn',
+            'checkin': checkin,
+            'invite_codes': codes,
+            'invite': invite,
+            'tasks': _without_raw(tasks_data.get('tasks') or []),
+            'task_groups': _without_raw(tasks_data.get('groups') or []),
+            'draw': draw,
+            'errors': errors,
+            'synced_at': synced_at,
+        }
+
+    async def task_status(self, account_id: str) -> dict:
+        """任务面板的**只读**状态：成长任务 / 抽奖 / 邀请码 + 签到缓存。
+
+        刻意不在这里做任何写操作（签到、抽奖、填邀请码都由 `run_task` 显式
+        触发）；打开一个页面不该顺手替用户领奖。读失败时回落到上次缓存的
+        快照，并把错误放进 `errors` 供界面提示。
+        """
+        return await self._task_snapshot(self._require(account_id))
+
+    async def run_task(self, account_id: str, action: str, **params: Any) -> dict:
+        """执行任务动作：`checkin` / `complete_task` / `draw` / `bind_invite` / `claim_prize`。"""
+        action = str(action or '').strip().lower()
+        # 同一账号的写操作串行：连点「抽奖」「完成任务」不该把上游打两次
+        # （抽奖尤其——`request_id` 每次不同，上游不会替我们幂等）。
+        async with self._task_lock(str(account_id)):
+            if action in ('checkin', 'sync'):
+                return await self._task_checkin(account_id)
+            if action in ('complete_task', 'complete', 'task_complete'):
+                return await self._complete_tasks(
+                    account_id, str(params.get('task_id') or ''))
+            if action in ('draw', 'lottery'):
+                return await self._draw(account_id)
+            if action in ('claim_prize', 'claim'):
+                return await self._claim_prize(
+                    account_id, str(params.get('draw_record_id') or ''),
+                    str(params.get('contact') or ''))
+            if action in ('bind_invite', 'invite', 'redeem', 'redeem_code'):
+                return await self._bind_invite(
+                    account_id,
+                    str(params.get('invite_code') or params.get('code') or ''))
+        raise PlatformError(f'不支持的任务动作 {action!r}', status=400,
+                            code='task_unsupported')
+
+    async def _task_checkin(self, account_id: str) -> dict:
+        """签到（复用 `checkin`）后刷新一次任务面板状态。"""
+        result = await self.checkin(account_id)
+        account = self._require(account_id)
+        uid = str(account.get('uid') or '')
+        cached = self._task_cache(account)
+        cached_checkin = dict(cached.get('checkin') or {})
+        cached_checkin.update({
+            'ok': bool(result.get('ok')),
+            'already': bool(result.get('already')),
+            'balance': result.get('credits'),
+            'message': result.get('message') or '',
+        })
+        self._write_task_cache(uid, checkin=cached_checkin)
+
+        snapshot = await self._task_snapshot(self._require(account_id))
+        snapshot['checkin'] = {
+            **cached_checkin,
+            'earned_credit': result.get('earned_credit') or 0,
+            'credits': result.get('credits'),
+        }
+        snapshot['ok'] = True
+        snapshot['action'] = 'checkin'
+        return snapshot
+
+    async def _send_task_query(self, account: dict, task: dict, *,
+                               proxy: str | None) -> None:
+        """QUERY_INPUT 任务：先用该账号发一条内容匹配的消息，再上报完成。"""
+        query = str(task.get('query') or '').strip() \
+            or str(task.get('title') or '').strip() or '你好'
+        body = {
+            'model': 'model-text',
+            'messages': [{'role': 'user', 'content': query}],
+            'max_tokens': 64,
+        }
+        token = await self._token_for(account, proxy=proxy)
+        try:
+            await client.chat(token, body, proxy=proxy,
+                              timeout=self._session_timeout())
+        except PlatformError as exc:
+            if exc.status != 401:
+                raise
+            # token 刚好过期：强刷一次再发（与对话链路同口径）。
+            token = await self._token_for(account, proxy=proxy, force=True)
+            await client.chat(token, body, proxy=proxy,
+                              timeout=self._session_timeout())
+
+    @staticmethod
+    def _task_already_granted(exc: PlatformError) -> bool:
+        payload = exc.payload if isinstance(exc.payload, dict) else {}
+        raw = payload.get('code')
+        try:
+            code = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            code = 0
+        return code == C.TASK_ALREADY_GRANTED_CODE or '已发放' in exc.message
+
+    async def _complete_tasks(self, account_id: str, task_id: str = '') -> dict:
+        """完成任务；`task_id` 为空时把当前所有可自动完成的任务跑一遍。"""
+        account = self._require(account_id)
+        uid = str(account.get('uid') or '')
+        cookie = str(account.get('cookie') or '')
+        proxy = self._proxy_for(account)
+        timeout = self._session_timeout()
+
+        data = await client.tasks(cookie, proxy=proxy, timeout=timeout)
+        flat = [t for t in data.get('tasks') or [] if isinstance(t, dict)]
+        if task_id:
+            target = next((t for t in flat if t.get('task_id') == task_id), None)
+            if target is None:
+                raise PlatformError('任务不存在或已下线', status=404,
+                                    code='task_not_found')
+            targets = [target]
+        else:
+            targets = [t for t in flat
+                       if not t.get('done') and t.get('auto')]
+
+        results: list[dict] = []
+        for task in targets:
+            tid = str(task.get('task_id') or '')
+            title = str(task.get('title') or '')
+            if task.get('done'):
+                results.append({'task_id': tid, 'title': title, 'ok': True,
+                                'already': True})
+                continue
+            if not task.get('auto'):
+                results.append({
+                    'task_id': tid, 'title': title, 'ok': False, 'skipped': True,
+                    'error': f"{task.get('task_type') or ''} 需在客户端完成",
+                })
+                continue
+            try:
+                if task.get('task_type') == 'QUERY_INPUT':
+                    await self._send_task_query(account, task, proxy=proxy)
+                payload = await client.complete_task(
+                    cookie, tid, proxy=proxy, timeout=timeout)
+                reward = payload.get('result') if isinstance(
+                    payload.get('result'), dict) else {}
+                results.append({
+                    'task_id': tid, 'title': title, 'ok': True,
+                    'reward_count': reward.get('reward_count'),
+                    'reward_points': reward.get('reward_points'),
+                })
+            except PlatformError as exc:
+                if self._task_already_granted(exc):
+                    results.append({'task_id': tid, 'title': title, 'ok': True,
+                                    'already': True})
+                else:
+                    results.append({'task_id': tid, 'title': title, 'ok': False,
+                                    'error': exc.message, 'code': exc.code})
+
+        refreshed, refresh_error = await self._safe_read(
+            client.tasks(cookie, proxy=proxy, timeout=timeout))
+        tasks_data = refreshed if isinstance(refreshed, dict) else data
+        self._write_task_cache(
+            uid, tasks=tasks_data.get('tasks') or [],
+            taskGroups=tasks_data.get('groups') or [])
+
+        done = sum(1 for item in results if item.get('ok'))
+        return {
+            'uid': uid,
+            'nickname': str(account.get('nickname') or ''),
+            'realm': 'cn',
+            'ok': True,
+            'action': 'complete_task',
+            'task_id': task_id,
+            'results': results,
+            'done_count': done,
+            'already_count': sum(1 for item in results if item.get('already')),
+            'fail_count': sum(1 for item in results if not item.get('ok')),
+            'tasks': _without_raw(tasks_data.get('tasks') or []),
+            'task_groups': _without_raw(tasks_data.get('groups') or []),
+            'synced_at': int(time.time()),
+            'error': refresh_error.message if refresh_error else '',
+        }
+
+    async def _draw(self, account_id: str) -> dict:
+        """抽一次奖。`request_id` 每次新生成，复用会被上游当成重复请求。"""
+        account = self._require(account_id)
+        uid = str(account.get('uid') or '')
+        cookie = str(account.get('cookie') or '')
+        proxy = self._proxy_for(account)
+        timeout = self._session_timeout()
+
+        status = await client.draw_status(cookie, proxy=proxy, timeout=timeout)
+        remaining = status.get('remaining_draws')
+        if isinstance(remaining, int) and remaining <= 0:
+            raise PlatformError('没有可抽奖次数', status=409,
+                                code='no_draws', payload=status)
+
+        result = await client.draw(cookie, str(uuid.uuid4()), proxy=proxy,
+                                   timeout=timeout)
+        if not result.get('draw_record_id'):
+            raise PlatformError('抽奖响应缺少 draw_record_id', status=502,
+                                code='bad_draw_response', payload=result)
+        prize = result.get('prize') if isinstance(result.get('prize'), dict) \
+            else {}
+        name = str(result.get('prize_name') or prize.get('prize_name')
+                   or prize.get('name') or prize.get('title') or '')
+        prize_type = str(result.get('prize_type')
+                         or prize.get('prize_type') or '')
+        return {
+            'uid': uid,
+            'nickname': str(account.get('nickname') or ''),
+            'realm': 'cn',
+            'ok': True,
+            'action': 'draw',
+            'draw_record_id': result.get('draw_record_id'),
+            'remaining_draws': result.get('remaining_draws'),
+            'prize': prize or None,
+            'prize_name': name,
+            'prize_type': prize_type,
+            # 实物奖要用户填收货信息后调 `claim_prize`；积分 / 会员自动到账。
+            'needs_claim': prize_type.upper() == 'PHYSICAL',
+            'desc': name,
+            'data': result.get('raw') or {},
+        }
+
+    async def _claim_prize(self, account_id: str, draw_record_id: str,
+                           contact: str = '') -> dict:
+        """领取实物奖品（积分 / 会员类奖品抽到即到账，不要调这个）。"""
+        record = str(draw_record_id or '').strip()
+        if not record:
+            raise PlatformError('请提供抽奖记录 ID', status=400,
+                                code='missing_draw_record_id')
+        account = self._require(account_id)
+        uid = str(account.get('uid') or '')
+        result = await client.claim_prize(
+            str(account.get('cookie') or ''), record,
+            contact=str(contact or '').strip(),
+            proxy=self._proxy_for(account), timeout=self._session_timeout())
+        self._credits.pop(uid, None)
+        return {
+            'uid': uid,
+            'nickname': str(account.get('nickname') or ''),
+            'realm': 'cn',
+            'ok': True,
+            'action': 'claim_prize',
+            'draw_record_id': record,
+            'desc': '领取成功',
+            'data': result.get('raw') or {},
+        }
+
+    async def _bind_invite(self, account_id: str, code: str) -> dict:
+        """填写别人的邀请码（DuMate 的「邀请有礼」兑换）。"""
+        value = str(code or '').strip()
+        if not value:
+            raise PlatformError('请填写邀请码', status=400,
+                                code='missing_invite_code')
+        account = self._require(account_id)
+        uid = str(account.get('uid') or '')
+        cookie = str(account.get('cookie') or '')
+        proxy = self._proxy_for(account)
+        timeout = self._session_timeout()
+
+        # 先查自己的码：填自己的码上游也会拒，提前给出更明确的提示。
+        try:
+            own = await client.invitation_code(cookie, proxy=proxy,
+                                               timeout=timeout)
+        except PlatformError:
+            own = {}
+        if own.get('invitation_code') and own['invitation_code'] == value:
+            raise PlatformError('不能填写自己的邀请码', status=400,
+                                code='self_invite_code')
+
+        result = await client.redeem_invitation_code(
+            cookie, value, proxy=proxy, timeout=timeout)
+        notice = result.get('notice')
+        desc = str(result.get('message') or '')
+        if not desc:
+            if isinstance(notice, dict):
+                desc = str(notice.get('content') or notice.get('message') or '')
+            else:
+                desc = str(notice or '')
+        self._credits.pop(uid, None)
+        return {
+            'uid': uid,
+            'nickname': str(account.get('nickname') or ''),
+            'realm': 'cn',
+            'ok': True,
+            'action': 'bind_invite',
+            'invite_code': value,
+            'desc': desc,
+            'data': result.get('raw') or {},
         }
 
     async def usage(self, account_id: str) -> dict:
