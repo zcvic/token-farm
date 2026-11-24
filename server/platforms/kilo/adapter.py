@@ -471,6 +471,8 @@ class KiloAdapter(PlatformAdapter):
             'context_window': int(_num(raw.get('context_length')) or 0),
             'max_tokens': int(_num(raw.get('max_tokens')) or 0),
             'supports_reasoning': bool(raw.get('reasoning')),
+            'efforts': [str(x) for x in (raw.get('efforts') or [])
+                        if str(x or '').strip()],
             'modalities': {'input': [str(x) for x in modalities]},
             'model_name': model_id,
             'tool_call': bool(raw.get('tool_call', True)),

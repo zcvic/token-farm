@@ -96,7 +96,8 @@ git commit -m "upstream: 说清这次改了什么"
 > 那份。第一批六项的落地情况与三处有意偏离，见 baseline-gaps 开头的
 > 「同步状态」表。
 
-除 misakano 面板仓外，2026-11 还有三个参考源。
+除 misakano 面板仓外，2026-11 还有多个参考源（manager 仓、Qoder、Loomy，以及
+trae / discovery / dumate / cline / kilo 五个协议源）。
 
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
 已核对的范围是 `80b4b21`（v2.11.10）→ `caa82c22`（v2.11.23）：
@@ -246,11 +247,20 @@ git remote add qoder-ref https://github.com/shuishuipingan/qoder2api-hub.git
 git fetch qoder-ref --no-tags
 ```
 
-已核对到 `44b6f33`（v1.9.11）→ `25d0594`（v1.9.12）→ `285d98be`（v1.9.13）。基线、
-取用范围与本地唯一补丁（账号权重）记录在 `deploy/qoder-ref.txt`。升级方式是重跑
+已核对到 `44b6f33`（v1.9.11）→ `25d0594`（v1.9.12）→ `285d98be`（v1.9.13）→
+`88753423`（v1.9.14）。基线、取用范围与本地唯一补丁（账号权重）记录在
+`deploy/qoder-ref.txt`。升级方式是重跑
 `python server/platforms/qoder/tools/vendor_qoder.py --source <clone>`，
 `--check` 校验一致性；重新 vendor 后必须重新应用那份补丁
 （`server/tests/test_qoder_vendor.py` 守着）。
+
+> **Qoder 批（2026-11-24，`285d98be` → `88753423`，v1.9.14）**：6 个非 merge 提交，
+> 整目录重 vendor。这一批是 **Anthropic 托管网络工具**：新增
+> `qoder_anthropic_web.py`（`web_search_20250305` / `web_fetch_20250910` 翻成
+> Qoder 托管工具并按 Anthropic 事件序列回给客户端），`qoder_proxy.py` 加挂载点，
+> `qoder_anthropic.py` / `qoder_web_response.py` / `qoder_webtools.py` 只做小改。
+> `vendor_qoder.py` 的 `MODULES` 补了 `qoder_anthropic_web.py`；账号权重补丁已重新
+> 应用，`--check` 通过。`88753423` 本身是版本号与发布说明，不取。
 
 > **Qoder 批（2026-11-21，`25d0594` → `285d98be`，v1.9.13）**：4 个非 merge 提交，
 > 整目录重 vendor，变动的协议文件是 `qoder_accounts.py` / `qoder_proxy.py` /
@@ -307,6 +317,54 @@ git diff --stat cb27afd...loomy-ref/HEAD                # 只看协议文件有�
 基线、逐项取用 / 未取原因与实测记录在 `deploy/loomy-ref.txt`；升级时改
 `server/platforms/loomy/` 的对应文件，跑
 `server/tests/test_platform_loomy_adapter.py`，再把锚点提交号写回该文件。
+
+**`shuishuipingan/trae2api-hub`、`ZFXing-lite/discovery2api`、
+`wearetheone777/dumate2api`、`luawei1/cline2api`、`Kilo-Org/kilocode`** 五个来源
+同样**不 fork、不 vendor**（Qoder 是唯一整目录 vendor 的例外），协议事实按能力在
+`server/platforms/{trae,discovery,dumate,cline,kilo}/` 重写。各自的锚点提交、
+逐项取用 / 未取原因与实测记录在 `deploy/*-ref.txt`。
+
+> **协议批（2026-11-24）**：五个来源各判一轮，共取 8 项。
+>
+> - **trae**（`e7eef187` → `f7b75787`，5 个非 merge）：取 `355503e6` SOLO 内联图片
+>   边界校验（单张 5 MiB / 单请求合计 10 MiB，decoded 字节，只对 user 角色、严格
+>   base64、拒远程 URL，跨消息累计）。不取 `1773f8b0`（收尾帧已带 usage）、
+>   `5190977f`（`normalize_content` 已原样透传非文本 part、`normalize_chat_images`
+>   已归一 `input_image` / Anthropic `source`）、测试整理与发版。
+> - **discovery**（`3e8463a6` → `35a8d552`）：取 `f06bb548` 请求方言归一（剥
+>   `reasoning_effort` / `reasoning` / `verbosity` / `store` / `previous_response_id`
+>   / `truncation` / `instructions` / `text`，`max_completion_tokens` 收敛成
+>   `max_tokens`，`developer*` 角色改 `system`，标准体原样返回同一对象）、
+>   `35a8d552` 慢速 400 跨键重试（耗时 ≥10s 且错误码为
+>   `upstream_request_rejected` 才换键，预算独立于 `max_accounts_try`）、
+>   `980bb415` 只取「陈旧目录兜底」（在线失败改用上一份真实目录，不再一过 TTL
+>   就缩成内置 8 条）。池级熔断 / `HealthCheckAll` / `/v1/models` singleflight /
+>   sample-keys 指标不取：本仓没有那套状态机，探针是逐账号 `_probe`。
+> - **dumate**（`54f603d4` → `9f02228e`）：取 token 字段归一（云端网关只认
+>   `max_tokens`，双发 400、只发 `max_completion_tokens` 被静默忽略，先收敛成
+>   唯一 `max_tokens` 再做上限钳制）、思考档位（白名单五个后端认
+>   `none/low/high/max`，`low` 归一 `high`，`none` 必须显式
+>   `thinking:{type:'disabled'}` + `enable_thinking:false`，对外暴露
+>   `['none','high','max']`）。桌面清单三级降级本仓已有、积分分池与实测倍率探针
+>   不随包跑；面板 / 端口统一 / Docker 不取。
+> - **cline**（`d5cb69ae` → `f459f003`）：取 token 自愈（`invalid_grant` 时走
+>   WorkOS `authenticate` + `grant_type=refresh_token` 再换一次，只有它判 401，
+>   网络错误不消耗一次性 refresh token；成功后重跑注册，失败退回 WorkOS access
+>   并按 1 小时减 60 秒兜底）、工具名截短还原（>64 字符截成「前 55 + `_` +
+>   sha256 前 8 位」，覆盖 tools / tool_calls / tool_choice，流式按行改写、
+>   无映射原样返回）；另取 `68751e7ea` 的**被动一半**——真实请求的模型级成败
+>   参与模型列表排序（可用 → 未知 → 失败，失败 30 分钟 / 成功 2 小时保鲜，
+>   没有信号时顺序不变，只影响排序不影响可用性判定）。主动 15 分钟补测与
+>   `probeTier` 排序体系不取：本仓有 402 冷却、无池级状态机，补测还会额外消耗
+>   免费额度；反向故障转移模型归属修复不适用（本仓无 zen 池）。
+> - **kilo**（`bfdec5496`，只看 `packages/kilo-gateway`）：取
+>   `d7496501c6` 网关地址可覆盖（`KILO_AI_GATEWAY_URL` 优先，legacy
+>   `KILO_API_URL` → `${api}/api/gateway/v1`，默认
+>   `https://ai-gateway.kilo.ai/api/v1`）、`cf41438e82` 推理档位
+>   （`opencode.reasoning_options` → `efforts`：`[]` → `high`，只有 toggle →
+>   `none`/`high`，effort 档位去重后按上游 schema 白名单过滤，认不出的条目逐条
+>   丢弃；档位经适配器与测试台下拉透出）。legacy `variants` 不取（语义是「变体名
+>   → 参数覆盖」，不是档位集合）；auto-routing worker / 计费 / 遥测不取。
 
 这些来源的仓库布局与运行时都不同，**不要互相 cherry-pick**，按能力在本项目
 对应文件重写。

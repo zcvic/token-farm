@@ -23,7 +23,85 @@ from ... import config
 from ..base import PlatformError
 from . import constants as C
 
-__all__ = ['probe', 'fetch_models', 'chat', 'open_chat', 'parse_error']
+__all__ = ['probe', 'fetch_models', 'chat', 'open_chat', 'parse_error',
+           'normalize_body', 'is_transient_rejection']
+
+
+# ── 请求方言归一 ────────────────────────────────────────────
+# 上游只认「较早的 OpenAI 兼容面」：o-series / Responses API 那一套字段它不
+# 认识，收到就整条 400（参考实现的生产事故：同一请求形状 30 次成功里夹着
+# 16 次 400）。这里只改写**上游明确会拒**的部分，其余字段一字不动；标准体
+# 进去出来完全不变，重复调用也不会有第二次改动（幂等）。
+_ROLE_MAP = {'developer': 'system', 'developer_v2': 'system'}
+_STRIP_FIELDS = ('reasoning_effort', 'reasoning', 'verbosity', 'store',
+                 'previous_response_id', 'truncation', 'instructions', 'text')
+
+
+def normalize_body(body: dict) -> tuple[dict, list[str]]:
+    """把请求体改写成上游认识的方言，返回 `(新体, 改动清单)`。
+
+    改动清单只用于日志：它是排障时「为什么这次请求和客户端发的不一样」的
+    唯一线索，不给客户端看。没有可改的地方时返回**原对象**，调用方据此
+    判断要不要替换。
+    """
+    if not isinstance(body, dict):
+        return body, []
+    notes: list[str] = []
+    out = dict(body)
+    for field in _STRIP_FIELDS:
+        if field in out:
+            out.pop(field, None)
+            notes.append(f'stripped:{field}')
+    if 'max_completion_tokens' in out:
+        value = out.pop('max_completion_tokens')
+        if 'max_tokens' in out:
+            notes.append('dropped:max_completion_tokens(max_tokens already set)')
+        else:
+            out['max_tokens'] = value
+            notes.append('moved:max_completion_tokens->max_tokens')
+    messages = out.get('messages')
+    if isinstance(messages, list):
+        rewritten: list = []
+        changed = False
+        for item in messages:
+            if not isinstance(item, dict):
+                rewritten.append(item)
+                continue
+            role = item.get('role')
+            mapped = _ROLE_MAP.get(role.strip().lower()) \
+                if isinstance(role, str) else None
+            if mapped and role != mapped:
+                # 复制一份再改：`body` 由网关持有，组合会把同一份交给多个成员。
+                item = {**item, 'role': mapped}
+                notes.append(f'role:{role}->{mapped}')
+                changed = True
+            rewritten.append(item)
+        if changed:
+            out['messages'] = rewritten
+    if not notes:
+        return body, []
+    return out, notes
+
+
+# 慢速 400 的判据（参考实现 35a8d552）：上游把请求收下、处理了十几秒才回
+# 「upstream_request_rejected」，那是上游后端抖动，不是客户端写错。这类
+# 400 换一把 Key 重试一次往往就过了；schema 级的 400 都在 1 秒内回来，
+# 所以「耗时」就是最干净的判别信号。
+TRANSIENT_400_CODE = 'upstream_request_rejected'
+TRANSIENT_400_MIN_ELAPSED = 10.0
+
+
+def is_transient_rejection(exc: PlatformError, elapsed: float) -> bool:
+    """这次 400 是不是「上游后端拒绝」，值得换 Key 再试一次。"""
+    if getattr(exc, 'status', None) != 400:
+        return False
+    if elapsed < TRANSIENT_400_MIN_ELAPSED:
+        return False
+    code = str(getattr(exc, 'code', '') or '')
+    if code == TRANSIENT_400_CODE:
+        return True
+    payload = getattr(exc, 'payload', None)
+    return parse_error(payload) == TRANSIENT_400_CODE
 
 
 # ── 通用 ────────────────────────────────────────────────────

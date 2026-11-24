@@ -1915,7 +1915,7 @@ def is_reserved_account_uid(uid):
 
 
 # 账号权重：与 Trae / WorkBuddy 同一口径（0 = 未设置，等效 1.0）。
-# 有效区间 0.1–100，越界在写入时拒掉；选号时按此值缩放分摊。
+# 有效区间 0.1~100，越界在写入时拒掉；选号时按此值缩放分摊。
 WEIGHT_MIN = 0.1
 WEIGHT_MAX = 100.0
 
@@ -1932,7 +1932,7 @@ def normalize_weight(value):
 
 
 def selection_weight(account):
-    """选号权重：未设置 / 非法按 1.0，合法值钳到 0.1–100。"""
+    """选号权重：未设置 / 非法按 1.0，合法值钳到 0.1~100。"""
     weight = normalize_weight(getattr(account, "weight", 0))
     if weight <= 0:
         return 1.0
@@ -2108,6 +2108,7 @@ class Account(object):
             "organizationId": self.organization_id,
             "organizationName": self.organization_name,
             "note": self.note,
+            # 账号权重（0 = 未设置，等效 1.0），选号分摊用。
             "weight": self.weight,
         }
 

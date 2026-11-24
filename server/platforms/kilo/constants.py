@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+import os
+
 # ── 上游 ────────────────────────────────────────────────────
 # 账号侧：设备码 / 资料 / 余额。
 API_BASE = 'https://api.kilo.ai'
@@ -27,7 +29,31 @@ BALANCE_PATH = '/api/profile/balance'
 DEFAULTS_PATH = '/api/defaults'
 
 # 模型侧：OpenAI 兼容对话与模型目录。
-GATEWAY_BASE = 'https://ai-gateway.kilo.ai/api/v1'
+DEFAULT_GATEWAY_BASE = 'https://ai-gateway.kilo.ai/api/v1'
+
+
+def resolve_gateway_base(env: dict | None = None) -> str:
+    """解析网关地址，对齐官方客户端的 `resolveKiloAiGatewayBase`。
+
+    `KILO_AI_GATEWAY_URL` 优先；只配了 legacy 的 `KILO_API_URL` 时，网关流量
+    走 `${KILO_API_URL}/api/gateway/v1`（该 API 会把这条路径改写到 AI 网关的
+    `/api/v1`）。两者都没配才是官方默认值。末尾斜杠统一剥掉，调用方可以直接
+    拼 `/chat/completions`。
+
+    自建 / 代理网关因此不用改代码：设一个环境变量即可。
+    """
+    source = os.environ if env is None else env
+    value = str(source.get('KILO_AI_GATEWAY_URL') or '').strip()
+    if value:
+        return value.rstrip('/')
+    api = str(source.get('KILO_API_URL') or '').strip()
+    if api:
+        return f'{api.rstrip("/")}/api/gateway/v1'
+    return DEFAULT_GATEWAY_BASE
+
+
+GATEWAY_BASE = resolve_gateway_base()
+
 CHAT_PATH = '/chat/completions'
 MODELS_PATH = '/models'
 

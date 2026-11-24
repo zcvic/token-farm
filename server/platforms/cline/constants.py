@@ -67,6 +67,11 @@ DEVICE_INTERVAL = 5.0
 # 需要「强制上游流式再聚合」的模型前缀（参考实现实测）。
 FORCE_STREAM_PREFIXES = ('deepseek/', 'cline-free/', 'cline-pass/')
 
+# 上游对工具名 `function.name` 的长度上限：OpenRouter 的 Meta provider 硬限
+# 64 字符，超长请求间歇性 400（取决于轮询到的后端）。超过就确定性截短，
+# 回程再还原成客户端原始名。
+TOOL_NAME_MAX = 64
+
 # 上游把限流伪装成 200 SSE 的几种信号（`empty response content` 等）。
 SOFT_ERROR_MARKERS = ('empty response content', 'Daily free limit',
                       'INFERENCE_CAP_ERROR')

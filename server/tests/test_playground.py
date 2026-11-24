@@ -377,6 +377,25 @@ class PlaygroundPlatformRealm(unittest.TestCase):
         self.assertEqual([m['id'] for m in data['models']],
                          ['cn-model', 'intl-model'])
 
+    def test_platform_efforts_are_exposed(self) -> None:
+        """平台清单带档位时透给测试台；没有就是空数组（不显示选择器）。"""
+
+        class _EffortAdapter(_FakeRealmAdapter):
+            realm_aware = False
+
+            async def list_models(self) -> list[dict]:
+                return [
+                    {'id': 'kilo/m1', 'model_name': 'm1', 'name': 'M1',
+                     'realm': 'cn', 'efforts': ['low', 'high']},
+                    {'id': 'kilo/m2', 'model_name': 'm2', 'name': 'M2',
+                     'realm': 'cn'},
+                ]
+
+        data = self._models('cn', _EffortAdapter())
+        by_id = {m['id']: m for m in data['models']}
+        self.assertEqual(by_id['m1']['efforts'], ['low', 'high'])
+        self.assertEqual(by_id['m2']['efforts'], [])
+
 
 if __name__ == "__main__":
     unittest.main()

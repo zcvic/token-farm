@@ -682,6 +682,33 @@ Cline 的合并规则是「免费档优先」：`recommended` 的 `free` 分组�
 Discovery 的目录是 OpenAI schema，`/v1/models` 同时承担**额度探针**的角色
 （见 §6.3），所以拉目录本身就要用一把真 Key。
 
+**推理档位（`efforts`）**：平台模型条目可以带 `efforts`（如
+`['low','high','max']`），测试台的模型下拉据此显示档位选择器；空数组 = 不显示。
+目前两个平台提供：
+
+- **Kilo**：上游 `opencode.reasoning_options` 归一而来。`[]`（推理常开）→ 单档
+  `high`；只有 `toggle` → `none` / `high`；有 `effort` 档位 → 去重后按上游
+  schema 白名单（`none/minimal/low/medium/high/xhigh/max`）过滤，带 `toggle`
+  且没有 `none` 时补一档。认不出的条目（如 `budget_tokens`）逐条丢弃，不让整份
+  清单失效。legacy `variants` 不当档位用——它是「变体名 → 参数覆盖」。
+- **DuMate**：只对同一后端的五个白名单模型（`deepseek-v41-flash` /
+  `model-text` / `dm-auto-model` 的 `text.L0`、`mm.L0`、`mm.L2`）暴露
+  `['none','high','max']`。`low` 在百度渠道与 `high` 同强度，内部归一到 `high`，
+  对外不再单列；`none` 会显式下发 `thinking:{type:'disabled'}` +
+  `enable_thinking:false`（只删 `reasoning_effort` 不够，上游仍会按默认档思考）。
+
+**Kilo 网关地址可覆盖**：默认 `https://ai-gateway.kilo.ai/api/v1`。设
+`KILO_AI_GATEWAY_URL` 可指向自建 / 代理网关（末尾斜杠自动剥掉）；只配了 legacy
+的 `KILO_API_URL` 时走 `${KILO_API_URL}/api/gateway/v1`（该 API 会改写到 AI 网关
+的 `/api/v1`）。两者都不设才是官方地址，已有部署不受影响。
+
+**Cline 的模型排序**：`list_models()` 会把真实请求观测到的模型级成败参与排序
+（可用 → 未知 → 失败，稳定排序）。失败信号保鲜 30 分钟、成功 2 小时，只影响
+排序不影响可用性判定，纯内存不落盘。只记模型级失败（404/429/5xx）；401/402/403
+是账号或余额问题，记进来会把整池拖下水。上游把限流伪装成 200 正常帧的情况没有
+状态码可看，走「直接记一次失败」的入口。参考仓的主动 15 分钟补测不取：本仓有
+402 冷却、无池级 `probeTier` 排序体系，定时补测还会额外消耗免费额度。
+
 ### 平台归属与用量统计
 
 平台归属落库，不靠前端按模型名前缀猜：

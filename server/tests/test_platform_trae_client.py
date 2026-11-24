@@ -346,6 +346,72 @@ class BodyTest(unittest.TestCase):
         with self.assertRaises(PlatformError):
             client.build_solo_body('x', [], {})
 
+    # ── SOLO 内联图片边界（上游 355503e6）────────────────────
+    _PNG = ('data:image/png;base64,'
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8'
+            '/x8AAwMCAO+ip1sAAAAASUVORK5CYII=')
+
+    def test_solo_inline_image_passes_through(self) -> None:
+        content = [{'type': 'text', 'text': '看图'},
+                   {'type': 'image_url', 'image_url': {'url': self._PNG}}]
+        body = client.build_solo_body('x', [{'role': 'user', 'content': content}], {})
+        self.assertEqual(body['messages'][0]['content'], content)
+
+    def test_solo_rejects_remote_image_url(self) -> None:
+        content = [{'type': 'image_url',
+                    'image_url': {'url': 'https://example.invalid/a.png'}}]
+        with self.assertRaises(PlatformError) as caught:
+            client.build_solo_body('x', [{'role': 'user', 'content': content}], {})
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(caught.exception.code, 'invalid_image')
+
+    def test_solo_rejects_bad_base64_and_unsupported_mime(self) -> None:
+        for url in ('data:image/png;base64,!!',
+                    'data:image/png;base64,',
+                    'data:image/svg+xml;base64,AAAA',
+                    'data:image/png;base64,汉字'):
+            with self.subTest(url=url):
+                content = [{'type': 'image_url', 'image_url': {'url': url}}]
+                with self.assertRaises(PlatformError) as caught:
+                    client.build_solo_body('x', [{'role': 'user', 'content': content}], {})
+                self.assertEqual(caught.exception.status, 400)
+
+    def test_solo_rejects_image_in_assistant_message(self) -> None:
+        content = [{'type': 'image_url', 'image_url': {'url': self._PNG}}]
+        with self.assertRaises(PlatformError) as caught:
+            client.build_solo_body('x', [{'role': 'assistant', 'content': content}], {})
+        self.assertEqual(caught.exception.status, 400)
+
+    def test_solo_rejects_non_image_url_part(self) -> None:
+        """`input_image` 这类没归一过的形态在 SOLO 上直接拒，不静默丢图。"""
+        content = [{'type': 'input_image', 'image_url': self._PNG}]
+        with self.assertRaises(PlatformError) as caught:
+            client.build_solo_body('x', [{'role': 'user', 'content': content}], {})
+        self.assertEqual(caught.exception.status, 400)
+
+    def test_solo_image_limits_count_decoded_bytes(self) -> None:
+        # 3 字节载荷（`YWJj`）在单图 2 字节上限下必须被拒。
+        tiny = {'type': 'image_url',
+                'image_url': {'url': 'data:image/png;base64,YWJj'}}
+        with mock.patch.object(client, '_SOLO_IMAGE_LIMIT', 2):
+            with self.assertRaises(PlatformError):
+                client.build_solo_body('x', [{'role': 'user', 'content': [tiny]}], {})
+        # 合计上限按跨消息累加，不是逐条重置。
+        with mock.patch.object(client, '_SOLO_IMAGE_TOTAL_LIMIT', 5):
+            with self.assertRaises(PlatformError):
+                client.build_solo_body('x', [
+                    {'role': 'user', 'content': [tiny]},
+                    {'role': 'assistant', 'content': 'ok'},
+                    {'role': 'user', 'content': [tiny]},
+                ], {})
+
+    def test_ide_channel_keeps_images_unvalidated(self) -> None:
+        """IDE 通道的图片归上游自行处理，不能被 SOLO 的边界牵连。"""
+        remote = {'type': 'image_url',
+                  'image_url': {'url': 'https://example.invalid/a.png'}}
+        body = client.build_chat_body('x', [{'role': 'user', 'content': [remote]}], {})
+        self.assertEqual(body['messages'][0]['content'], [remote])
+
     def test_tool_protocol_hint_merged_into_system(self) -> None:
         """声明了 tools 就要把「走原生通道、别自造标签」说死。"""
         tools = [{'type': 'function', 'function': {'name': 'bash',

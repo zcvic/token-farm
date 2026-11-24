@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from hashlib import sha256
 from typing import Any
 
 import httpx
@@ -29,7 +30,8 @@ from ..base import PlatformError
 from . import constants as C
 
 __all__ = [
-    'refresh_token', 'parse_refresh', 'fetch_models', 'fetch_recommended',
+    'refresh_token', 'parse_refresh', 'refresh_via_workos', 'parse_register',
+    'register', 'fetch_models', 'fetch_recommended',
     'parse_models', 'chat', 'open_chat', 'sse_to_completion',
     'start_device', 'poll_device', 'register_sync', 'device_exchange_sync',
 ]
@@ -206,6 +208,57 @@ async def refresh_token(refresh: str, *, proxy: str | None = None,
     return out
 
 
+async def refresh_via_workos(refresh: str, *, proxy: str | None = None,
+                             timeout: float = C.REFRESH_TIMEOUT) -> dict:
+    """`/auth/refresh` 被拒时改走 WorkOS `authenticate` 通道自愈。
+
+    Cline 的 refresh token 本质就是 WorkOS 的 refresh token，`/auth/refresh`
+    只是换皮封装。上游那条封装调整（或 rotate 残留）时会回 400，但 WorkOS
+    通道仍可用——用它换出新的一对 token，就不必让用户重新走设备授权。
+
+    返回 `{access_token, refresh_token, expires_at}`（形状同 `parse_refresh`）。
+    WorkOS 也回 `invalid_grant` 才是真的失效：这里原样抛 `PlatformError`，
+    由调用方决定是否标 `expired`。
+    """
+    key = str(refresh or '').strip()
+    if not key:
+        raise PlatformError('缺少 refresh token', status=401, code='login_expired')
+    try:
+        async with config.http_client(
+                httpx.Timeout(timeout, connect=10),
+                proxy=_selected_proxy(proxy), lane='cline') as client:
+            response = await client.post(
+                C.WORKOS_AUTH_URL,
+                headers={'Content-Type': 'application/json',
+                         'Accept': 'application/json',
+                         'User-Agent': C.UA},
+                content=json.dumps({
+                    'grant_type': 'refresh_token',
+                    'client_id': C.WORKOS_CLIENT_ID,
+                    'refresh_token': key,
+                }, ensure_ascii=False).encode('utf-8'))
+    except httpx.HTTPError as exc:
+        raise _network_error(exc) from exc
+    payload = _json(response)
+    if response.status_code >= 400:
+        message = _error_text(payload, response.text[:200] or 'WorkOS 刷新失败')
+        # WorkOS 把「token 真作废」表达成 invalid_grant；其余 4xx/5xx 只是抖动。
+        if response.status_code in (400, 401, 403) and (
+                'invalid_grant' in message.lower()
+                or 'invalid_grant' in str(payload).lower()):
+            raise PlatformError(message, status=401, code='login_expired',
+                                payload=payload)
+        raise _response_error(response, response.text, payload)
+    body = payload if isinstance(payload, dict) else {}
+    access = str(body.get('access_token') or '').strip()
+    if not access:
+        raise PlatformError('WorkOS 刷新响应里没有 access_token', status=502,
+                            code='oauth_bad_response', payload=payload)
+    return {'access_token': access,
+            'refresh_token': str(body.get('refresh_token') or '').strip(),
+            'expires_at': 0.0}
+
+
 # ── 目录 ────────────────────────────────────────────────────
 def _model_entry(raw: dict, *, free: bool) -> dict:
     model_id = str(raw.get('id') or '').strip()
@@ -340,6 +393,179 @@ def limit_signal(text: object) -> bool:
         return False
     lowered = body.lower()
     return any(marker.lower() in lowered for marker in C.SOFT_ERROR_MARKERS)
+
+
+# ── 工具名截短（Meta 后端硬限 64）──────────────────────────
+def shorten_tool_name(name: str) -> str:
+    """确定性截短：前 55 字符 + `_` + sha256 前 8 位十六进制。
+
+    确定性很关键：同一原始名在多轮对话里必须映射到同一个短名，否则历史
+    `tool_calls` 里的名字会和本轮工具定义对不上，上游照样 400。
+    """
+    digest = sha256(name.encode('utf-8')).hexdigest()[:8]
+    return f'{name[:55]}_{digest}'
+
+
+def clamp_tool_names(body: dict) -> dict[str, str]:
+    """把请求体里超过 64 字符的工具名就地截短，返回 `短名 → 原名` 映射。
+
+    覆盖四处：`tools[].function.name`、历史 `messages[].tool_calls[].function.name`、
+    `tool_choice.function.name`，以及 Responses 协议转出来的
+    `messages[].function_call.name`。没有超长名时返回空表（调用方据此跳过回程
+    还原，零开销）。
+    """
+    mapping: dict[str, str] = {}
+
+    def fix(name: object) -> str | None:
+        text = name if isinstance(name, str) else ''
+        if not text or len(text) <= C.TOOL_NAME_MAX:
+            return None
+        short = shorten_tool_name(text)
+        mapping[short] = text
+        return short
+
+    tools = body.get('tools')
+    if isinstance(tools, list):
+        copied: list[object] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                copied.append(tool)
+                continue
+            fn = tool.get('function')
+            if isinstance(fn, dict):
+                fn = dict(fn)
+                tool = {**tool, 'function': fn}
+            else:
+                tool = dict(tool)
+                fn = tool
+            short = fix(fn.get('name'))
+            if short is not None:
+                fn['name'] = short
+            copied.append(tool)
+        body['tools'] = copied
+
+    messages = body.get('messages')
+    if isinstance(messages, list):
+        copied_msgs: list[object] = []
+        for message in messages:
+            if not isinstance(message, dict) or not message.get('tool_calls'):
+                copied_msgs.append(message)
+                continue
+            message = dict(message)
+            calls = []
+            for call in message.get('tool_calls') or []:
+                if not isinstance(call, dict):
+                    calls.append(call)
+                    continue
+                call = dict(call)
+                for key in ('function', 'function_call'):
+                    holder = call.get(key)
+                    if isinstance(holder, dict):
+                        holder = dict(holder)
+                        short = fix(holder.get('name'))
+                        if short is not None:
+                            holder['name'] = short
+                        call[key] = holder
+                calls.append(call)
+            message['tool_calls'] = calls
+            copied_msgs.append(message)
+        body['messages'] = copied_msgs
+
+    choice = body.get('tool_choice')
+    if isinstance(choice, dict):
+        fn = choice.get('function')
+        if isinstance(fn, dict):
+            short = fix(fn.get('name'))
+            if short is not None:
+                body['tool_choice'] = {**choice, 'function': {**fn, 'name': short}}
+
+    return mapping
+
+
+def restore_tool_names(obj: object, mapping: dict[str, str]) -> object:
+    """把上游响应里被截短的工具名还原成客户端原始名（就地改写）。
+
+    `mapping` 为空时是 no-op。流式 delta 与非流式 message 两种形状都覆盖。
+    """
+    if not isinstance(obj, dict) or not mapping:
+        return obj
+    choices = obj.get('choices')
+    if not isinstance(choices, list):
+        return obj
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        for key in ('delta', 'message'):
+            holder = choice.get(key)
+            if not isinstance(holder, dict):
+                continue
+            calls = holder.get('tool_calls')
+            if not isinstance(calls, list):
+                continue
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get('function')
+                if not isinstance(fn, dict):
+                    continue
+                name = fn.get('name')
+                if isinstance(name, str) and name in mapping:
+                    fn['name'] = mapping[name]
+    return obj
+
+
+class SseToolNameRewriter:
+    """流式透传时还原被截短的工具名。
+
+    只在**整行命中映射**时重写该帧；其余字节逐字节原样输出，所以没有超长
+    工具名的请求（绝大多数）路径上开销只有一次 `in` 判断。
+    """
+
+    def __init__(self, mapping: dict[str, str] | None = None) -> None:
+        self.mapping = dict(mapping or {})
+        self._pending = b''
+        self._needles = [name.encode('utf-8') for name in self.mapping]
+
+    def feed(self, chunk: bytes) -> bytes:
+        if not self._needles or not chunk:
+            return chunk
+        data = self._pending + chunk
+        out = bytearray()
+        while True:
+            index = data.find(b'\n')
+            if index < 0:
+                break
+            out += self._line(data[:index + 1])
+            data = data[index + 1:]
+        self._pending = data
+        return bytes(out)
+
+    def flush(self) -> bytes:
+        """把最后一段没有换行结尾的残留（极少见）也处理掉。"""
+        if not self._needles or not self._pending:
+            return b''
+        rest, self._pending = self._pending, b''
+        return self._line(rest)
+
+    def _line(self, line: bytes) -> bytes:
+        stripped = line.strip()
+        if not stripped.startswith(b'data:'):
+            return line
+        payload = stripped[5:].strip()
+        if not payload or payload == b'[DONE]':
+            return line
+        if not any(needle in payload for needle in self._needles):
+            return line
+        try:
+            obj = json.loads(payload.decode('utf-8', 'replace'))
+        except ValueError:
+            return line
+        if not isinstance(obj, dict):
+            return line
+        restore_tool_names(obj, self.mapping)
+        newline = b'\r\n' if line.endswith(b'\r\n') else b'\n'
+        return b'data: ' + json.dumps(
+            obj, ensure_ascii=False).encode('utf-8') + newline
 
 
 async def chat(access: str, body: dict, *, proxy: str | None = None,
@@ -577,9 +803,53 @@ def poll_device(device_code: str, *, proxy: str | None = None,
     raise _response_error(response, response.text, payload)
 
 
+def parse_register(payload: object) -> dict:
+    """`/auth/register` → `{access_token, refresh_token, expires_at, email}`。
+
+    与 `parse_refresh` 同一个 `data` 外壳；`register` 正常会回 accessToken，
+    但没有也不致命（调用方可以用 `workos:` 前缀令牌顶上）。
+    """
+    out = parse_refresh(payload)
+    data = payload.get('data') if isinstance(payload, dict) \
+        and isinstance(payload.get('data'), dict) else (
+            payload if isinstance(payload, dict) else {})
+    user = data.get('userInfo') if isinstance(data.get('userInfo'), dict) else {}
+    out['email'] = str(user.get('email') or data.get('email') or '')
+    return out
+
+
+async def register(workos: dict, *, proxy: str | None = None,
+                   timeout: float = C.DEVICE_TIMEOUT) -> dict:
+    """用 WorkOS token 在 Cline 换正式令牌（异步版，供适配器自愈使用）。"""
+    body = {
+        'accessToken': str(workos.get('access_token') or ''),
+        'refreshToken': str(workos.get('refresh_token') or ''),
+    }
+    try:
+        async with config.http_client(
+                httpx.Timeout(timeout, connect=10),
+                proxy=_selected_proxy(proxy), lane='cline') as client:
+            response = await client.post(
+                C.BASE_URL + C.REGISTER_PATH,
+                headers={'Content-Type': 'application/json',
+                         'Accept': 'application/json',
+                         'User-Agent': C.UA},
+                content=json.dumps(body, ensure_ascii=False).encode('utf-8'))
+    except httpx.HTTPError as exc:
+        raise _network_error(exc) from exc
+    payload = _json(response)
+    if response.status_code >= 400:
+        raise _response_error(response, response.text, payload)
+    out = parse_register(payload)
+    if not out['refresh_token']:
+        raise PlatformError('Cline 注册响应里没有 refreshToken', status=502,
+                            code='oauth_bad_response', payload=payload)
+    return out
+
+
 def register_sync(workos: dict, *, proxy: str | None = None,
                   timeout: float = C.DEVICE_TIMEOUT) -> dict:
-    """用 WorkOS token 在 Cline 换 refresh token。
+    """用 WorkOS token 在 Cline 换 refresh token（设备码登录的同步路径）。
 
     返回 `{refresh_token, email}`；`refreshToken` 缺失即视为失败——后面所有
     对话都靠它，拿不到就没有可用凭证。
@@ -598,16 +868,11 @@ def register_sync(workos: dict, *, proxy: str | None = None,
     payload = _json(response)
     if response.status_code >= 400:
         raise _response_error(response, response.text, payload)
-    data = payload.get('data') if isinstance(payload, dict) \
-        and isinstance(payload.get('data'), dict) else {}
-    refresh = str(data.get('refreshToken') or data.get('refresh_token')
-                  or '').strip()
-    if not refresh:
+    out = parse_register(payload)
+    if not out['refresh_token']:
         raise PlatformError('Cline 注册响应里没有 refreshToken', status=502,
                             code='oauth_bad_response', payload=payload)
-    user = data.get('userInfo') if isinstance(data.get('userInfo'), dict) else {}
-    return {'refresh_token': refresh,
-            'email': str(user.get('email') or data.get('email') or '')}
+    return {'refresh_token': out['refresh_token'], 'email': out['email']}
 
 
 def device_exchange_sync(workos: dict, *, proxy: str | None = None,

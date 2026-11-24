@@ -16,6 +16,7 @@ httpx 以复用项目已有的连接池、代理与超时策略（`config.http_c
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
 import json
 import logging
@@ -840,17 +841,84 @@ def _prefix_text(parts: list[dict], prefix: str) -> list[dict]:
     return [_text_part(prefix), *parts]
 
 
-def _solo_parts(content: object) -> list[dict]:
+# SOLO 通道的图片边界（对齐上游 355503e6 的判定）。
+# 上游只吃内联 data URI，不收远程 URL：拿不到 URL 的图会在上游静默失败或
+# 整条 400，所以在这里提前挡住，并把「为什么不行」原样告诉客户端。
+_SOLO_IMAGE_LIMIT = 5 * 1024 * 1024
+_SOLO_IMAGE_TOTAL_LIMIT = 10 * 1024 * 1024
+_SOLO_IMAGE_HEADERS = frozenset(
+    'data:' + mime + ';base64'
+    for mime in ('image/png', 'image/jpeg', 'image/webp', 'image/gif'))
+
+
+def _solo_image_error(message: str) -> PlatformError:
+    """图片本身不合法（不是账号 / 上游故障）：400，且不该换号重试。"""
+    return PlatformError(f'SOLO 图片不合法：{message}', status=400,
+                         code='invalid_image')
+
+
+def _solo_image_part(part: dict, role: str,
+                     remaining: int) -> tuple[dict, int]:
+    """校验一个 SOLO 图片 part，返回 `(part, 解码后字节数)`。
+
+    只有 `user` 消息里的内联 base64 PNG / JPEG / WebP / GIF 能过：其余形态
+    （远程 URL、`input_image`、Anthropic 的 `image`）在这里报错，而不是让
+    上游返回一句没有上下文的 400。大小按**解码后**字节算，避免用超长
+    base64 绕过单图 / 单请求上限。
+    """
+    if role != 'user':
+        raise _solo_image_error('图片只能放在 user 消息里')
+    image = part.get('image_url')
+    url = image.get('url') if isinstance(image, dict) else None
+    if part.get('type') != 'image_url' or not isinstance(url, str):
+        raise _solo_image_error(
+            '图片必须是 {"type":"image_url","image_url":{"url":...}} 形态')
+    header, sep, encoded = url.partition(',')
+    if not sep or header not in _SOLO_IMAGE_HEADERS or not encoded:
+        raise _solo_image_error(
+            '只支持内联 base64 的 PNG / JPEG / WebP / GIF（不支持远程 URL）')
+    limit = min(_SOLO_IMAGE_LIMIT, remaining)
+    # base64 长度先粗筛，避免为一个超大图先解码再拒（解码本身就是内存开销）。
+    if len(encoded) > 4 * ((limit + 2) // 3):
+        raise _solo_image_error('单张最大 5 MiB、单次请求合计最大 10 MiB')
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        raise _solo_image_error('base64 数据无效') from None
+    if not decoded:
+        raise _solo_image_error('base64 数据无效')
+    if len(decoded) > limit:
+        raise _solo_image_error('单张最大 5 MiB、单次请求合计最大 10 MiB')
+    return {'type': 'image_url', 'image_url': {'url': url}}, len(decoded)
+
+
+def _solo_parts(content: object, *, role: str = 'user',
+                budget: dict | None = None) -> list[dict]:
     """SOLO 消息的 content parts；空字符串 / null 返回空列表。
 
     与 IDE 通道不同，SOLO 允许 `content=null` 的 assistant 消息（只要带
     `tool_calls`）。上游对这种消息要求 parts 为空数组，而不是一个空文本块。
+
+    `budget` 是跨消息共享的图片字节额度（`{'remaining': n}`）：SOLO 只认
+    内联图片，一张几 MiB 的 base64 会整段进请求体，必须在**构造请求前**
+    同时卡单图与合计上限，否则超限只会换来上游一句语焉不详的 400。
     """
     if content is None:
         return []
     if isinstance(content, str):
         return [_text_part(content)] if content else []
-    return normalize_content(content)
+    parts = normalize_content(content)
+    if budget is None:
+        return parts
+    out: list[dict] = []
+    for part in parts:
+        if part.get('type') == 'text':
+            out.append(part)
+            continue
+        fixed, size = _solo_image_part(part, role, budget['remaining'])
+        budget['remaining'] -= size
+        out.append(fixed)
+    return out
 
 
 def _parts_empty(parts: list[dict]) -> bool:
@@ -949,6 +1017,7 @@ def normalize_solo_messages(messages: object) -> list[dict]:
                 id_to_name[call_id] = name
 
     out: list[dict] = []
+    budget = {'remaining': _SOLO_IMAGE_TOTAL_LIMIT}
     for index, raw in enumerate(messages):
         if isinstance(raw, str):
             if raw:
@@ -963,7 +1032,7 @@ def normalize_solo_messages(messages: object) -> list[dict]:
             role = 'system'
         if role == 'function':
             role = 'tool'
-        parts = _solo_parts(raw.get('content'))
+        parts = _solo_parts(raw.get('content'), role=role, budget=budget)
         message: dict[str, Any] = {'role': role, 'content': parts}
 
         if role == 'assistant':

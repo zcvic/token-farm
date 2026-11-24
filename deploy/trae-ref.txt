@@ -86,3 +86,27 @@
 #   · 09de3039 / a8341425 两个 merge 提交（子提交已逐条判定，单独看无增量）。
 #   · e7eef187 里的版本号与 CHANGELOG 部分（发布提交内容）。
 e7eef187800e45ac0e9a32bb18d7bd6e7fbaa4f9
+
+# ---- 2026-11 第四批（基线 e7eef187 → f7b75787，5 个非 merge 提交，取 1 项）
+# 已同步：
+#   · 355503e6 SOLO 内联图片的边界校验（server/platforms/trae/client.py）：
+#     SOLO 通道的图片是 base64 内联进 body 的，超限会被上游整轮 4001 拒掉，
+#     错误信息还看不出是图片的问题。本地按「单张 5 MiB、单请求合计 10 MiB
+#     （decoded 字节）」在**发请求之前**拦下，并按 OpenAI 的 data URL 形态
+#     （`data:image/png;base64,…`）严格解码——非法 base64、非 data URL 的远程
+#     http(s) 图片都直接报可读错误，不再让上游回一个含糊的 4001。
+#     只对 user 角色的图片生效（assistant 回放里的图片是上游给的，不设限）。
+#     预算跨消息累计（`normalize_solo_messages` 建一份 budget），避免把 10 张
+#     各 4 MiB 的图逐条都判成「没超单张上限」。
+#     测试：test_platform_trae_client.py 新增 7 例（超单张 / 超合计 / 非法
+#     base64 / 远程 URL / 非 user 角色 / 正常通过 / 跨消息累计）。
+# 有意不跟：
+#   · 1773f8b0 SOLO 流式补 usage 帧：本仓 chat.py 的收尾帧已带 usage，
+#     重复补会多出一帧空的 usage。
+#   · 5190977f 图片透传（非 SOLO 通道）：本仓 client.normalize_content() 已
+#     原样透传非文本 part，gateway.normalize_chat_images() 也已归一
+#     `input_image` 与 Anthropic 的 `source` 形态。
+#   · 0722c9d2 测试整理、f7b75787 发版：前者是本仓已有等价覆盖，后者是参考仓
+#     自己的发布提交。
+# 锚点提交：f7b7578768
+# 上一次基线：e7eef187800e45ac0e9a32bb18d7bd6e7fbaa4f9

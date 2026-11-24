@@ -144,3 +144,27 @@
 #          该值保持默认 false（可在 accounts/settings.json 手工配置）。
 #        · 锚点提交：285d98be756e3f20a51a2a35b4ea7a575e107b1c（v1.9.13）
 #          上一次基线：25d05944cdc9b36cb69b162d9cba0d8e8989f4db（v1.9.12）
+
+# ---- 2026-11 第二批：v1.9.13 (285d98be) → v1.9.14 (88753423)，6 个非 merge 提交
+#      整目录 re-vendor 到 v1.9.14，副本按上游逐字节对齐（仅保留包内相对导入
+#      与账号权重补丁）。本批改动集中在 Anthropic 协议的**托管网络工具**：
+#        · 3eeea0f7 / 0460afdd / 91e9d72c / 0d8c507c / 95cc3105 / 1441e49f
+#          新增 `qoder_anthropic_web.py`：把 `web_search_20250305` /
+#          `web_fetch_20250910` 两类服务端工具翻成 Qoder 的托管工具调用，
+#          并按 Anthropic 的事件序列回给客户端（`server_tool_use` →
+#          `*_tool_result` → 继续推理）。含「混合托管工具与客户端工具」的续轮
+#          （`0460afdd`）、托管工具的 `tool_choice` 与续轮上限（`0d8c507c` /
+#          `95cc3105`）、非法 named choice 与显式 usage 的拒绝（`1441e49f`）。
+#          `qoder_proxy.py` 同步加了挂载点；`qoder_webtools.py` /
+#          `qoder_web_response.py` 只做小改。
+#      本地适配：
+#        · `tools/vendor_qoder.py` 的 `MODULES` 加 `qoder_anthropic_web.py`；
+#          该文件依赖 `qoder_web_response` / `qoder_webtools`，两者本就在副本里。
+#        · 账号权重补丁重新应用（`WEIGHT_MIN/MAX`、`normalize_weight`、
+#          `selection_weight`、`Account.weight`、`_weighted_pick`、
+#          `_rotate_unweighted`、`set_weight`、`/accounts/weight`），
+#          `--check` 通过，`test_qoder_vendor` 守着。
+#        · `_vendor/__init__.py` 版本戳 1.9.14 / 88753423e41c…。
+#      未取：`88753423` 是版本号与发布说明本身。
+#      锚点提交：88753423e41c25b82afea22f271f265f06da2ad8（v1.9.14）
+#      上一次基线：285d98be756e3f20a51a2a35b4ea7a575e107b1c（v1.9.13）

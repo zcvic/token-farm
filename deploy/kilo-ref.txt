@@ -59,6 +59,34 @@
 #        · 不引入官方客户端的遥测、自动更新与 VS Code 扩展宿主。
 #        · 不实现签到：上游没有签到入口（`supports_checkin=False`）。
 #
+# ---- 2026-11 第二批（基线 bfdec5496 → 取 2 项）
+#      只看 `packages/kilo-gateway`；官方仓其余目录（VS Code 扩展、CLI、遥测）
+#      一律不看。
+#      已取：
+#        · d7496501c6 网关地址可覆盖（落点 server/platforms/kilo/constants.py
+#          的 resolve_gateway_base / DEFAULT_GATEWAY_BASE）：`KILO_AI_GATEWAY_URL`
+#          优先，只配了 legacy 的 `KILO_API_URL` 时走
+#          `${KILO_API_URL}/api/gateway/v1`（该 API 会改写到 AI 网关的
+#          `/api/v1`），都没配才是官方默认 `https://ai-gateway.kilo.ai/api/v1`。
+#          末尾斜杠统一剥掉。自建 / 代理网关因此不用改代码。
+#        · cf41438e82 推理档位（落点 catalog.reasoning_efforts + client.parse_models
+#          的 `efforts` + adapter._public_model 透出 + 测试台下拉）：上游用
+#          `opencode.reasoning_options` 描述档位。`[]`（推理常开）→ 单档
+#          `high`；只有 toggle → `none` / `high`；有 effort 档位 → 去重后的
+#          档位列表，带 toggle 且没有 `none` 时补一档。认不出的条目（如
+#          `budget_tokens`）**逐条丢弃**，不让整份清单失效。档位取值限定在上游
+#          schema 的 `none/minimal/low/medium/high/xhigh/max`。
+#      有意不跟：
+#        · cf41438e82 的 legacy `variants`：它的语义是「变体名 → 参数覆盖」
+#          （如 `thinking` 变体塞 `reasoning: {effort}`），与「档位列表」不是
+#          一回事；本仓只需要给客户端一个可选档位集合，不引入变体机制。
+#        · cf41438e82 的 Anthropic 额外 `verbosity`、`toggle → instant/thinking`
+#          命名与 `legacyVariants` 的整表展开：本仓对外用 OpenAI 的档位名，
+#          客户端（OpenCode 系）认的是 `reasoning_effort` 字符串。
+#        · 官方仓的 auto-routing worker、计费与遥测：本仓无池级调度与计费面。
+#      锚点提交：bfdec54969
+#      上一次基线：首次接入（具体号待补）
+#
 # ---- 实测记录（2026-11）
 #   · GET  https://ai-gateway.kilo.ai/api/v1/models      → 200（OpenRouter schema）
 #   · GET  https://api.kilo.ai/api/profile（无效 token） → 401

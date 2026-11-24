@@ -44,5 +44,42 @@
 #        · 不实现签到：上游没有签到入口（`supports_checkin=False`）。
 #        · 不实现网页登录：凭证只能从控制台复制（`supports_web_login=False`）。
 #
+# ---- 2026-11 第二批：3e8463a6 → 35a8d552（5 个非 merge 提交，3 项取用）
+#      上一批基线补记：799bb438（首次接入）；本批起点 3e8463a6。
+#      已取：
+#        · f06bb548 请求方言归一（server/platforms/discovery/client.py 的
+#          normalize_body）：剥掉上游不认的 `reasoning_effort` / `reasoning` /
+#          `verbosity` / `store` / `previous_response_id` / `truncation` /
+#          `instructions` / `text`；`max_completion_tokens` 收敛成 `max_tokens`
+#          （已有 `max_tokens` 则丢弃前者）；`developer` / `developer_v2` 角色
+#          改成 `system`。messages 逐条复制，不改客户端传进来的原体；标准体
+#          （已经是上游方言）**原样返回同一个对象**，一个字节都不改。
+#          调用点在 `_chat_accounts` 选号之前：这是「上游认不认这个请求体」的
+#          问题，与用哪把 Key 无关，重试之间不必重算。
+#        · 35a8d552 慢速 400 跨键重试（client.is_transient_rejection +
+#          adapter 的 `transient_budget`）：上游收下请求、处理十几秒才回
+#          `upstream_request_rejected` 400 时，换一把 Key 重试一次。**必须同时
+#          满足**「耗时 ≥ 10s」与「错误体里是这个 code」——schema 级 400 都在
+#          1 秒内回来，不满足耗时门槛仍走原来的快速失败。预算与
+#          `max_accounts_try` 独立，避免一次上游抖动吃掉本该留给坏号的尝试次数；
+#          此刻还没向客户端写任何字节，换号是安全的。失败日志带 key（掩码）、
+#          耗时与 2KB 错误快照。
+#        · 980bb415 只取「陈旧目录兜底」：`list_models()` 在线拉取失败时改用
+#          上一份真实目录（`_cached_models(allow_stale=True)` 绕过 TTL），仍
+#          没有才退内置快照。上一版 TTL 一过、上游恰好不可用就会把真实目录
+#          缩成内置的 8 条，用户以为模型下架了。
+#      有意不跟：
+#        · 980bb415 的池级熔断、`HealthCheckAll` 与 `/v1/models` singleflight
+#          缓存：本仓没有池级熔断层，探针是逐账号的 `_probe` + 内存缓存
+#          （`_probes`），照搬会多出一套没人消费的状态机。
+#        · 980bb415 的 sample-keys 与「上游故障放大」统计：那是参考仓的
+#          Prometheus 指标面，本仓用量页口径不同。
+#        · 5b7f5e1a（统计页 Token 板块）、2b10651f（墨点探测 + 统计页）、
+#          0a408a08（代理 URL 掩码）：前两项是参考仓自己的面板与统计口径，
+#          本仓用量页已有等价展示；后一项是它把 `*` 编码成 `%2A` 的 bug，
+#          本仓掩码走 `store.mask_key`，没有这个问题。
+#      锚点提交：35a8d552da（2026-10-12）
+#      上一次基线：3e8463a67d
+#
 # ---- 同类实现（阅读用，不引入代码）----
 #   · Intern-AI 的 TokenPlan 控制台是唯一的凭证来源（API Key 页）。

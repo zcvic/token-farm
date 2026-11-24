@@ -6,8 +6,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 上游版本 | `1.9.13` |
-| 上游 commit | `285d98be756e3f20a51a2a35b4ea7a575e107b1c` |
+| 上游版本 | `1.9.14` |
+| 上游 commit | `88753423e41c25b82afea22f271f265f06da2ad8` |
 | 许可 | MIT（见 `LICENSE`） |
 | 第三方依赖 | 无必装依赖（Pillow 可选：缺失时图片原样透传，不做压缩） |
 
@@ -24,6 +24,7 @@
 | `qoder_settings.py` | 账号目录下的 `settings.json`（护栏、面板会话、API Key） |
 | `qoder_pricing.py`、`qoder_session_cache.py`、`qoder_activity.py` | 计费 / 会话缓存 / 活动日志 |
 | `qoder_agents.py`、`qoder_anthropic.py`、`qoder_webtools.py` | Agent 配置、Anthropic 桥、联网工具（本地 / 官方 / 外部三种后端） |
+| `qoder_anthropic_web.py` | Anthropic Messages 原生托管 web 工具（`web_search_20250305` / `web_fetch_20250910`）在 `/v1/messages` 上的服务端执行 |
 | `qoder_web_response.py` | 联网工具的请求级证据与 Responses 事件回放（引用、工具调用） |
 | `qoder_official_web.py` | 官方搜索 / 抓取后端：用当前账号自己的 CN / INTL 登录态签名调用 |
 | `qoder_external_web.py` | 外部搜索后端：SearXNG / Tavily / Brave / Serper / 自定义，配置在 `accounts/settings.json` |

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator, Callable
@@ -34,6 +35,9 @@ from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
 from ..limiter import AccountLimiter
 from . import catalog, client, constants as C, store
+from .availability import ModelHealth
+
+logger = logging.getLogger('workbuddy.platforms.cline')
 
 SETTING_MODELS = 'platforms.cline.models'
 SETTING_MODELS_ATTEMPT = 'platforms.cline.models_attempt'
@@ -198,6 +202,7 @@ class ClineAdapter(PlatformAdapter):
         self._swrr: dict[str, float] = {}
         self._affinity = SessionAffinity()
         self._model_meta: dict[str, dict] = {}
+        self._health = ModelHealth()
 
     # ── 内部工具 ──────────────────────────────────────────
     def _lock(self, account_id: str) -> asyncio.Lock:
@@ -288,6 +293,13 @@ class ClineAdapter(PlatformAdapter):
                 data = await client.refresh_token(
                     refresh, proxy=proxy, timeout=self._session_timeout())
             except PlatformError as exc:
+                # `/auth/refresh` 被拒 ≠ 账号真失效：refresh token 本质是
+                # WorkOS token，那条封装回 400 时 WorkOS 通道往往仍可自愈，
+                # 用户不必重新走设备授权。只有 WorkOS 也回 invalid_grant
+                # （401）才标失效。
+                healed = await self._heal_via_workos(uid, refresh, proxy, exc)
+                if healed is not None:
+                    return healed
                 if exc.status == 401:
                     self._mark_expired(uid, exc.message)
                 else:
@@ -324,6 +336,64 @@ class ClineAdapter(PlatformAdapter):
                                     status=500, code='store_error') from exc
             self._tokens[uid] = (new_expires, new_access)
             return new_access
+
+    async def _heal_via_workos(self, uid: str, refresh: str,
+                              proxy: str | None,
+                              cause: PlatformError) -> str | None:
+        """`/auth/refresh` 失败后试一次 WorkOS 通道，成功返回新 access token。
+
+        两步：WorkOS `authenticate`（grant_type=refresh_token）换出新的一对
+        token → 回 `/auth/register` 换成 Cline 正式令牌。注册这步失败不致命：
+        Cline 上游也认 `workos:` 前缀的 WorkOS access token，直接用它顶上
+        （请求头本来就带 `workos:` 前缀）。
+
+        只有 WorkOS 也明确 `invalid_grant` 才返回 None（交给调用方标失效）；
+        网络抖动 / 5xx 同样返回 None，但保留原错误，账号只冷一会儿。
+        """
+        if not refresh:
+            return None
+        # 只有「上游明确拒绝」才值得走 WorkOS 通道；5xx / 网络错误是抖动，
+        # 再打一次别的域名只是把故障放大。
+        if cause.status not in (400, 401, 403):
+            return None
+        try:
+            wos = await client.refresh_via_workos(
+                refresh, proxy=proxy, timeout=self._session_timeout())
+        except PlatformError:
+            return None
+        new_refresh = str(wos.get('refresh_token') or '') or refresh
+        access = str(wos.get('access_token') or '')
+        expires = 0.0
+        try:
+            registered = await client.register(
+                wos, proxy=proxy, timeout=self._session_timeout())
+        except PlatformError:
+            registered = {}
+        else:
+            access = str(registered.get('access_token') or '') or access
+            new_refresh = str(registered.get('refresh_token') or '') or new_refresh
+            expires = float(registered.get('expires_at') or 0)
+        if not access:
+            return None
+        if not expires:
+            # WorkOS access token 实测 1 小时；留 60 秒余量，到点再刷。
+            expires = time.time() + 3600 - 60
+        try:
+            store.patch_account(uid, {
+                'token': access,
+                'refreshToken': new_refresh,
+                'expiredAt': store.iso_from_epoch(expires),
+                'refreshedAt': store.iso_from_epoch(time.time()),
+                'lastRefreshError': '',
+                'loginState': '正常',
+            })
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            raise PlatformError(f'保存 Cline 新 token 失败：{exc}',
+                                status=500, code='store_error') from exc
+        self._tokens[uid] = (expires, access)
+        logger.info('cline 账号 %s 经 WorkOS 通道自愈（原错误：%s）',
+                    uid, str(cause.message)[:120])
+        return access
 
     def _drop_token(self, uid: str) -> None:
         self._tokens.pop(str(uid or ''), None)
@@ -504,6 +574,9 @@ class ClineAdapter(PlatformAdapter):
                 self._save_models(models)
         if models is None:
             models = catalog.default_models()
+        # 按被动可用性信号排序：可用置顶、未知居中、失败沉底。稳定排序，
+        # 没有信号时顺序与目录原序完全一致（不会让下拉莫名跳动）。
+        models = self._health.sort(list(models))
         self._model_meta = {str(m.get('id') or '').strip().lower(): m
                             for m in models if m.get('id')}
         return [self._public_model(m) for m in models if m.get('id')]
@@ -752,6 +825,10 @@ class ClineAdapter(PlatformAdapter):
             except PlatformError as exc:
                 release()
                 last_error = exc
+                # 被动可用性信号：只记模型级失败（401/402/403 是账号或余额
+                # 问题，记进来会把整个池子拖下水）。
+                self._health.record_fail(self.upstream_model(model), exc.status,
+                                         exc.message)
                 if affinity and (exc.status in (401, 403, 429)
                                  or exc.status >= 500):
                     self._affinity.unbind(affinity)
@@ -770,6 +847,10 @@ class ClineAdapter(PlatformAdapter):
             self._last_used[uid] = time.time()
             if affinity:
                 self._affinity.bind(affinity, uid)
+            if result.stream is None and result.raw_stream is None:
+                # 非流式到这里已经拿到完整响应，可以判定这个模型可用；
+                # 流式的成败要等 relay 走完才知道，见下面的 finally。
+                self._health.record_ok(self.upstream_model(model))
             if result.stream is None and result.raw_stream is None:
                 release()
                 return result
@@ -803,6 +884,9 @@ class ClineAdapter(PlatformAdapter):
                       if affinity else f'sess_{uuid.uuid4().hex[:16]}')
         payload = client.chat_body(self.chat_body(model, body),
                                    session_id=session_id)
+        # Meta 后端硬限 64 字符工具名：超长请求会间歇性 400（取决于轮询到的
+        # 后端）。入口处一次性截短并记下映射，回程再还原成客户端原始名。
+        tool_names = client.clamp_tool_names(payload)
 
         if not payload.get('stream'):
             if client.needs_force_stream(upstream):
@@ -820,6 +904,7 @@ class ClineAdapter(PlatformAdapter):
                     except Exception:  # noqa: BLE001
                         pass
                 data = client.sse_to_completion(events, wrapper_model)
+                client.restore_tool_names(data, tool_names)
                 usage = data.get('usage') if isinstance(data.get('usage'),
                                                         dict) else {}
                 return PlatformChat(payload=data, usage=usage,
@@ -828,6 +913,7 @@ class ClineAdapter(PlatformAdapter):
             data = await client.chat(access, payload, proxy=proxy,
                                      timeout=runtime['request_timeout'],
                                      session_id=session_id)
+            client.restore_tool_names(data, tool_names)
             usage = data.get('usage') if isinstance(data.get('usage'), dict) else {}
             return PlatformChat(payload=data, usage=usage, model=wrapper_model,
                                 account_hint=uid, realm=store.REALM)
@@ -855,20 +941,33 @@ class ClineAdapter(PlatformAdapter):
             """原样透传上游字节，同时扫描 usage / 首字 / 流内错误。"""
             pending = b''
             state = {'error': ''}
+            rewriter = client.SseToolNameRewriter(tool_names)
             try:
                 async for chunk in response.aiter_bytes():
                     if not chunk:
                         continue
-                    yield chunk
+                    # 工具名还原只影响含超长名的帧；没有映射时原样返回同一块。
+                    out = rewriter.feed(chunk)
+                    if out:
+                        yield out
                     pending, saw_content, error = _scan_sse(pending + chunk, usage)
                     if error:
                         state['error'] = error
                     if saw_content and chat.first_token_ms is None:
                         chat.first_token_ms = int(
                             (time.monotonic() - started) * 1000)
+                tail = rewriter.flush()
+                if tail:
+                    yield tail
             finally:
                 if state['error']:
                     chat.error = state['error']
+                # 流式要等走完才知道结果：中途报错（含伪装成正常帧的限流）
+                # 记一次模型失败，正常收尾记一次成功。
+                if state['error']:
+                    self._health.record_unavailable(upstream, state['error'])
+                elif chat.first_token_ms is not None:
+                    self._health.record_ok(upstream)
                 await _close()
 
         chat.raw_stream = relay()

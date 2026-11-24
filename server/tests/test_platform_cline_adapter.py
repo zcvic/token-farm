@@ -180,6 +180,84 @@ class ClineClientTest(unittest.TestCase):
         body = client.chat_body({'max_tokens': 100}, 'openai/gpt-4o')
         self.assertEqual(body['max_tokens'], 100)
 
+    # ── 工具名截短 / 还原（上游 f459f003）─────────────────
+    def test_shorten_tool_name_is_deterministic_and_fits_limit(self) -> None:
+        long_name = 'mcp__some_very_long_server_name__' + 'x' * 80
+        short = client.shorten_tool_name(long_name)
+        self.assertLessEqual(len(short), C.TOOL_NAME_MAX)
+        self.assertEqual(short, client.shorten_tool_name(long_name))
+        self.assertNotEqual(short, client.shorten_tool_name(long_name + 'y'))
+
+    def test_clamp_tool_names_covers_tools_history_and_choice(self) -> None:
+        long_name = 'mcp__tool__' + 'a' * 70
+        body = {
+            'tools': [{'type': 'function',
+                       'function': {'name': long_name, 'parameters': {}}}],
+            'messages': [{'role': 'assistant', 'tool_calls': [
+                {'id': 'c1', 'type': 'function',
+                 'function': {'name': long_name, 'arguments': '{}'}}]}],
+            'tool_choice': {'type': 'function', 'function': {'name': long_name}},
+        }
+        mapping = client.clamp_tool_names(body)
+        short = body['tools'][0]['function']['name']
+        self.assertLessEqual(len(short), C.TOOL_NAME_MAX)
+        self.assertEqual(mapping[short], long_name)
+        self.assertEqual(
+            body['messages'][0]['tool_calls'][0]['function']['name'], short)
+        self.assertEqual(body['tool_choice']['function']['name'], short)
+        self.assertEqual(body['tools'][0]['function']['parameters'], {},
+                         '只改名字，其余字段原样')
+
+    def test_clamp_tool_names_is_noop_for_short_names(self) -> None:
+        body = {'tools': [{'type': 'function',
+                           'function': {'name': 'read_file'}}],
+                'messages': []}
+        original = json.dumps(body, sort_keys=True)
+        self.assertEqual(client.clamp_tool_names(body), {})
+        self.assertEqual(json.dumps(body, sort_keys=True), original)
+
+    def test_restore_tool_names_rewrites_delta_and_message(self) -> None:
+        mapping = {'short_1': 'very_long_original'}
+        stream = {'choices': [{'delta': {'tool_calls': [
+            {'function': {'name': 'short_1'}}]}}]}
+        client.restore_tool_names(stream, mapping)
+        self.assertEqual(
+            stream['choices'][0]['delta']['tool_calls'][0]['function']['name'],
+            'very_long_original')
+        full = {'choices': [{'message': {'tool_calls': [
+            {'function': {'name': 'short_1'}}]}}]}
+        client.restore_tool_names(full, mapping)
+        self.assertEqual(
+            full['choices'][0]['message']['tool_calls'][0]['function']['name'],
+            'very_long_original')
+
+    def test_sse_rewriter_passes_through_and_restores(self) -> None:
+        long_name = 'mcp__tool__' + 'a' * 70
+        body = {'tools': [{'type': 'function',
+                           'function': {'name': long_name}}]}
+        mapping = client.clamp_tool_names(body)
+        short = mapping and next(iter(mapping))
+        rewriter = client.SseToolNameRewriter(mapping)
+        # 普通帧（不含映射名）逐字节原样透传。
+        plain = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        self.assertEqual(rewriter.feed(plain), plain)
+        frame = (b'data: {"choices":[{"delta":{"tool_calls":[{"function":'
+                 b'{"name":"' + short.encode() + b'"}}]}}]}\n\n')
+        out = rewriter.feed(frame)
+        self.assertIn(long_name.encode(), out)
+        self.assertNotIn(short.encode(), out)
+        self.assertEqual(rewriter.feed(b'data: [DONE]\n\n'),
+                         b'data: [DONE]\n\n')
+
+    def test_sse_rewriter_handles_split_chunks(self) -> None:
+        mapping = {'s1': 'original-name'}
+        rewriter = client.SseToolNameRewriter(mapping)
+        first = b'data: {"choices":[{"delta":{"tool_calls":[{"function":'
+        second = b'{"name":"s1"}}]}}]}\n\n'
+        self.assertEqual(rewriter.feed(first), b'', '半行不输出，等下一块')
+        out = rewriter.feed(second)
+        self.assertIn(b'original-name', out)
+
     def test_sse_to_completion_aggregates_content_and_usage(self) -> None:
         events = [
             {'id': 'c1', 'choices': [{'delta': {'content': 'he'}}]},
@@ -306,11 +384,68 @@ class ClineAdapterTest(unittest.TestCase):
             raise PlatformError('invalid_grant', status=401,
                                 code='login_expired')
 
-        with mock.patch.object(client, 'refresh_token', new=fake_refresh):
+        async def fake_workos(refresh, **kwargs):
+            raise PlatformError('invalid_grant', status=401,
+                                code='login_expired')
+
+        with mock.patch.object(client, 'refresh_token', new=fake_refresh), \
+                mock.patch.object(client, 'refresh_via_workos',
+                                  new=fake_workos):
             with self.assertRaises(PlatformError):
                 asyncio.run(self.adapter._token_for(
                     store.read_account('cl_1'), proxy=None))
         self.assertEqual(store.read_account('cl_1')['loginState'], '登录已失效')
+
+    def test_refresh_400_heals_via_workos(self) -> None:
+        """`/auth/refresh` 400 不等于账号失效：WorkOS 通道还能自愈。"""
+        self._seed()
+
+        async def fake_refresh(refresh, **kwargs):
+            raise PlatformError('invalid_request', status=400,
+                                code='bad_request')
+
+        async def fake_workos(refresh, **kwargs):
+            return {'access_token': 'wos-at', 'refresh_token': 'wos-rt',
+                    'expires_at': 0.0}
+
+        async def fake_register(workos, **kwargs):
+            return {'access_token': 'cline-at', 'refresh_token': 'cline-rt',
+                    'expires_at': time.time() + 3600, 'email': 'a@b.c'}
+
+        with mock.patch.object(client, 'refresh_token', new=fake_refresh), \
+                mock.patch.object(client, 'refresh_via_workos', new=fake_workos), \
+                mock.patch.object(client, 'register', new=fake_register):
+            token = asyncio.run(self.adapter._token_for(
+                store.read_account('cl_1'), proxy=None))
+        self.assertEqual(token, 'cline-at')
+        raw = store.read_account('cl_1')
+        self.assertEqual(raw['refreshToken'], 'cline-rt')
+        self.assertEqual(raw['loginState'], '正常')
+
+    def test_workos_heal_survives_register_failure(self) -> None:
+        """注册换皮失败也能用 `workos:` 前缀令牌顶上（上游认这个）。"""
+        self._seed()
+
+        async def fake_refresh(refresh, **kwargs):
+            raise PlatformError('invalid_request', status=400,
+                                code='bad_request')
+
+        async def fake_workos(refresh, **kwargs):
+            return {'access_token': 'wos-at', 'refresh_token': 'wos-rt',
+                    'expires_at': 0.0}
+
+        async def fake_register(workos, **kwargs):
+            raise PlatformError('注册挂了', status=502, code='upstream_error')
+
+        with mock.patch.object(client, 'refresh_token', new=fake_refresh), \
+                mock.patch.object(client, 'refresh_via_workos', new=fake_workos), \
+                mock.patch.object(client, 'register', new=fake_register):
+            token = asyncio.run(self.adapter._token_for(
+                store.read_account('cl_1'), proxy=None))
+        self.assertEqual(token, 'wos-at')
+        raw = store.read_account('cl_1')
+        self.assertEqual(raw['refreshToken'], 'wos-rt')
+        self.assertTrue(store.epoch_from_iso(raw['expiredAt']) > time.time())
 
     def test_refresh_5xx_cools_before_retrying(self) -> None:
         self._seed()

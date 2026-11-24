@@ -130,6 +130,69 @@ class KiloCatalogTest(unittest.TestCase):
         ])
         self.assertEqual([m['id'] for m in models], ['a'])
 
+    # ── 网关地址可覆盖（上游 d7496501）─────────────────────
+    def test_gateway_base_honours_env_override(self) -> None:
+        self.assertEqual(
+            C.resolve_gateway_base({'KILO_AI_GATEWAY_URL': 'https://gw.example/v1/'}),
+            'https://gw.example/v1')
+        # legacy 变量：走 API 的网关改写路径。
+        self.assertEqual(
+            C.resolve_gateway_base({'KILO_API_URL': 'https://api.example/'}),
+            'https://api.example/api/gateway/v1')
+        # 两个都给时 KILO_AI_GATEWAY_URL 优先。
+        self.assertEqual(
+            C.resolve_gateway_base({
+                'KILO_AI_GATEWAY_URL': 'https://gw.example/v1',
+                'KILO_API_URL': 'https://api.example'}),
+            'https://gw.example/v1')
+        self.assertEqual(C.resolve_gateway_base({}), C.DEFAULT_GATEWAY_BASE)
+
+    # ── 推理档位（上游 cf41438e）───────────────────────────
+    def test_reasoning_efforts_maps_toggle_and_effort_options(self) -> None:
+        self.assertEqual(catalog.reasoning_efforts([]), ['high'],
+                         '空数组 = 推理常开，只有 thinking 一档')
+        self.assertEqual(
+            catalog.reasoning_efforts([{'type': 'toggle'}]), ['none', 'high'])
+        self.assertEqual(
+            catalog.reasoning_efforts([
+                {'type': 'effort', 'values': ['low', 'high', 'high', 'max']}]),
+            ['low', 'high', 'max'], '重复档位去重')
+        self.assertEqual(
+            catalog.reasoning_efforts([
+                {'type': 'toggle'},
+                {'type': 'effort', 'values': ['medium']}]),
+            ['none', 'medium'], 'toggle 补一档 none')
+        self.assertEqual(
+            catalog.reasoning_efforts([
+                {'type': 'toggle'},
+                {'type': 'effort', 'values': ['none', 'high']}]),
+            ['none', 'high'], '已有 none 不重复补')
+
+    def test_reasoning_efforts_drops_unknown_entries_one_by_one(self) -> None:
+        self.assertEqual(
+            catalog.reasoning_efforts([
+                {'type': 'budget_tokens', 'values': [1024]},
+                {'type': 'effort', 'values': ['high', 'bogus', 3]}]),
+            ['high'], '认不出的条目与取值逐条丢弃')
+        self.assertEqual(catalog.reasoning_efforts('not-a-list'), [])
+
+    def test_parse_models_reads_reasoning_options(self) -> None:
+        models = client.parse_models({'data': [
+            {'id': 'm1', 'opencode': {
+                'reasoning_options': [{'type': 'effort',
+                                       'values': ['low', 'high']}]}},
+            {'id': 'm2', 'opencode': {'variants': {'thinking': {}}}},
+        ]})
+        self.assertEqual(models[0]['efforts'], ['low', 'high'])
+        self.assertEqual(models[1]['efforts'], [],
+                         'legacy variants 不当档位用')
+
+    def test_normalize_derives_efforts_from_raw_options(self) -> None:
+        models = catalog.normalize([{
+            'id': 'm', 'opencode': {'reasoning_options': [{'type': 'toggle'}]}}])
+        self.assertEqual(models[0]['efforts'], ['none', 'high'])
+        self.assertTrue(models[0]['reasoning'], '有档位就算支持推理')
+
 
 class KiloClientTest(unittest.TestCase):
     """错误映射与资料 / 余额解析。"""

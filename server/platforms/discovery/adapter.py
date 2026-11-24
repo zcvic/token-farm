@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Any, AsyncIterator, Callable
 
@@ -32,6 +33,8 @@ from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
 from ..limiter import AccountLimiter
 from . import catalog, client, constants as C, store
+
+logger = logging.getLogger('workbuddy.platforms.discovery')
 
 SETTING_MODELS = 'platforms.discovery.models'
 SETTING_MODELS_ATTEMPT = 'platforms.discovery.models_attempt'
@@ -327,14 +330,20 @@ class DiscoveryAdapter(PlatformAdapter):
         return out
 
     # ── 模型目录 ──────────────────────────────────────────
-    def _cached_models(self) -> list[dict] | None:
+    def _cached_models(self, *, allow_stale: bool = False) -> list[dict] | None:
+        """已缓存的模型目录；`allow_stale=True` 时不看 TTL。
+
+        陈旧兜底是刻意留的：上游抖一次、`/v1/models` 拉不到时，宁可继续用
+        上一份真实目录，也不该退回内置快照——内置快照里的模型可能早就下线，
+        客户端会照着一份过期的名单发请求。
+        """
         try:
             cached = db.get_setting(SETTING_MODELS, None)
         except Exception:  # noqa: BLE001
             return None
         if not isinstance(cached, dict):
             return None
-        if float(cached.get('fetched_at') or 0) \
+        if not allow_stale and float(cached.get('fetched_at') or 0) \
                 + runtime_settings.catalog_ttl(self.name) < time.time():
             return None
         models = catalog.normalize(cached.get('models'))
@@ -365,10 +374,16 @@ class DiscoveryAdapter(PlatformAdapter):
     async def list_models(self, *, refresh: bool = False) -> list[dict]:
         models = None if refresh else self._cached_models()
         if models is None and (refresh or self._implicit_live_allowed()):
-            models = await self._live_models(refresh=refresh)
+            live = await self._live_models(refresh=refresh)
             self._note_implicit_attempt()
-            if models:
-                self._save_models(models)
+            if live:
+                self._save_models(live)
+                models = live
+            else:
+                # 拉不到就继续用上一份真实目录（哪怕已过 TTL）：模型页 / 客户端
+                # 需要的是「这个名字现在还能不能用」，一份过期但真实的名字
+                # 远比内置快照可靠。完全没有历史目录时才退到内置快照。
+                models = self._cached_models(allow_stale=True)
         # 空表也要兜底：`_live_models` 在「一个可用账号都没有」时返回 `[]`
         # 而不是 None，只判 None 会让模型页在一把 Key 都没导入时整片空白。
         if not models:
@@ -574,16 +589,27 @@ class DiscoveryAdapter(PlatformAdapter):
         if affinity:
             self._affinity.set_ttl(runtime['session_affinity_ttl'])
 
+        # 方言归一放在选号之前：它是「上游认不认这个请求体」的问题，与用哪把
+        # Key 无关，重试之间也不必再算一遍。标准体（已经是上游方言）原样
+        # 通过，一个字节都不改。
+        body, notes = client.normalize_body(body)
+        if notes:
+            logger.info('discovery 请求体已归一：%s', ','.join(notes))
+
         candidates = self._candidates(affinity)
         if not candidates:
             raise PlatformError('没有可用的 Discovery 账号（请先导入 API Key）',
                                 status=503, code='no_account')
 
         last_error: PlatformError | None = None
+        # 慢速 400 的专用预算：只有一次，且与 `max_accounts_try` 独立——把它
+        # 混进普通重试会让「上游抖一下」直接吃掉本该留给真正坏号的尝试次数。
+        transient_budget = 1
         for account in candidates[:runtime['max_accounts_try']]:
             uid = str(account.get('uid') or '')
             lease = None
             release: Callable[[], None] = _noop
+            started = time.monotonic()
             try:
                 proxy = self._proxy_for(account)
                 lease = await self._limiter.acquire(uid)
@@ -604,6 +630,19 @@ class DiscoveryAdapter(PlatformAdapter):
                 if affinity and (exc.status in (401, 403, 429)
                                  or exc.status >= 500):
                     self._affinity.unbind(affinity)
+                # 慢速 400：上游收下请求、处理了十几秒才说「不收」，是后端
+                # 抖动而不是客户端写错。此刻还没有向客户端写任何字节，换把
+                # Key 重试是安全的；schema 级 400 都在 1 秒内回来，不满足
+                # 耗时门槛，仍走原来的快速失败。
+                elapsed = time.monotonic() - started
+                if transient_budget > 0 and client.is_transient_rejection(
+                        exc, elapsed):
+                    transient_budget -= 1
+                    logger.warning(
+                        'discovery 上游慢速拒绝（%.1fs，key=%s），换号重试：%s',
+                        elapsed, store.mask_key(self._key_of(account)),
+                        str(exc.message)[:200])
+                    continue
                 # 401 是 Key 失效：冻了也不会自己好，只换号不冷却。
                 if exc.status != 401 and self._cool_down(uid, exc):
                     continue

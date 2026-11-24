@@ -247,8 +247,10 @@ async def playground_models(
                     # 测试台按裸模型名发送，`/chat` 负责补 `<平台>/` 前缀。
                     'id': str(m.get('model_name') or m.get('id') or ''),
                     'name': str(m.get('name') or m.get('model_name') or m.get('id') or ''),
-                    # 平台适配器不提供档位元数据；空数组 = 不显示档位选择器。
-                    'efforts': [],
+                    # 档位来自适配器清单：目前只有 Kilo 提供（`reasoning_options`）；
+                    # 其它平台给空数组 = 不显示档位选择器。
+                    'efforts': [str(x) for x in (m.get('efforts') or [])
+                                if str(x or '').strip()],
                     'series': str(m.get('realm') or ''),
                 }
                 for m in models

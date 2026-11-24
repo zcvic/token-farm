@@ -336,11 +336,24 @@ def parse_models(payload: object) -> list[dict]:
             'max_tokens': _int(max_out),
             'modalities': [str(x) for x in modalities],
             'reasoning': 'reasoning' in (raw.get('supported_parameters') or []),
+            # 上游用 `opencode.reasoning_options` 描述档位（旧的 `variants` 只是
+            # legacy 兜底，本仓不认——它的语义是「变体名 → 参数覆盖」，与档位
+            # 不是一回事）。认不出 / 缺失时留空，不编造。
+            'efforts': _efforts(raw),
             'tool_call': 'tools' in (raw.get('supported_parameters') or []),
             'free': free,
             'type': 'chat',
         })
     return out
+
+
+def _efforts(raw: dict) -> list[str]:
+    from . import catalog  # noqa: PLC0415 —— 避免 client ↔ catalog 循环导入
+
+    opencode = raw.get('opencode')
+    if not isinstance(opencode, dict):
+        return []
+    return catalog.reasoning_efforts(opencode.get('reasoning_options'))
 
 
 def _price(value: object) -> float | None:

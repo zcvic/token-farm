@@ -30,7 +30,7 @@ from ...services.session_affinity import SessionAffinity, affinity_key
 from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
 from ..limiter import AccountLimiter
-from . import catalog, client, constants as C, store
+from . import catalog, client, constants as C, reasoning, store
 
 # 模型目录缓存：与 Trae / Loomy 同构，存 `{fetched_at, models}`。
 SETTING_MODELS = 'platforms.dumate.models'
@@ -58,6 +58,25 @@ def _num(value: object) -> float | None:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def normalize_token_fields(body: dict) -> bool:
+    """把 `max_completion_tokens` 收敛成唯一的 `max_tokens`，返回是否改写。
+
+    上游（dumate-svc `/gateway/apis/v1`）只认 `max_tokens`：两个都发会被明文
+    拒绝（400），只发 `max_completion_tokens` 则整字段被静默忽略。两值不等时
+    取较大者——同一次请求里客户端意图本身不明，取大不会把用户要的长度砍短。
+    """
+    if not isinstance(body, dict):
+        return False
+    if body.get('max_completion_tokens') is None:
+        return False
+    mct = _num(body.get('max_completion_tokens'))
+    mt = _num(body.get('max_tokens'))
+    if mct is not None and (mt is None or mct > mt):
+        body['max_tokens'] = int(mct) if mct.is_integer() else mct
+    body.pop('max_completion_tokens', None)
+    return True
 
 
 def _account_weight(account: dict) -> float:
@@ -581,6 +600,7 @@ class DumateAdapter(PlatformAdapter):
             'context_window': int(_num(raw.get('context_length')) or 0),
             'max_tokens': int(_num(raw.get('max_tokens')) or 0),
             'supports_reasoning': bool(raw.get('reasoning')),
+            'efforts': reasoning.efforts_of(model_id),
             'modalities': {'input': [str(x) for x in modalities]},
             'model_name': model_id,
             'tool_call': bool(raw.get('tool_call', True)),
@@ -842,13 +862,23 @@ class DumateAdapter(PlatformAdapter):
         token = await self._token_for(account, proxy=proxy)
 
         payload = self.chat_body(model, body)
+        # 上游只认 `max_tokens` 一个键：
+        #   · 两个都发 → 直接 400（`setting 'max_tokens' and
+        #     'max_completion_tokens' at the same time is not supported`），
+        #     客户端整轮失败；
+        #   · 只发 `max_completion_tokens`（OpenAI 现行写法）→ 不报错，但该
+        #     字段被静默忽略，预算退回默认值，用户设的长度失效。
+        # 先收敛成单一的 `max_tokens`（两值不等取较大者，避免砍短用户要的
+        # 长度），再做按模型上限的钳制——顺序不能反，否则钳的是被忽略的那个值。
+        normalize_token_fields(payload)
+        # 思考档位：只对同一后端的白名单模型生效（见 `reasoning.py`）。
+        reasoning.apply(payload, model)
         # 上游按真实模型限制 max_tokens；超过真值会整轮 400，钳到实测上限。
         cap = self._output_cap(model)
         if cap > 0:
-            for key in ('max_tokens', 'max_completion_tokens'):
-                value = _num(payload.get(key))
-                if value is not None and value > cap:
-                    payload[key] = cap
+            value = _num(payload.get('max_tokens'))
+            if value is not None and value > cap:
+                payload['max_tokens'] = cap
 
         if not payload.get('stream'):
             data = await client.chat(token, payload, proxy=proxy,

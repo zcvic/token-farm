@@ -315,6 +315,121 @@ class DiscoveryAdapterTest(unittest.TestCase):
         self.assertEqual(pending, b'data: {"choices":[{"delta":{"con')
         self.assertFalse(saw)
 
+    # ── 请求方言归一（上游 f06bb548）───────────────────────
+    def test_normalize_body_maps_roles_and_moves_max_tokens(self) -> None:
+        body = {
+            'model': 'x', 'reasoning_effort': 'high', 'store': True,
+            'max_completion_tokens': 100,
+            'messages': [{'role': 'developer', 'content': 'sys'},
+                         {'role': 'user', 'content': 'hi'}],
+        }
+        out, notes = client.normalize_body(body)
+        self.assertNotIn('reasoning_effort', out)
+        self.assertNotIn('store', out)
+        self.assertNotIn('max_completion_tokens', out)
+        self.assertEqual(out['max_tokens'], 100)
+        self.assertEqual(out['messages'][0]['role'], 'system')
+        self.assertEqual(out['messages'][1]['role'], 'user')
+        self.assertTrue(any(n.startswith('role:developer') for n in notes))
+        # 原 body 不能被子改动污染（组合会复用同一份）。
+        self.assertEqual(body['messages'][0]['role'], 'developer')
+        self.assertIn('reasoning_effort', body)
+
+    def test_normalize_body_keeps_existing_max_tokens(self) -> None:
+        out, _ = client.normalize_body(
+            {'max_tokens': 10, 'max_completion_tokens': 99, 'messages': []})
+        self.assertEqual(out['max_tokens'], 10)
+        self.assertNotIn('max_completion_tokens', out)
+
+    def test_normalize_body_is_idempotent_and_passes_standard_bodies(self) -> None:
+        standard = {'model': 'deepseek-v3', 'max_tokens': 50, 'temperature': 0.7,
+                    'messages': [{'role': 'system', 'content': 's'},
+                                 {'role': 'user', 'content': 'hi'}]}
+        out, notes = client.normalize_body(standard)
+        self.assertEqual(notes, [])
+        self.assertIs(out, standard, '标准体必须原样返回同一个对象')
+        once, _ = client.normalize_body(
+            {'max_completion_tokens': 9,
+             'messages': [{'role': 'developer', 'content': 'x'}]})
+        twice, notes2 = client.normalize_body(once)
+        self.assertEqual(notes2, [])
+        self.assertIs(twice, once)
+
+    # ── 慢速 400 跨键重试（上游 35a8d552）──────────────────
+    def test_transient_rejection_needs_slow_elapsed_and_code(self) -> None:
+        rejected = PlatformError('upstream_request_rejected', status=400,
+                                 code='bad_request',
+                                 payload={'error': {'code': 'upstream_request_rejected'}})
+        self.assertTrue(client.is_transient_rejection(rejected, 12.0))
+        self.assertFalse(client.is_transient_rejection(rejected, 0.4),
+                         '快 400 是 schema 错误，必须快速失败')
+        other = PlatformError('bad schema', status=400, code='bad_request',
+                              payload={'error': {'code': 'invalid_value'}})
+        self.assertFalse(client.is_transient_rejection(other, 20.0))
+        self.assertFalse(client.is_transient_rejection(
+            PlatformError('x', status=502, code='upstream_error'), 20.0))
+
+    def test_slow_400_rotates_to_another_key_once(self) -> None:
+        self._seed(uid='dc_1')
+        self._seed(uid='dc_2', apiKey='dc-key-2')
+        seen: list[str] = []
+
+        async def fake_chat(api_key, body, **kwargs):
+            seen.append(api_key)
+            if len(seen) == 1:
+                raise PlatformError(
+                    'upstream_request_rejected', status=400, code='bad_request',
+                    payload={'error': {'code': 'upstream_request_rejected'}})
+            return {'choices': [], 'usage': {}}
+
+        clock = {'t': 0.0}
+
+        def fake_monotonic() -> float:
+            clock['t'] += 20.0
+            return clock['t']
+
+        with mock.patch.object(client, 'chat', new=fake_chat), \
+                mock.patch('server.platforms.discovery.adapter.time.monotonic',
+                           new=fake_monotonic):
+            result = asyncio.run(self.adapter.chat('glm-4', {'messages': []}))
+        self.assertEqual(len(seen), 2, '慢速 400 应换一把 Key 重试')
+        self.assertNotEqual(seen[0], seen[1])
+        self.assertEqual(result.model, 'discovery/glm-4')
+
+    def test_fast_400_does_not_rotate(self) -> None:
+        self._seed(uid='dc_1')
+        self._seed(uid='dc_2', apiKey='dc-key-2')
+        calls: list[str] = []
+
+        async def fake_chat(api_key, body, **kwargs):
+            calls.append(api_key)
+            raise PlatformError('bad schema', status=400, code='bad_request')
+
+        with mock.patch.object(client, 'chat', new=fake_chat):
+            with self.assertRaises(PlatformError):
+                asyncio.run(self.adapter.chat('glm-4', {'messages': []}))
+        self.assertEqual(len(calls), 1, '快 400 不该换号')
+
+    # ── 目录陈旧兜底 ──────────────────────────────────────
+    def test_stale_catalog_survives_refresh_failure(self) -> None:
+        self._seed()
+        good = [{'id': 'glm-4', 'name': 'GLM-4'}]
+        self.adapter._save_models(catalog.normalize(good))
+        # 把缓存时间推到很久以前，模拟 TTL 过期。
+        db.set_setting('platforms.discovery.models',
+                       {'fetched_at': 0, 'models': catalog.normalize(good)})
+
+        async def failing(api_key, **kwargs):
+            raise PlatformError('上游挂了', status=502, code='upstream_error')
+
+        with mock.patch.object(client, 'fetch_models', new=failing), \
+                mock.patch.object(client, 'probe',
+                                  new=mock.AsyncMock(return_value={
+                                      'state': 'unknown', 'message': '', 'models': []})):
+            models = asyncio.run(self.adapter.list_models(refresh=True))
+        self.assertEqual([m['model_name'] for m in models], ['glm-4'],
+                         '拉不到新目录时要继续用上一份真实目录，而不是内置快照')
+
     # ── 额度 / 能力 ───────────────────────────────────────
     def test_credits_is_unsupported(self) -> None:
         self._seed()

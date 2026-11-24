@@ -200,6 +200,14 @@ class DumateAdapterTest(unittest.TestCase):
             models = asyncio.run(self.adapter.list_models(refresh=True))
         self.assertEqual([m['model_name'] for m in models], ['only-desktop'])
 
+    def test_list_models_exposes_efforts_for_known_backend(self) -> None:
+        models = {m['model_name']: m for m in asyncio.run(self.adapter.list_models())}
+        self.assertEqual(models['deepseek-v41-flash']['efforts'],
+                         ['none', 'high', 'max'],
+                         '`low` 归一成 `high`，对外不再单列')
+        self.assertEqual(models['glm-53']['efforts'], [],
+                         '非白名单后端不显示档位选择器')
+
     # ── 选号 ──────────────────────────────────────────────
     def test_candidates_skip_disabled_and_cooling(self) -> None:
         self._seed(uid='dm_1')
@@ -299,6 +307,90 @@ class DumateAdapterTest(unittest.TestCase):
                 'max_tokens': 1_000_000,
             }))
         self.assertEqual(captured['max_tokens'], C.OUTPUT_CAPS['model-text'])
+
+    def test_chat_collapses_token_fields_to_single_max_tokens(self) -> None:
+        """两个字段同发会被上游 400；只发 mct 会被静默忽略。"""
+        self._seed()
+        captured: dict = {}
+
+        async def fake_token(cookie, **kwargs):
+            return {'token': 't', 'expired_at': '2099-01-01T00:00:00Z'}
+
+        async def fake_chat(token, body, **kwargs):
+            captured.update(body)
+            return {'choices': []}
+
+        with mock.patch.object(client, 'fetch_token', new=fake_token), \
+                mock.patch.object(client, 'chat', new=fake_chat):
+            asyncio.run(self.adapter.chat('glm-53', {
+                'messages': [{'role': 'user', 'content': 'hi'}],
+                'max_tokens': 1000, 'max_completion_tokens': 4096,
+            }))
+        self.assertNotIn('max_completion_tokens', captured)
+        self.assertEqual(captured['max_tokens'], 4096, '两值不等取较大者')
+
+    def test_chat_maps_max_completion_tokens_only(self) -> None:
+        self._seed()
+        captured: dict = {}
+
+        async def fake_token(cookie, **kwargs):
+            return {'token': 't', 'expired_at': '2099-01-01T00:00:00Z'}
+
+        async def fake_chat(token, body, **kwargs):
+            captured.update(body)
+            return {'choices': []}
+
+        with mock.patch.object(client, 'fetch_token', new=fake_token), \
+                mock.patch.object(client, 'chat', new=fake_chat):
+            asyncio.run(self.adapter.chat('glm-53', {
+                'messages': [{'role': 'user', 'content': 'hi'}],
+                'max_completion_tokens': 2048,
+            }))
+        self.assertEqual(captured['max_tokens'], 2048)
+        self.assertNotIn('max_completion_tokens', captured)
+
+    def test_chat_normalizes_reasoning_effort_on_known_backend(self) -> None:
+        self._seed()
+        captured: dict = {}
+
+        async def fake_token(cookie, **kwargs):
+            return {'token': 't', 'expired_at': '2099-01-01T00:00:00Z'}
+
+        async def fake_chat(token, body, **kwargs):
+            captured.update(body)
+            return {'choices': []}
+
+        with mock.patch.object(client, 'fetch_token', new=fake_token), \
+                mock.patch.object(client, 'chat', new=fake_chat):
+            asyncio.run(self.adapter.chat('deepseek-v41-flash', {
+                'messages': [{'role': 'user', 'content': 'hi'}],
+                'reasoning_effort': 'none',
+            }))
+        self.assertNotIn('reasoning_effort', captured)
+        self.assertEqual(captured['thinking'], {'type': 'disabled'})
+        self.assertIs(captured['enable_thinking'], False)
+
+    def test_chat_leaves_effort_alone_on_other_backends(self) -> None:
+        self._seed()
+        captured: dict = {}
+
+        async def fake_token(cookie, **kwargs):
+            return {'token': 't', 'expired_at': '2099-01-01T00:00:00Z'}
+
+        async def fake_chat(token, body, **kwargs):
+            captured.update(body)
+            return {'choices': []}
+
+        with mock.patch.object(client, 'fetch_token', new=fake_token), \
+                mock.patch.object(client, 'chat', new=fake_chat):
+            asyncio.run(self.adapter.chat('glm-53', {
+                'messages': [{'role': 'user', 'content': 'hi'}],
+                'reasoning_effort': 'none',
+            }))
+        self.assertEqual(captured['reasoning_effort'], 'none',
+                         '非白名单模型的档位原样透传，不注入 thinking')
+        self.assertNotIn('thinking', captured)
+        self.assertNotIn('enable_thinking', captured)
 
     def test_scan_sse_extracts_usage_and_content(self) -> None:
         usage: dict = {}

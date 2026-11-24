@@ -74,3 +74,38 @@
 #      · 实现：server/platforms/dumate/login.py；适配器
 #        login_start / login_poll / login_cancel，supports_web_login = True。
 #        手工粘贴 Cookie 继续保留，作为扫码不可用时的兜底。
+#
+# ---- 2026-11 第二批：54f603d4 → 9f02228e（取 2 项）
+#      已取：
+#        · 54f603d4 `max_tokens` / `max_completion_tokens` 归一（落点
+#          server/platforms/dumate/adapter.py 的 normalize_token_fields）：
+#          云端网关只认 `max_tokens`。两个都发会被明文拒绝
+#          （400 `setting 'max_tokens' and 'max_completion_tokens' at the same
+#          time is not supported`，客户端整轮失败）；只发
+#          `max_completion_tokens`（OpenAI 现行写法）不报错，但该字段被静默
+#          忽略、预算退回默认值。所以先收敛成唯一的 `max_tokens`（两值不等取
+#          较大者，避免砍短用户要的长度），**再**做按模型上限的钳制——顺序
+#          不能反，否则钳的是被忽略的那个值。
+#        · 9f02228e 的思考档位部分（落点 server/platforms/dumate/reasoning.py）：
+#          只对同一后端的白名单模型（deepseek-v41-flash / model-text /
+#          dm-auto-model 的 text.L0 / mm.L0 / mm.L2）认 none / low / high / max；
+#          `low` 归一到 `high`（百度渠道实测两档同强度）；`none` **必须显式**
+#          下发 `thinking:{type:'disabled'}` + `enable_thinking:false`，只删
+#          `reasoning_effort` 不够——上游会按默认档继续思考，思考预算照样吃掉
+#          输出上限。非白名单模型的档位原样透传，不注入 thinking 字段。
+#          对外暴露的档位是 `['none','high','max']`（`low` 已归一，不再单列，
+#          免得客户端选了 low 却得到 high 的强度而以为没生效）。
+#      有意不跟：
+#        · 9f02228e 的桌面端模型清单三级降级：本仓 catalog.py 已有等价链路
+#          （桌面 opencode.json → 进程缓存 → 包内 catalog.json），且 22 个模型
+#          id 与上游一致；不重复造一层。
+#        · 9f02228e 的积分钱包分池与实测倍率探针：前者是参考仓面板的数据面
+#          （本仓积分口径已独立）；后者要真机打两次付费请求解斜率，不适合
+#          随包跑。
+#        · 39be5efd / be25ef31 / 2c900451 / b8f786cc / db24deff：四通道运行时
+#          增强（缓存作用域 / 路由组 / 风控页 / 会话键 / 图片预算）、面板、
+#          端口统一（9080/9081）、Docker 与发版说明。本仓是单镜像 + 自有面板，
+#          端口与部署形态都不同；图片预算已在 `server/routers/gateway.py` 的
+#          Anthropic 图片归一里覆盖。
+#      锚点提交：9f02228edf（2026-11-16）
+#      上一次基线：54f603d45a（2026-11-13）

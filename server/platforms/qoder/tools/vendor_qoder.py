@@ -33,6 +33,7 @@ MODULES = [
     'qoder_admin.py',
     'qoder_agents.py',
     'qoder_anthropic.py',
+    'qoder_anthropic_web.py',
     'qoder_cache.py',
     'qoder_catalog.py',
     'qoder_fingerprint.py',

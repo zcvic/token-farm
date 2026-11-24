@@ -2293,6 +2293,11 @@ export interface PlatformModel {
   context_window: number;
   max_tokens: number;
   supports_reasoning: boolean;
+  /**
+   * 支持的推理档位（如 `['low', 'high', 'max']`）；空数组 / 缺省 = 未提供。
+   * 目前来自 Kilo 的 `reasoning_options` 与 DuMate 的白名单后端。
+   */
+  efforts?: string[];
   modalities: {input: string[]};
   /** 上游真正认的裸模型名（`deepseek-V3`） */
   model_name: string;
