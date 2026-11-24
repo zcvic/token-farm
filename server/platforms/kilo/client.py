@@ -11,7 +11,7 @@
         （202 等待、403 拒绝、410 过期、200 通过并带 `token`）；
       - `GET  /api/profile` —— 邮箱 / 昵称 / 组织；
       - `GET  /api/profile/balance` —— 余额（**美元**，`{balance: number}`）；
-  · `ai-gateway.kilo.ai/api/v1`（模型侧）
+  · `ai-gateway.kilo.ai/api/v1`（模型侧，地址可覆盖，见 `constants.resolve_gateway_base`）
       - `GET  /models` —— 模型目录（OpenRouter schema，免鉴权）；
       - `POST /chat/completions` —— OpenAI 兼容对话，流式原样透传。
 
