@@ -178,14 +178,24 @@ export function PlatformTasksPanel({
         notify.ok(t('platforms.tasks.drawClaimDone'));
         setDrawResult(null);
         setContact('');
-      } else if (task.checkin?.already) {
-        notify.info(t('platforms.tasks.checkinAlready'));
       } else {
-        notify.ok(t('platforms.tasks.checkinDone'),
-          typeof task.checkin?.earned_credit === 'number'
-            && task.checkin.earned_credit > 0
-            ? t('platforms.checkinEarned', {n: task.checkin.earned_credit})
-            : task.checkin?.message || undefined);
+        // 「本次到账」优先（DuMate 重复点击时为 0，不会把上次的奖励再说一遍）；
+        // Loomy 没有该字段，退回 earned_credit。
+        const earned =
+          task.checkin?.earned_this_run ?? task.checkin?.earned_credit ?? 0;
+        if (task.checkin?.already) {
+          notify.info(
+            t('platforms.tasks.checkinAlready'),
+            earned > 0 ? t('platforms.checkinEarned', {n: earned}) : undefined,
+          );
+        } else {
+          notify.ok(
+            t('platforms.tasks.checkinDone'),
+            earned > 0
+              ? t('platforms.checkinEarned', {n: earned})
+              : task.checkin?.message || undefined,
+          );
+        }
       }
       // DuMate 的写接口只回动作结果（不含整页快照），统一重读一次；
       // Loomy 的动作返回里带着最新状态，直接合并省一次往返。
@@ -601,21 +611,41 @@ export function PlatformTasksPanel({
                 {t('platforms.tasks.checkinRun')}
               </Button>
             </div>
-            <div className="px-3.5 py-3">
+            <div className="space-y-2 px-3.5 py-3">
               {checkin ? (
-                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-                  <Metric label={t('platforms.tasks.balance')} value={checkin.balance} />
-                  <Metric
-                    label={t('platforms.tasks.lastResult')}
-                    value={
-                      checkin.already
-                        ? t('platforms.tasks.checkinAlready')
-                        : checkin.message || (checkin.ok
-                          ? t('platforms.tasks.checkinDone')
-                          : t('platforms.checkinFailed'))
-                    }
-                  />
-                </div>
+                <>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-4">
+                    <Metric label={t('platforms.tasks.balance')} value={checkin.balance} />
+                    {/* 每天 500 分是服务端 00:00 自动发的，所以「已签到」时
+                        也可能有到账额；这里展示的是最近一次真正到账的那笔。 */}
+                    <Metric
+                      label={t('platforms.tasks.checkinEarnedLabel')}
+                      value={
+                        typeof checkin.earned_credit === 'number' && checkin.earned_credit > 0
+                          ? `+${checkin.earned_credit}`
+                          : 0
+                      }
+                      hint={checkin.earned_at
+                        ? fmtDateTime(checkin.earned_at * 1000)
+                        : undefined}
+                    />
+                    <Metric
+                      label={t('platforms.tasks.checkinMonthPoints')}
+                      value={checkin.month_points}
+                    />
+                    <Metric
+                      label={t('platforms.tasks.checkinTotalTimes')}
+                      value={checkin.total_times}
+                    />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {checkin.already
+                      ? t('platforms.tasks.checkinAlready')
+                      : checkin.message || (checkin.ok
+                        ? t('platforms.tasks.checkinDone')
+                        : t('platforms.checkinFailed'))}
+                  </p>
+                </>
               ) : (
                 <p className="text-[11px] text-muted-foreground">
                   {t('platforms.tasks.checkinDesc')}
@@ -1003,13 +1033,23 @@ export function PlatformTasksPanel({
 }
 
 /** 一格指标：值缺失时显示「—」而不是 0（0 会被读成「真的没有了」）。 */
-function Metric({label, value}: {label: string; value: string | number | null | undefined}) {
+function Metric({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string | number | null | undefined;
+  /** 可选副标题（例如到账时刻），用于解释这个数字是哪一次的。 */
+  hint?: string;
+}) {
   return (
     <div className="flex flex-col gap-0.5">
       <span className="text-muted-foreground">{label}</span>
       <span className="tabular-nums text-foreground">
         {value === null || value === undefined || value === '' ? '—' : value}
       </span>
+      {hint ? <span className="text-[10px] text-muted-foreground">{hint}</span> : null}
     </div>
   );
 }

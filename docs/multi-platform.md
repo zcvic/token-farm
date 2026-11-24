@@ -604,6 +604,13 @@ DuMate（百度搭子）复用同一组契约，但动作集合不同：任务�
 任务写操作按账号串行，但用的是独立的 `_task_locks`，不能复用 token 锁：
 完成任务途中 `_token_for` 会拿 token 锁，同一把锁不可重入会死锁。
 
+DuMate 的每日签到奖励由服务端 00:00 自动发放，手动签到时 `hasIssued` 往往已是
+`true`、余额差为 0。适配器因此从 `quota_overview.packages` 里认当天那笔
+`source='login_bonus'` 的发放额作为 `earned_credit`，用 `checkin.auto_grant_at`
+做每日幂等，保证「签到收支」只记一次。对话消耗走
+`/points/records/usage`（按会话记账），在账号用量弹窗里展示今日 / 近 7 天消耗；
+它不写 `usage_daily.credit`（上游对话 usage 只有 token，没有积分字段）。
+
 前端按 `platform === 'dumate'` 渲染成长任务 / 抽奖 / 邀请三个分段；Loomy 的
 「激活状态 / 兑换码」分段不出现。任务面板字段见 `web/lib/types.ts`
 的 `PlatformTaskItem` / `PlatformDrawStatus` / `PlatformInviteStatus`。

@@ -32,13 +32,26 @@
 #          → server/platforms/dumate/client.py + adapter.py
 #        · 签到：GET /api/dumate/points/loginBonusInfo、
 #          POST /api/dumate/points/loginBonus。→ client.checkin / adapter.checkin
+#          每日 500 分是服务端 **00:00 自动发放**，手动签到时 hasIssued 常已为
+#          true，loginBonus 不再发奖 → 余额前后差恒为 0。参考实现从
+#          quota_overview 的 packages 里取 source='login_bonus' 且 startDate
+#          落在当天的包，用其 total 补记到账额，并按 startDate 去重
+#          （本仓存 checkin.auto_grant_at）。
 #        · 积分：GET /api/dumate/points/quota_overview?clientType=desktop&
 #          timezone=Asia%2FShanghai → totalPoints / usedPoints / subscription /
 #          incremental / isSubscribed / modelThrottleInfo。
 #          包级到期在 subscription[] / incremental[] 里：expireDate /
-#          pointsExpireDate（**epoch 秒 * 1000，即毫秒**）。client 先折成毫秒
-#          统一存放，adapter.credits 再归一成 {'amount', 'expire_at', 'label'}，
-#          amount 是包剩余、expire_at 是 epoch 秒（与前端契约一致）。
+#          pointsExpireDate（**epoch 秒 * 1000，即毫秒**）；startDate 是发放时刻
+#          （秒），本仓折成毫秒存 granted_at。client 先折成毫秒统一存放，
+#          adapter.credits 再归一成 {'amount', 'expire_at', 'label'}，amount 是
+#          包剩余、expire_at 是 epoch 秒（与前端契约一致）。
+#        · 消耗：GET /api/dumate/points/records/usage?startAt=<s>&endAt=<s>&
+#          page=&limit= —— 必须带 startAt/endAt（缺一个报「参数错误:StartAt」）。
+#          返回 {consumedPoints, totalCount, list[]}；list 里 createdAt 是秒、
+#          pointsChange 是带负号字符串、conversationName 是会话名。对话题 usage
+#          只有 prompt/completion tokens，**不含积分**；参考仓用余额游标差估算
+#          每次扣费（points-cursor.js，60s 节流，并发标 inexact）。本仓不写
+#          usage_daily.credit，只在用量弹窗按窗口汇总展示（精确到会话记录）。
 #        · 模型目录三级降级：桌面端 opencode.json → 进程缓存 → 包内
 #          catalog.json 快照。对外模型名加 `dumate/` 前缀（参考仓是裸名）。
 #        · 业务码：HTTP 200 仍要读 `code`（code=0 且 success!=false 才成功）；

@@ -433,6 +433,152 @@ class DumateAdapterTest(unittest.TestCase):
         self.assertEqual(result['total_times'], 5)
         self.assertEqual(store.read_account('dm_1')['checkin']['total_times'], 5)
 
+    def test_checkin_records_auto_granted_login_bonus(self) -> None:
+        """每日奖励由服务端 00:00 自动发放：已签到时也要补记这笔收入。"""
+        self._seed()
+        # 发放时刻必须是「今天」，否则会被 `_today_login_bonus` 跳过。
+        granted_ms = int(db.day_start_ts() * 1000) + 3600_000
+        claims = {'n': 0}
+
+        async def fake_quota(cookie, **kwargs):
+            return {'left': 500, 'total': 500, 'used': 0,
+                    'packages': [{'source': 'login_bonus', 'total': 500,
+                                  'granted_at': granted_ms,
+                                  'expire_at': granted_ms + 86400_000}]}
+
+        async def fake_info(cookie, **kwargs):
+            return {'has_issued': True, 'total_times': 1,
+                    'sign_in_days': [1], 'month_points': 500}
+
+        async def fail_claim(cookie, **kwargs):
+            claims['n'] += 1
+            raise AssertionError('already issued should not claim')
+
+        with mock.patch.object(client, 'quota_overview', new=fake_quota), \
+                mock.patch.object(client, 'login_bonus_info', new=fake_info), \
+                mock.patch.object(client, 'claim_login_bonus', new=fail_claim):
+            first = asyncio.run(self.adapter.checkin('dm_1'))
+            second = asyncio.run(self.adapter.checkin('dm_1'))
+
+        self.assertTrue(first['already'])
+        self.assertEqual(first['earned_credit'], 500)
+        self.assertEqual(first['last_earned'], 500)
+        # 同一笔自动发放不能因为重复点击再记一次收入。
+        self.assertEqual(second['earned_credit'], 0)
+        self.assertEqual(second['last_earned'], 500)
+        self.assertEqual(claims['n'], 0)
+        stored = store.read_account('dm_1')['checkin']
+        self.assertEqual(stored['earned_credit'], 500)
+        self.assertEqual(stored['auto_grant_at'], granted_ms)
+        self.assertEqual(stored['month_points'], 500)
+
+    def test_checkin_records_claim_balance_delta(self) -> None:
+        """真正由本次领取发放时，用余额前后差记到账额。"""
+        self._seed()
+        balances = {'left': 100}
+
+        async def fake_quota(cookie, **kwargs):
+            return {'left': balances['left'], 'total': 500, 'used': 0,
+                    'packages': []}
+
+        async def fake_info(cookie, **kwargs):
+            return {'has_issued': False, 'total_times': 2,
+                    'sign_in_days': [1, 2], 'month_points': 30}
+
+        async def fake_claim(cookie, **kwargs):
+            balances['left'] = 500
+            return {}
+
+        with mock.patch.object(client, 'quota_overview', new=fake_quota), \
+                mock.patch.object(client, 'login_bonus_info', new=fake_info), \
+                mock.patch.object(client, 'claim_login_bonus', new=fake_claim):
+            out = asyncio.run(self.adapter.checkin('dm_1'))
+
+        self.assertFalse(out['already'])
+        self.assertEqual(out['earned_credit'], 400)
+        stored = store.read_account('dm_1')['checkin']
+        self.assertEqual(stored['earned_credit'], 400)
+        self.assertGreater(stored['auto_grant_at'], 0)
+
+    def test_client_usage_records_normalizes(self) -> None:
+        captured: dict = {}
+
+        async def fake_web(method, path, cookie, **kwargs):
+            captured['method'] = method
+            captured['path'] = path
+            return {'result': {
+                'consumedPoints': '12.50', 'totalCount': 2,
+                'list': [{'createdAt': 1700000000,
+                          'pointsChange': '-5.58',
+                          'conversationName': '会话 A',
+                          'packageId': 'p1'}],
+            }}
+
+        with mock.patch.object(client, '_web_json', new=fake_web):
+            out = asyncio.run(client.usage_records(
+                _COOKIE, start_at=1700000000, end_at=1700086400,
+                page=2, limit=50))
+
+        self.assertEqual(captured['method'], 'GET')
+        for part in ('startAt=1700000000', 'endAt=1700086400',
+                     'page=2', 'limit=50'):
+            self.assertIn(part, captured['path'])
+        self.assertEqual(out['consumed_points'], 12.5)
+        self.assertEqual(out['total_count'], 2)
+        # 上游 pointsChange 是带负号的字符串，保留符号。
+        self.assertEqual(out['list'][0]['points'], -5.58)
+        self.assertEqual(out['list'][0]['conversation'], '会话 A')
+        self.assertEqual(out['list'][0]['at'], 1700000000)
+
+    def test_client_quota_overview_exposes_granted_at(self) -> None:
+        async def fake_web(method, path, cookie, **kwargs):
+            return {'result': {
+                'totalPoints': 500, 'usedPoints': 0,
+                'incremental': [{
+                    'source': 'login_bonus', 'totalPoints': 500,
+                    'usedPoints': 0, 'startDate': 1700000000,
+                    'expireDate': 1700086400,
+                }],
+            }}
+
+        with mock.patch.object(client, '_web_json', new=fake_web):
+            out = asyncio.run(client.quota_overview(_COOKIE))
+
+        package = out['packages'][0]
+        self.assertEqual(package['source'], 'login_bonus')
+        # 上游 startDate 是秒，本仓统一毫秒。
+        self.assertEqual(package['granted_at'], 1700000000000)
+        self.assertEqual(package['expire_at'], 1700086400000)
+
+    def test_usage_includes_conversation_consumption(self) -> None:
+        self._seed()
+        windows: list[tuple] = []
+
+        async def fake_quota(cookie, **kwargs):
+            return {'left': 100, 'total': 500, 'used': 0, 'packages': []}
+
+        async def fake_records(cookie, *, start_at=None, end_at=None,
+                               limit=None, **kwargs):
+            windows.append((start_at, end_at, limit))
+            return {'consumed_points': 12.5, 'total_count': 3,
+                    'list': [{'at': 1000, 'points': -5.5,
+                              'conversation': 'c1'}]}
+
+        with mock.patch.object(client, 'quota_overview', new=fake_quota), \
+                mock.patch.object(client, 'usage_records', new=fake_records):
+            out = asyncio.run(self.adapter.usage('dm_1'))
+
+        consumed = out['consumed']
+        self.assertEqual(consumed['today'], 12.5)
+        self.assertEqual(consumed['today_records'], 3)
+        self.assertEqual(consumed['week'], 12.5)
+        self.assertEqual(consumed['recent'][0]['conversation'], 'c1')
+        self.assertEqual(out['errors'], [])
+        # 第一次查今天、第二次查近 7 天（含今天）。
+        self.assertEqual(windows[0][0], db.day_start_ts())
+        self.assertEqual(windows[1][0], db.day_start_ts() - 6 * 86400)
+        self.assertTrue(all(end > start for start, end, _ in windows))
+
     def test_credits_maps_quota_overview(self) -> None:
         self._seed()
 
@@ -509,7 +655,12 @@ class DumateAdapterTest(unittest.TestCase):
     def test_task_status_surfaces_checkin_from_account_page(self) -> None:
         """签到发生在账号页（批量签到）时，任务面板也要显示上次结果。"""
         self._seed(checkin={'last_at': 1700000000,
-                            'last_result': '签到成功 +5'},
+                            'last_result': '签到成功 +5',
+                            'already': True,
+                            'earned_credit': 500,
+                            'earned_at': 1700000005,
+                            'month_points': 1500,
+                            'total_times': 3},
                    points={'left': 120, 'at': 1700000000})
 
         async def empty_tasks(cookie, **kwargs):
@@ -533,8 +684,14 @@ class DumateAdapterTest(unittest.TestCase):
             out = asyncio.run(self.adapter.task_status('dm_1'))
 
         self.assertTrue(out['checkin']['ok'])
+        self.assertTrue(out['checkin']['already'])
         self.assertEqual(out['checkin']['balance'], 120)
         self.assertIn('签到成功', out['checkin']['message'])
+        # 账号页签到留下的到账额 / 统计要原样带给任务面板。
+        self.assertEqual(out['checkin']['earned_credit'], 500)
+        self.assertEqual(out['checkin']['earned_at'], 1700000005)
+        self.assertEqual(out['checkin']['month_points'], 1500)
+        self.assertEqual(out['checkin']['total_times'], 3)
 
     def test_task_status_falls_back_to_cache_when_all_reads_fail(self) -> None:
         cache = {

@@ -1986,8 +1986,60 @@ export function PlatformAccountsPanel({
                       )}
                     </div>
                   )}
+                  {usage.consumed && (
+                    <div className="rounded-[12px] border border-border/60 bg-muted/30 px-3 py-2">
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                        <Activity className="h-3.5 w-3.5" />
+                        {t('platforms.usageConsumedTitle')}
+                      </div>
+                      <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                        <span>{t('platforms.usageConsumedToday')}</span>
+                        <span className="text-right tabular-nums text-foreground">
+                          {creditNum(usage.consumed.today)}
+                          {' · '}
+                          {t('platforms.usageConsumedRecords', {
+                            n: usage.consumed.today_records,
+                          })}
+                        </span>
+                        <span>{t('platforms.usageConsumedWeek')}</span>
+                        <span className="text-right tabular-nums text-foreground">
+                          {creditNum(usage.consumed.week)}
+                          {' · '}
+                          {t('platforms.usageConsumedRecords', {
+                            n: usage.consumed.week_records,
+                          })}
+                        </span>
+                      </div>
+                      {!!usage.consumed.recent?.length && (
+                        <div className="mt-2 border-t border-border/60 pt-2">
+                          <div className="mb-1 text-[11px] text-muted-foreground">
+                            {t('platforms.usageConsumedRecent')}
+                          </div>
+                          <ul className="space-y-0.5">
+                            {usage.consumed.recent.slice(0, 8).map((row, i) => (
+                              <li
+                                key={i}
+                                className="flex items-center justify-between gap-2 text-[11px]"
+                              >
+                                <span className="truncate text-muted-foreground">
+                                  {row.conversation || t('platforms.usageConsumedTitle')}
+                                </span>
+                                <span className="shrink-0 tabular-nums text-foreground">
+                                  {creditNum(row.points)}
+                                  {row.at ? ` · ${fmtDateTime(row.at * 1000)}` : ''}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+                        {t('platforms.usageConsumedNote')}
+                      </p>
+                    </div>
+                  )}
                   {usage.session_usage === null && usage.entitlement === null
-                    && typeof usageCredit?.credits !== 'number' && (
+                    && typeof usageCredit?.credits !== 'number' && !usage.consumed && (
                     <p className="text-xs text-muted-foreground">{t('platforms.usageEmpty')}</p>
                   )}
                   {!!usage.errors?.length && (

@@ -60,11 +60,24 @@ token 约 1 小时，进程内缓存并在提前 5 分钟刷新；解析失败�
 
 ## 3. 积分 / 签到
 
-- **积分**：`GET /points/quota_overview` 的 `left`，默认 60 秒缓存。
-- **签到**：`loginBonusInfo` 查是否已签，未签再 `loginBonus` 领奖；重复调用
-  幂等。`earned_credit` 用签到前后 `quota_overview.left` 的差额计算。
-- **用量弹窗**：余额 + 套餐明细（`quota_overview.packages`，过期时间上游给
-  毫秒，对外统一成 epoch 秒）。
+- **积分**：`GET /points/quota_overview` 的 `left`，默认 60 秒缓存。套餐明细里的
+  `granted_at` 由上游 `startDate`（秒）折成毫秒。
+- **签到**：每日奖励由服务端在 **00:00 自动发放**，`loginBonusInfo.hasIssued`
+  通常已经为 `true`，手动 `loginBonus` 不会再发。因此 `earned_credit` 不能只看
+  签到前后的 `left` 差额（会恒为 0）：适配器会从 `packages` 里找
+  `source='login_bonus'` 且 `granted_at` 落在当天的包，取 `total` 作为到账额，
+  并把这次发放时刻记进账号的 `checkin.auto_grant_at`，反复点签到不会重复计入
+  「积分收支」。最近一次真正到账的 `earned_credit` / `earned_at` 会持久化，
+  重载后仍可见；`month_points` / `total_times` / `sign_in_days` 原样透传给面板。
+- **对话消耗**：`GET /points/records/usage?startAt=&endAt=&page=&limit=`
+  （必须带 `startAt` / `endAt`，否则报「参数错误:StartAt」）。`consumedPoints`
+  是窗口内总扣费，`list[]` 是逐条扣费（`createdAt` 秒、`pointsChange` 带负号
+  字符串、`conversationName`）。`adapter.usage` 查「今天」与「近 7 天」两段，
+  在用量弹窗展示消耗额与最近明细。上游对话题 `usage` 不含积分字段（只有
+  token），所以本端**不写** `usage_daily.credit`；积分收支的支出口径仍以
+  WorkBuddy 的逐请求扣费为准，DuMate 的消耗以弹窗里的会话记录为准。
+- **用量弹窗**：余额 + 套餐明细（过期时间上游给毫秒，对外统一成 epoch 秒）+
+  今日 / 近 7 天对话消耗与最近扣费记录。
 
 ---
 

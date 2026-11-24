@@ -32,6 +32,10 @@ USER_INFO_PATH = '/api/dumate/user/info'
 LOGIN_BONUS_PATH = '/api/dumate/points/loginBonus'
 LOGIN_BONUS_INFO_PATH = '/api/dumate/points/loginBonusInfo'
 QUOTA_OVERVIEW_PATH = '/api/dumate/points/quota_overview'
+# 积分消耗记录（对话扣费明细）。实测必须带 startAt/endAt，否则报「参数错误:StartAt」。
+USAGE_RECORDS_PATH = '/api/dumate/points/records/usage'
+# 登录奖励在额度包里以这个 source 出现（服务端每天 00:00 自动发放）。
+LOGIN_BONUS_SOURCE = 'login_bonus'
 DRAW_STATUS_PATH = '/api/dumate/activity/growth-plan/draw/status'
 DRAW_PATH = '/api/dumate/activity/growth-plan/draw'
 TASKS_PATH = '/api/dumate/activity/growth-plan/tasks'

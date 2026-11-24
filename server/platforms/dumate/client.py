@@ -27,8 +27,8 @@ from . import constants as C
 
 __all__ = [
     'fetch_token', 'fetch_user_info', 'login_bonus_info', 'claim_login_bonus',
-    'quota_overview', 'tasks', 'complete_task', 'draw_status', 'draw',
-    'claim_prize', 'invitation_code', 'invited_count',
+    'quota_overview', 'usage_records', 'tasks', 'complete_task',
+    'draw_status', 'draw', 'claim_prize', 'invitation_code', 'invited_count',
     'redeem_invitation_code', 'chat', 'open_chat',
 ]
 
@@ -306,6 +306,11 @@ async def quota_overview(cookie: str, *, proxy: str | None = None,
                               or None),
                 'points_expire_at': (int(entry.get('pointsExpireDate') or 0)
                                      * 1000 or None),
+                # 包的**发放时刻**（上游 startDate 是秒，本仓统一毫秒）。登录奖励
+                # 每天 00:00 自动发放，签到动作只是「确认」；要认出今天那笔包的
+                # source='login_bonus' 并用 granted_at 判重，靠的就是这个字段。
+                'granted_at': (int(entry.get('startDate') or 0) * 1000
+                               or None),
                 'product': str(entry.get('product') or ''),
                 'status': str(entry.get('status') or ''),
             })
@@ -321,6 +326,59 @@ async def quota_overview(cookie: str, *, proxy: str | None = None,
                           and throttle.get('throttled')),
         'packages': packages,
         'raw': data,
+    }
+
+
+async def usage_records(cookie: str, *, start_at: int | None = None,
+                        end_at: int | None = None, page: int | None = None,
+                        limit: int | None = None, proxy: str | None = None,
+                        timeout: float = C.API_TIMEOUT) -> dict:
+    """积分消耗记录（`/points/records/usage`，对话扣费明细）。
+
+    上游**必须**带 `startAt` / `endAt`，缺一个就报「参数错误:StartAt」。返回的
+    `consumedPoints` 是窗口内总扣费（字符串），`list` 是逐条记录：
+    `createdAt`（秒）、`pointsChange`（带负号的字符串）、`conversationName`。
+    计费规则在上游，本地无法从 token 数推算，所以只如实转述。
+    """
+    query: list[str] = []
+    if start_at:
+        query.append(f'startAt={int(start_at)}')
+    if end_at:
+        query.append(f'endAt={int(end_at)}')
+    if page:
+        query.append(f'page={int(page)}')
+    if limit:
+        query.append(f'limit={int(limit)}')
+    suffix = ('?' + '&'.join(query)) if query else ''
+    payload = await _web_json('GET', C.USAGE_RECORDS_PATH + suffix, cookie,
+                              proxy=proxy, timeout=timeout)
+    data = unwrap_result(payload)
+    rows: list[dict] = []
+    for item in (data.get('list') or []):
+        if not isinstance(item, dict):
+            continue
+        rows.append({
+            'at': _optional_int(item.get('createdAt')
+                                if item.get('createdAt') is not None
+                                else item.get('created_at')),
+            # pointsChange 是负值（扣费），保留符号：调用方按正负着色。
+            'points': _optional_float(item.get('pointsChange')
+                                      if item.get('pointsChange') is not None
+                                      else item.get('points_change')),
+            'conversation': str(item.get('conversationName')
+                                or item.get('conversation_name') or ''),
+            'package_id': str(item.get('packageId')
+                              or item.get('package_id') or ''),
+        })
+    return {
+        'consumed_points': _optional_float(
+            data.get('consumedPoints')
+            if data.get('consumedPoints') is not None
+            else data.get('consumed_points')) or 0.0,
+        'total_count': _int(data.get('totalCount')
+                            if data.get('totalCount') is not None
+                            else data.get('total_count')),
+        'list': rows,
     }
 
 
@@ -347,6 +405,16 @@ def _optional_int(value: object) -> int | None:
     if value is None or value == '':
         return None
     return _int(value)
+
+
+def _optional_float(value: object) -> float | None:
+    """数字字段可能是带符号的字符串（`pointsChange: "-5.58"`）；认不出返回 None。"""
+    if isinstance(value, bool) or value is None or value == '':
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_task(task: dict, group: dict) -> dict:

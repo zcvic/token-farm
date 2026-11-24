@@ -2354,6 +2354,22 @@ export interface PlatformUsage {
   realm: string;
   session_usage: Record<string, unknown> | null;
   entitlement: Record<string, unknown> | null;
+  /** DuMate：对话消耗（按会话记账，来自 `/points/records/usage`） */
+  consumed?: {
+    /** 今日消耗积分（正数） */
+    today: number;
+    today_records: number;
+    /** 近 7 天消耗积分（含今天） */
+    week: number;
+    week_records: number;
+    /** 近 7 天最近若干条明细（points 为负值） */
+    recent?: {
+      at?: number | null;
+      points?: number | null;
+      conversation?: string;
+      package_id?: string;
+    }[];
+  };
   errors: {endpoint: string; code: string; message: string}[];
 }
 
@@ -2680,8 +2696,21 @@ export interface PlatformTaskCheckin {
   daily?: number | null;
   daily_quota?: number | null;
   message?: string;
+  /** 最近一次**真正到账**的签到奖励（重复点击不清零） */
   earned_credit?: number;
+  /** 本次动作的实际到账额（重复点击为 0） */
+  earned_this_run?: number;
+  /** 上面这笔奖励的到账时刻（epoch 秒） */
+  earned_at?: number | null;
   credits?: number;
+  /** DuMate：累计签到次数 */
+  total_times?: number | null;
+  /** DuMate：累计签到积分 */
+  total_points?: number | null;
+  /** DuMate：本月签到积分 */
+  month_points?: number | null;
+  /** DuMate：本月已签到的日期列表 */
+  sign_in_days?: unknown[];
 }
 
 /** `GET /api/platforms/{name}/accounts/{uid}/tasks`：任务面板状态。 */

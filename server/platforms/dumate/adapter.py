@@ -71,6 +71,36 @@ def _num(value: object) -> float | None:
         return None
 
 
+def _int_or_zero(value: object) -> int:
+    number = _num(value)
+    return int(number) if number is not None else 0
+
+
+def _today_login_bonus(packages: object) -> dict | None:
+    """从额度包里找出**今天**那笔登录奖励（服务端每天 00:00 自动发放）。
+
+    为什么不能只靠余额前后差：奖励通常在 00:00 就发了，手动签到只会看到
+    `has_issued=true`，余额早已包含这笔，差值恒为 0 —— 于是「签到得了多少
+    积分」永远是空的，积分收支里也没有收入。这里按 `source=login_bonus`
+    与 `granted_at >= 今天零点` 认出那笔发放，金额用包的 `total`。
+    """
+    if not isinstance(packages, list):
+        return None
+    start_ms = int(db.day_start_ts() * 1000)
+    for item in packages:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get('source') or '') != C.LOGIN_BONUS_SOURCE:
+            continue
+        granted = _num(item.get('granted_at'))
+        total = _num(item.get('total'))
+        if granted is None or total is None or total <= 0:
+            continue
+        if int(granted) >= start_ms:
+            return item
+    return None
+
+
 def normalize_token_fields(body: dict) -> bool:
     """把 `max_completion_tokens` 收敛成唯一的 `max_tokens`，返回是否改写。
 
@@ -404,20 +434,24 @@ class DumateAdapter(PlatformAdapter):
         timeout = runtime_settings.credits_timeout(self.name)
         cookie = str(account.get('cookie') or '')
 
+        before_snapshot: dict = {}
         before = None
         try:
-            snapshot = await client.quota_overview(cookie, proxy=proxy,
-                                                   timeout=timeout)
-            before = _num(snapshot.get('left'))
+            before_snapshot = await client.quota_overview(
+                cookie, proxy=proxy, timeout=timeout)
+            before = _num(before_snapshot.get('left'))
         except PlatformError:
+            before_snapshot = {}
             before = None
 
         info = await client.login_bonus_info(cookie, proxy=proxy, timeout=timeout)
         already = bool(info.get('has_issued'))
+        claimed = False
         message = '今日已签到' if already else ''
         if not already:
             try:
                 await client.claim_login_bonus(cookie, proxy=proxy, timeout=timeout)
+                claimed = True
                 message = '签到成功'
             except PlatformError as exc:
                 if exc.status == 401:
@@ -429,31 +463,69 @@ class DumateAdapter(PlatformAdapter):
                 else:
                     raise
 
+        after_snapshot: dict = {}
         after = None
         try:
-            snapshot = await client.quota_overview(cookie, proxy=proxy,
-                                                   timeout=timeout)
-            after = _num(snapshot.get('left'))
+            after_snapshot = await client.quota_overview(
+                cookie, proxy=proxy, timeout=timeout)
+            after = _num(after_snapshot.get('left'))
         except PlatformError:
+            after_snapshot = {}
             after = None
 
-        earned = 0
-        if not already and before is not None and after is not None \
-                and after > before:
-            earned = int(round(after - before))
+        # 登录奖励在服务端**当天 00:00 已自动发放**，手动签到通常只会看到
+        # `has_issued=true`；余额早已含这笔，前后差值恒为 0。这里也从额度包里
+        # 认出今天那笔 `source=login_bonus` 的发放额，并用 `auto_grant_at`
+        # 判重——反复点签到不能把同一笔奖励重复记成收入。
+        prev_checkin = (account.get('checkin')
+                        if isinstance(account.get('checkin'), dict) else {})
+        auto_grant_at = _int_or_zero(prev_checkin.get('auto_grant_at'))
+        grant = _today_login_bonus(
+            after_snapshot.get('packages')
+            if after_snapshot.get('packages') is not None
+            else before_snapshot.get('packages'))
+        grant_at = _int_or_zero(grant.get('granted_at')) if grant else 0
 
+        earned = 0
+        if claimed:
+            if before is not None and after is not None and after > before:
+                earned = int(round(after - before))
+            elif grant:
+                # 结算有延迟时余额还没变，退回用发放包的真实金额。
+                earned = int(round(_num(grant.get('total')) or 0))
+            if not grant_at:
+                # 本次已经用前后差额记账；把「今日已记」标到此刻，防止结算后
+                # 才出现的登录奖励包再被补记一遍。
+                grant_at = int(time.time() * 1000)
+        elif grant and grant_at > auto_grant_at:
+            # 已签到：这次点击没有触发发放，但今天的自动奖励确实到账了。
+            earned = int(round(_num(grant.get('total')) or 0))
+
+        now = int(time.time())
+        prev_earned = _int_or_zero(prev_checkin.get('earned_credit'))
+        prev_earned_at = _int_or_zero(prev_checkin.get('earned_at'))
+        if earned > 0:
+            prev_earned = earned
+            prev_earned_at = now
         self._credits.pop(uid, None)
         checkin = {
-            'last_at': int(time.time()),
+            'last_at': now,
             'last_result': message,
+            'already': already,
             'total_times': info.get('total_times'),
+            'total_points': info.get('total_points'),
             'sign_in_days': info.get('sign_in_days') or [],
             'month_points': info.get('month_points'),
+            # 「上次真正到账的签到奖励」：再点一次已签到时仍保留旧值，
+            # 不会把面板上的「签到获得」清成 0。
+            'earned_credit': prev_earned,
+            'earned_at': prev_earned_at or None,
+            'auto_grant_at': grant_at or auto_grant_at or None,
         }
         patch: dict[str, Any] = {'checkin': checkin}
         if after is not None:
             patch['points'] = {'total': None, 'used': None, 'left': after,
-                               'at': int(time.time())}
+                               'at': now}
         try:
             store.patch_account(uid, patch)
         except (FileNotFoundError, ValueError, OSError):
@@ -464,11 +536,16 @@ class DumateAdapter(PlatformAdapter):
             'checked_in': True,
             'already': already,
             'credits': after if after is not None else (before or 0),
+            # 本次动作的真实到账额（写签到记录 / 积分收支用）。
             'earned_credit': earned,
+            # 上次真正到账额（界面展示用；repeat 点击不清零）。
+            'last_earned': prev_earned,
+            'earned_at': prev_earned_at or None,
             'message': message,
             'uid': uid,
             'realm': 'cn',
             'total_times': info.get('total_times'),
+            'total_points': info.get('total_points'),
             'sign_in_days': info.get('sign_in_days') or [],
             'month_points': info.get('month_points'),
         }
@@ -600,10 +677,16 @@ class DumateAdapter(PlatformAdapter):
                       if isinstance(account.get('points'), dict) else {})
             checkin = {
                 'ok': True,
-                'already': False,
+                'already': bool(last.get('already')),
                 'balance': points.get('left'),
                 'message': str(last.get('last_result') or ''),
                 'last_at': last.get('last_at'),
+                'earned_credit': last.get('earned_credit') or 0,
+                'earned_at': last.get('earned_at'),
+                'total_times': last.get('total_times'),
+                'total_points': last.get('total_points'),
+                'month_points': last.get('month_points'),
+                'sign_in_days': last.get('sign_in_days') or [],
             }
         return {
             'uid': uid,
@@ -657,22 +740,26 @@ class DumateAdapter(PlatformAdapter):
         result = await self.checkin(account_id)
         account = self._require(account_id)
         uid = str(account.get('uid') or '')
+        stored = (account.get('checkin')
+                  if isinstance(account.get('checkin'), dict) else {})
         cached = self._task_cache(account)
-        cached_checkin = dict(cached.get('checkin') or {})
-        cached_checkin.update({
+        panel = {
+            # `checkin()` 刚落盘了完整记录（含 earned_credit / month_points）；
+            # 账号读失败时才退回 taskCache 里的旧值。
+            **stored,
             'ok': bool(result.get('ok')),
             'already': bool(result.get('already')),
             'balance': result.get('credits'),
+            'credits': result.get('credits'),
             'message': result.get('message') or '',
-        })
-        self._write_task_cache(uid, checkin=cached_checkin)
+            'earned_credit': (result.get('last_earned')
+                              or stored.get('earned_credit') or 0),
+            'earned_this_run': result.get('earned_credit') or 0,
+        }
+        self._write_task_cache(uid, checkin=panel)
 
         snapshot = await self._task_snapshot(self._require(account_id))
-        snapshot['checkin'] = {
-            **cached_checkin,
-            'earned_credit': result.get('earned_credit') or 0,
-            'credits': result.get('credits'),
-        }
+        snapshot['checkin'] = panel
         snapshot['ok'] = True
         snapshot['action'] = 'checkin'
         return snapshot
@@ -927,7 +1014,42 @@ class DumateAdapter(PlatformAdapter):
         except PlatformError as exc:
             out['errors'].append({'endpoint': 'quota_overview',
                                   'code': exc.code, 'message': exc.message})
+        await self._add_consumption(account, out, proxy=proxy, timeout=timeout)
         return out
+
+    async def _add_consumption(self, account: dict, out: dict, *,
+                               proxy: str | None, timeout: float) -> None:
+        """补一段「对话消耗」：今日 / 近 7 天各查一次积分消耗记录。
+
+        上游没有「本次请求扣多少」的字段，真实扣费只体现在 `/points/records/usage`
+        的 `consumedPoints`（按会话记账，计费规则在上游）。两次查询分别对应
+        「今天」和「近 7 天」两个口径，失败只记进 `errors`，不影响余额显示。
+        """
+        cookie = str(account.get('cookie') or '')
+        now = int(time.time())
+        today = db.day_start_ts()
+        try:
+            day = await client.usage_records(
+                cookie, start_at=today, end_at=now, limit=1,
+                proxy=proxy, timeout=timeout)
+            week = await client.usage_records(
+                cookie, start_at=today - 6 * 86400, end_at=now, limit=20,
+                proxy=proxy, timeout=timeout)
+        except PlatformError as exc:
+            out['errors'].append({'endpoint': 'usage_records',
+                                  'code': exc.code, 'message': exc.message})
+            return
+
+        def amount(value: object) -> float:
+            return abs(_num(value) or 0.0)
+
+        out['consumed'] = {
+            'today': amount(day.get('consumed_points')),
+            'today_records': int(_num(day.get('total_count')) or 0),
+            'week': amount(week.get('consumed_points')),
+            'week_records': int(_num(week.get('total_count')) or 0),
+            'recent': _without_raw(week.get('list') or []),
+        }
 
     async def credits(self, account_id: str) -> dict:
         """积分余额快照（默认 60 秒缓存，`platforms.dumate.credits_ttl`）。"""
