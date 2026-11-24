@@ -181,7 +181,8 @@ RUN set -eu; \
     install_pkgs() { \
         apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update \
         && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git curl ca-certificates openssh-client tzdata; \
+            git curl ca-certificates openssh-client tzdata \
+            util-linux passwd; \
     }; \
     if [ -n "${DEBIAN_MIRROR}" ]; then \
         echo "apt: 使用指定软件源 ${DEBIAN_MIRROR}"; \
@@ -320,11 +321,18 @@ COPY CHANGELOG.md README.md /app/
 #
 # /app/.local 是 PYTHONUSERBASE 的落点（见上面的 ENV）：容器内更新装新依赖时
 # 只能写用户站点，且该目录必须**先存在**，否则重启后的新进程不在 sys.path 上找它。
+#
+# 10001 只是**默认值**：入口脚本启动时会按 PUID/PGID 把它改成目标值，所以这里
+# 不在镜像里写死 USER —— 属主要对齐到挂载目录的实际属主，那需要 root 权限。
+# 入口脚本以 root 起 → 改 app 的 uid/gid → chown 挂载目录 → setpriv 降权执行
+# CMD，业务进程始终是非 root（详见 deploy/docker-entrypoint.sh）。
 RUN useradd -u 10001 -m -s /bin/bash app \
     && mkdir -p /app/data /app/.local /opt/workbuddy2api \
+    && chmod +x /app/deploy/docker-entrypoint.sh \
+    && sed -i 's/\r$//' /app/deploy/docker-entrypoint.sh \
     && chown -R 10001:10001 /app /opt/workbuddy2api
 
-USER app
+ENTRYPOINT ["/app/deploy/docker-entrypoint.sh"]
 
 EXPOSE 7864
 

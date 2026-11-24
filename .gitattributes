@@ -11,3 +11,7 @@
 # 在任何平台解压都是可用的。不加这条的话，Linux 检出会是 LF，用户下到的包
 # 里就是 LF-only 的 .cmd。
 *.cmd text eol=crlf
+
+# Shell 脚本在容器里由 /bin/sh 直接执行，CRLF 会让 shebang 变成
+# `#!/bin/sh\r` 而报 ": not found"。锁成 LF，Windows 检出也一样。
+*.sh text eol=lf

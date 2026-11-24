@@ -99,7 +99,7 @@ git commit -m "upstream: 说清这次改了什么"
 除 misakano 面板仓外，2026-11 还有三个参考源。
 
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
-已核对的范围是 `80b4b21`（v2.11.10）→ `eb76ab8b`（v2.11.21）：
+已核对的范围是 `80b4b21`（v2.11.10）→ `caa82c22`（v2.11.23）：
 
 | 区间 | 取到的能力 |
 |---|---|
@@ -110,12 +110,13 @@ git commit -m "upstream: 说清这次改了什么"
 | `d780cab` → `2b6b386` | PG 备份按字节预算装批 + 失败退避 + keepalive；实时指标口径纠错（区间方向 / 桶内最大重叠 / 按 realm 取上限 / `/status` 短缓存）；客户端在途计数与 1 秒刷新；密钥 hash 唯一索引 + 并发 409；弹窗模型浮层碰撞边界；Docker 时区修正 |
 | `2b6b386` → `7d5b163`（v2.11.20） | 模型中心剔除视频 / 音频生成模型（含 `-video` / `-tts` / `-audio` 后缀，多模态对话模型保留）；统计页范围选择器补「昨日」 |
 | `7d5b163` → `eb76ab8b`（v2.11.21） | 字体改为随仓库分发（`next/font/local`，构建不再依赖 Google Fonts）；`.env.example` 数据卷默认改为命名卷，补首次部署防呆 |
+| `eb76ab8b` → `caa82c22`（v2.11.23） | compose 透传 `.env` 的 `WB_ADMIN_PASSWORD`、镜像名可覆盖；容器日志降噪（启动失败只留根因与修法、逐请求 access log 默认关）；入口脚本按 PUID/PGID 对齐挂载目录属主，NAS 不必开 SSH；i18n 术语统一 |
 
-这七批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
+这八批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
 国际版 agenttool 搜索、上游自己的 CI / 发版提交同样未取。逐项清单与
 「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批、第五批、
-第七批、第十二批、第十四批、第十六批段落里；Web 搜索的协议与错误语义单独写在
-[web-search-passthrough.md](web-search-passthrough.md)。
+第七批、第十二批、第十四批、第十六批、第十九批段落里；Web 搜索的协议与错误语义
+单独写在 [web-search-passthrough.md](web-search-passthrough.md)。
 
 > **面板批（2026-11-19，`d780cab` → `2b6b386`）**：这一批是 panel / Web /
 > Docker 改动，没有 Go `upstream/` 改动。落点与三处有意偏离：
@@ -167,6 +168,75 @@ git commit -m "upstream: 说清这次改了什么"
 > - `eb76ab8b` 是发版提交（只改上游 `CHANGELOG` 与版本号），不取。
 >
 > 本批没有 Go `upstream/` 改动。
+
+> **容器部署批（2026-11-22，`eb76ab8b` → `caa82c22`，v2.11.23）**：11 个非 merge
+> 提交里取 4 项、2 个发版提交不取，其余 5 项因架构不同不适用。逐条：
+>
+> - `e9790faf` compose 透传 `.env`：`WB_ADMIN_PASSWORD` 原来在
+>   `docker-compose.yml` 里是**注释掉的固定值**，而 `.env.example` 写明「留空则
+>   随机生成并打印到日志」—— 用户按模板填的密码根本不会进容器，只会静默走随机
+>   密码，还以为是配置没生效。改为 `${WB_ADMIN_PASSWORD:-}`（空值仍走
+>   `security.load_users` 的 `env_pwd or secrets.token_urlsafe(12)`，不会出现空
+>   口令管理员）；镜像名改为 `${WB_MANAGER_IMAGE:-token-farm:latest}`，默认仍是
+>   本地构建产物名，想用预构建镜像时设变量 + `--no-build`。
+> - `58189e99` 容器日志降噪（issue #30 的现场）：`server/main.py` 的 lifespan
+>   原来是一整段裸函数，任何一步启动失败都会被 Starlette 把**完整异常链**打到
+>   stderr —— 实测一次数据库权限故障刷 350 行，其中 96 行是
+>   `merged_lifespan` / `__aenter__` 之类的框架帧，带修法的
+>   `RuntimeError: 无法打开数据库文件...` 被埋在最后。新增 `server/logsetup.py`：
+>   lifespan 拆成 `_start_services()` / `_stop_services()`，启动失败走
+>   `exit_on_startup_failure()`（异常链逐层「类型: 说明」+ 只留项目栈帧 +
+>   **直接写 stderr 后 `os._exit(1)`**）。
+>   上游第一版只 `raise SystemExit(1)`，实测仍被框架补 150 行栈，降噪只完成一半
+>   —— 本地按修正后的形态落地。逐请求 access log 默认关闭
+>   （`WB_ACCESS_LOG=0`）：容器日志会被 30s 一次的健康检查与前端轮询刷屏，而
+>   真正要查的访问信息在 `request_logs` / `ip_access_logs` 两张表里。
+>   `WB_STARTUP_FAILURE_STACK=0` 可连精简栈一起关掉。
+> - `b7ce2197` + `a9063d79` 入口脚本按 PUID/PGID 对齐挂载目录属主（合并为一项）：
+>   bind mount 的属主由宿主机决定（群晖 1026、普通 Linux 1000、root 建目录则
+>   是 0），镜像里固定跑 10001 时启动第一步 `DATA_DIR.mkdir()` 就是
+>   `PermissionError`，然后 `restart: unless-stopped` 无限重启 —— 而修法要求
+>   用户在 NAS 上开 SSH。新增 `deploy/docker-entrypoint.sh`：以 root 起，
+>   `/proc/mounts` 判断哪些目录**真被挂载**（不假定布局），按 PUID/PGID 或挂载
+>   目录实际属主对齐 `app` 的 uid/gid，chown 后降权执行 CMD；探测到属主是 0 时
+>   回落 10001，绝不以 root 跑业务进程；`WB_FIX_OWNERSHIP=0` **只跳过 chown**，
+>   不做 early-exit（上游第一版写成 `exec "$@"` 把后续提示路径全跳过了）。
+>   Dockerfile 删掉 `USER app`、改 `ENTRYPOINT`。
+>   **本地偏离**：上游用 Alpine + `su-exec` + `shadow`，本地是 Debian-slim，降权
+>   用 util-linux 的 `setpriv --reuid --regid --init-groups`，uid/gid 改名用
+>   `passwd` 包的 `usermod`/`groupmod`（两者都显式写进运行阶段的 apt 列表）。
+>   `.gitattributes` 补 `*.sh text eol=lf` —— CRLF 会让 shebang 变成
+>   `#!/bin/sh\r` 而报 `: not found`。
+>   `dev/check_dockerfile.py` 补三条结构断言（必须有 ENTRYPOINT、最终阶段不得写
+>   `USER`、入口脚本用到的外部命令必须在最终阶段装好），并**实测能拦住**三种
+>   真实故障（删 ENTRYPOINT / 加回 USER / 漏装 util-linux）。
+>   最后一条来自 `9f040fe3` 的教训：上游把 `su-exec` 只装在中间阶段，跨阶段
+>   `COPY` 只搬文件不带依赖，容器启动几毫秒就 exit 127，而当时那条断言在**整个
+>   文件**里搜，中间阶段那行就满足了它 —— 等于从没检查过「工具是否真在最终镜像
+>   里」。
+> - `7b2f76c7` i18n 术语统一：同一中文「反代网关」在外文译文里不一致（en 一律
+>   gateway，ja/ko 在标题里多写 reverse proxy，繁中 9 处写「反向代理」）。只改
+>   ja/ko/zh-TW 的译文值，不动 key、不动中文源文、不动代码。本地 ja/ko 各 1 处、
+>   zh-TW 9 处，另把本地独有的 `dashboard.platformScope` 与两条 `phrases` 一并
+>   统一（上游没有这两个 key）。
+>
+> **不取**（架构不同，不是「没价值」）：
+>
+> - `faf69381` / `b5024a6f` / `3901a932` 镜像内置上游任务脚本 + 新增
+>   `docker-compose.full.yml` 双服务方案：会在本仓 Dockerfile 里加
+>   `FROM ${UPSTREAM_IMAGE} AS upstream` 与 `COPY --from=upstream`，让管理端镜像
+>   **硬依赖外部 GHCR 镜像**才能构建（上游自己也承认「拉不到时构建会失败」），
+>   破坏本仓「镜像不含上游服务、可离线构建」的取舍。`3901a932` 只是给这套接线
+>   补版本钉住，同源不取。
+> - `9f040fe3` Alpine 运行阶段补装 `su-exec`/`shadow`：本仓是 Debian-slim，没有
+>   这两个包，也没有那个 bug。**只取其教训**（见上面 `dev/check_dockerfile.py`
+>   的第 7 条）。
+> - `caa82c22` / `efaef036` 发版提交（只改上游 `CHANGELOG` 与版本号），不取。
+>
+> 本批没有 Go `upstream/` 改动。**发布前需要真机验证**：本机 docker daemon 未
+> 运行，`setpriv` 降权路径只在结构层面被测试锁住（语法、挂载点判断、PUID=0
+> 回落、工具齐备），没有跑过真实容器。第一次发版前请在有 docker 的机器上
+> `docker compose up -d --build` 起一次，确认容器内 `id` 是 PUID 而不是 0。
 
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：

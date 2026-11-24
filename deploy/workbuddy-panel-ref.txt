@@ -785,3 +785,106 @@ abed839572c786cecead9c422e1114639e3244f8
 #          加 14401 改判用例。
 9ad206bdc50971e0a082d4ea1273dca05e12591c
 d629a8ca9d0e7d48700d9fd7e462dfdd2cc268ff
+
+# ---- 2026-11 第十九批：面板仓 eb76ab8b → caa82c22（v2.11.23，11 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 4 项（两个 Docker 提交合并成一项落地）、2 个发版提交不取，
+#      其余 5 项因架构不同不适用。本批无 Go upstream/ 改动。
+#      已取（按本仓结构重写）：
+#        · e9790faf compose 透传 .env 的 WB_ADMIN_PASSWORD + 镜像名可覆盖：
+#          docker-compose.yml 里 WB_ADMIN_PASSWORD 原来是**注释掉的固定值**，
+#          而 .env.example 写着「留空则随机生成并打印到日志」—— 用户按模板填的
+#          初始密码根本不会进容器，只会静默走随机密码。改为
+#          WB_ADMIN_PASSWORD: ${WB_ADMIN_PASSWORD:-}（空值仍走
+#          security.load_users 的 env_pwd or secrets.token_urlsafe(12)，不会
+#          出现空口令管理员）。镜像名改 ${WB_MANAGER_IMAGE:-token-farm:latest}，
+#          默认仍是本地构建产物名（否则 build 完容器用的还是另一个 tag）。
+#          .env.example 补 WB_MANAGER_IMAGE 段落。
+#          测试：test_docker_deploy.DockerAssetsTest 新增
+#          test_admin_password_is_passed_from_env / test_image_name_can_be_overridden。
+#        · 58189e99 容器日志降噪（issue #30 现场）：server/main.py 的 lifespan
+#          拆成 _start_services() / _stop_services()，启动失败走
+#          logsetup.exit_on_startup_failure()。新增 server/logsetup.py：
+#          format_startup_failure 把异常链压成「标题 + 每层『类型: 说明』
+#          （修法原文逐字保留）+ 只留 /server/ 项目栈帧」，_is_project_frame
+#          过滤 fastapi/starlette/contextlib；_exception_chain 同时走
+#          __cause__ 与 __context__ 并按 id 去重（自引用不死循环）。
+#          configure_access_log 按 WB_ACCESS_LOG 决定是否 disabled
+#          uvicorn.access（用 disabled 而非 setLevel：不依赖 handler 级别）。
+#          退出用 os._exit(1) 且**直接写 stderr + flush** —— 上游第一版只
+#          raise SystemExit(1)，实测仍被框架补 150 行栈；logger.error 在
+#          os._exit 下又可能一个字都不输出。
+#          server/config.py 新增 ACCESS_LOG（默认关）/ STARTUP_FAILURE_STACK
+#          （默认开）；.env.example 与 compose 透传这两个开关。
+#          测试：新增 server/tests/test_logsetup.py（13 项，含一条真起子进程
+#          跑退出路径、断言 rc=1 + stderr 有根因 + os._exit 之后不再执行）。
+#        · b7ce2197 + a9063d79 入口脚本按 PUID/PGID 对齐挂载目录属主
+#          （两个提交合并成一项）：bind mount 属主由宿主机决定（群晖 1026、
+#          普通 Linux 1000、root 建目录则 0），镜像固定跑 10001 时启动第一步
+#          DATA_DIR.mkdir() 就是 PermissionError，然后 restart: unless-stopped
+#          无限重启；而修法要求用户在 NAS 上开 SSH，不是合理前置条件。
+#          新增 deploy/docker-entrypoint.sh：以 root 起，用 /proc/mounts 判断
+#          哪些目录**真被挂载**（is_mount，不假定布局；不判断的话镜像内预建的
+#          同名目录会被误当成挂载点、推断出错误 PUID），按 PUID/PGID 或挂载
+#          目录实际属主对齐 app 的 uid/gid，chown 后降权执行 CMD；PUID/PGID
+#          非数字显式 exit 1；探测到 0 回落 10001，绝不以 root 跑业务进程；
+#          /app 与数据目录递归修、上游仓库目录只改顶层 + auths/ + config.json
+#          （它是 git 仓库，每次启动遍历上万个对象文件不划算）。
+#          WB_FIX_OWNERSHIP=0 **只跳过 chown 那一段**，不做 early-exit ——
+#          上游第一版写成 `exec "$@"` 直接跳出，把后续路径全跳过了。
+#          Dockerfile 删掉 USER app、改 ENTRYPOINT，并 chmod +x + sed 去 CR。
+#          .gitattributes 补 `*.sh text eol=lf`：CRLF 会让 shebang 变成
+#          `#!/bin/sh\r` 而报 ": not found"。
+#          docker-compose.yml 透传 PUID/PGID，并把「首次必须手工 chown」的
+#          说法改成「默认自动、异常时才需要」；.env.example 补 PUID/PGID 与
+#          WB_FIX_OWNERSHIP 说明。
+#          **本地偏离**：上游是 Alpine + su-exec + shadow；本仓是 Debian-slim，
+#          降权改用 util-linux 的 setpriv --reuid --regid --init-groups，
+#          uid/gid 改名用 passwd 包的 usermod/groupmod，两者都显式写进运行阶段
+#          的 apt 列表。
+#          dev/check_dockerfile.py 补第 6/7 条结构断言：必须有 ENTRYPOINT 指向
+#          docker-entrypoint.sh、必须 COPY deploy/、最终阶段不得写 USER、
+#          入口脚本用到的外部命令必须在**最终阶段**装好（按命令名反查包名：
+#          setpriv→util-linux、usermod/groupmod→passwd）。
+#          已实测能拦住三种真实故障：删掉 ENTRYPOINT（上游 PR #471 现场）、
+#          加回 USER app、运行阶段漏装 util-linux（上游 issue #473 现场）。
+#          测试：test_docker_deploy 新增 EntrypointPermissionsTest（9 项：
+#          shebang 必须 LF、sh -n 语法检查、只认真实挂载点、PUID=0 回落、
+#          开关不是 early-exit、PUID 必须数字、compose 透传、chmod/sed、
+#          运行阶段工具齐备）；DockerAssetsTest.test_dockerfile_present_and_non_root
+#          的 USER app 断言改成「有 ENTRYPOINT + 脚本里真的 setpriv」。
+#        · 7b2f76c7 i18n 术语统一：同一中文「反代网关」在外文译文里不一致
+#          （en 一律 gateway，ja/ko 标题里多写 reverse proxy，繁中 9 处写
+#          「反向代理」）。只改 ja/ko/zh-TW 的译文值，不动 key、不动中文源文、
+#          不动代码。本地 ja 1 处（login.subtitle）、ko 1 处、zh-TW 9 处；
+#          另把本地独有的 dashboard.platformScope（ja/zh-TW）与两条 phrases
+#          （zh-TW）一并统一 —— 上游没有这些 key，但同一术语不该两套写法。
+#          测试：server/tests/test_web_i18n 23 项通过；另用脚本核对五种语言
+#          已无「リバース / 리버스 / 反向代理 / reverse proxy」残留。
+#      未取：
+#        · faf69381 镜像内置上游任务脚本 + 新增 docker-compose.full.yml 双服务
+#          方案：会在 Dockerfile 加 `FROM ${UPSTREAM_IMAGE} AS upstream` 与
+#          `COPY --from=upstream`，让管理端镜像**硬依赖外部 GHCR 镜像**才能
+#          构建（上游自己写明「拉不到时构建会失败」），破坏本仓「镜像不含上游
+#          服务、可离线构建」的取舍。本仓 taskrun 已有「宿主目录 → docker cp」
+#          两条取脚本的路，第三条只是为 NAS 单根布局服务，代价不划算。
+#        · b5024a6f 上游服务改用 entrypoint 覆盖 + PUID 写死 10001：同一套双镜像
+#          方案的接线修正，本仓没有第二个容器，无落点。
+#        · 3901a932 CI 把上游镜像构建前移并给管理端钉版本：同上，是给
+#          `COPY --from=upstream` 补的接线；本仓管理端镜像不从上游镜像取任何
+#          东西，不需要这个顺序与 build-arg。
+#        · 9f040fe3 Alpine 运行阶段补装 su-exec/shadow：本仓是 Debian-slim，
+#          没有这两个包也没有那个 bug。**只取其教训** —— 已在
+#          dev/check_dockerfile.py 第 7 条落地（断言必须只看最终阶段，且按命令
+#          反查包名；上游那条断言在**整个文件**里搜，中间阶段那行就满足了它，
+#          等于从没检查过工具是否真在最终镜像里）。
+#        · efaef036 / caa82c22 发版提交（只改上游 CHANGELOG 与版本号）不取。
+#      发布前待办：本机 docker daemon 未运行，setpriv 降权路径只有结构层测试
+#      （语法 / 挂载点判断 / PUID=0 回落 / 工具齐备），没跑过真实容器。
+#      首次发版前请在有 docker 的机器上 `docker compose up -d --build` 起一次，
+#      确认容器内 `id` 是 PUID 而不是 0，且 ./data 属主被自动对齐。
+7b2f76c7cb0471f2b6f21b4475ac5b464a5ec165
+e9790faf8090413cb9e9de8232443fb8fc9638f9
+58189e99e95b9be342919558eb08d26f5d18b5a6
+b7ce2197cfe523ef40d416d9bd0e6ca466970dd0
+a9063d79b6b95c482b9037b7ca2722354120fc9d

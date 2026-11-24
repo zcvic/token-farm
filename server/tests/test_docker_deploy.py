@@ -566,7 +566,14 @@ class DockerAssetsTest(unittest.TestCase):
     def test_dockerfile_present_and_non_root(self) -> None:
         df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
         self.assertIn('FROM python:3.12', df)
-        self.assertIn('USER app', df, '不应以 root 运行容器')
+        # 业务进程仍必须是非 root，但**不能**在最终阶段写 USER —— 属主要对齐到
+        # 挂载目录的实际属主，那需要 root 权限。降权改由入口脚本用 setpriv 完成
+        # （详见 deploy/docker-entrypoint.sh 与 dev/check_dockerfile.py 第 6 条）。
+        self.assertIn('ENTRYPOINT ["/app/deploy/docker-entrypoint.sh"]', df,
+                      '入口脚本没接上 —— PUID/PGID 对齐与降权都会静默失效')
+        self.assertIn('setpriv', (_ROOT / 'deploy' / 'docker-entrypoint.sh')
+                      .read_text(encoding='utf-8'),
+                      '入口脚本必须真的降权，否则业务进程以 root 运行')
         self.assertIn('WB_RUN_MODE=docker', df,
                       '镜像里没设运行形态 —— 容器内会误判成宿主、去调 systemctl')
         # 前端产物必须来自静态导出（server 构建会产出 server 版，FastAPI 托管不了）。
@@ -670,6 +677,40 @@ class DockerAssetsTest(unittest.TestCase):
         self.assertIn('tzdata', df, '没有 tzdata 的话 TZ 会静默退回 UTC')
         self.assertIn('/usr/share/zoneinfo', df,
                       '需要按 TZ 落 /etc/localtime，否则进程仍按 UTC 计日')
+
+    def test_admin_password_is_passed_from_env(self) -> None:
+        """`.env` 里的 WB_ADMIN_PASSWORD 必须真的传进容器。
+
+        `.env.example` 写明「留空则随机生成并打印到日志」，但 compose 里若仍是
+        注释掉的固定值，用户按模板填的密码根本不会生效，只会静默走随机密码 ——
+        用户以为设了初始密码，实际拿到的是日志里那个随机串。
+        """
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        env = dc['services']['token-farm'].get('environment') or {}
+        self.assertIn('WB_ADMIN_PASSWORD', env,
+                      'compose 没有透传 WB_ADMIN_PASSWORD，.env 里设的初始密码不生效')
+        self.assertIn('WB_ADMIN_PASSWORD', env['WB_ADMIN_PASSWORD'],
+                      '应写成 ${WB_ADMIN_PASSWORD:-}：空值才走随机生成')
+
+        # 空值仍必须走随机生成（security.load_users 的 env_pwd or token_urlsafe）
+        src = (_ROOT / 'server' / 'security.py').read_text(encoding='utf-8')
+        self.assertIn('env_pwd or secrets.token_urlsafe', src,
+                      '空密码兜底没了 —— 留空会得到空口令管理员')
+
+    def test_image_name_can_be_overridden(self) -> None:
+        """镜像名可由 WB_MANAGER_IMAGE 覆盖，默认仍是本地构建产物名。
+
+        默认值必须与 build 的产物同名，否则 `docker compose up --build` 之后
+        容器用的还是另一个 tag（看起来「构建了但没生效」）。
+        """
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        image = dc['services']['token-farm'].get('image')
+        self.assertIn('WB_MANAGER_IMAGE', image,
+                      '镜像名未参数化，无法改用预构建镜像')
+        self.assertIn('token-farm:latest', image,
+                      '默认值必须是本地构建产物名，否则 build 完容器用的还是别的 tag')
 
     def test_dockerfile_structure_checker_passes(self) -> None:
         """跑一遍 Dockerfile 结构自检（指令拼写 / 阶段引用 / shell 配平）。
@@ -803,6 +844,115 @@ class DockerAssetsTest(unittest.TestCase):
         # 且要被 chown -R 10001:10001 /app 覆盖，否则 uid 10001 写不进去
         self.assertRegex(df, r'chown -R 10001:10001\s+/app\b',
                          'chown 未覆盖 /app —— /app/.local 归属不对，装不进去')
+
+
+class EntrypointPermissionsTest(unittest.TestCase):
+    """入口脚本：按 PUID/PGID 对齐挂载目录属主，再降权执行 CMD。
+
+    背景（上游 issue #473 与 PR #471 的两个现场）：
+      · bind mount 的属主由宿主机决定（群晖 1026、普通 Linux 1000、root 建目录
+        则是 0）。镜像里固定跑 10001 时启动第一步就 PermissionError，然后
+        `restart: unless-stopped` 无限重启，而修法要求用户在 NAS 上开 SSH；
+      · 入口脚本被打进镜像却没接上 ENTRYPOINT 时，上述对齐与降权**全部静默
+        失效** —— 容器照样能起，103 个单测还是全绿（断言被换成了 USER app）。
+    """
+
+    def setUp(self) -> None:
+        self.script = (_ROOT / 'deploy' / 'docker-entrypoint.sh')
+        self.assertTrue(self.script.is_file(), '入口脚本不存在')
+        self.body = self.script.read_text(encoding='utf-8')
+        self.df = (_ROOT / 'Dockerfile').read_text(encoding='utf-8')
+
+    def test_shebang_is_lf_only(self) -> None:
+        """CRLF 会让 shebang 变成 `#!/bin/sh\\r`，容器里报 ": not found"。"""
+        raw = self.script.read_bytes()
+        self.assertFalse(raw.startswith(b'#!/bin/sh\r'),
+                         'shebang 带 CR —— 容器里会报 ": not found"')
+        self.assertNotIn(b'\r\n', raw,
+                         '脚本里有 CRLF —— 由 .gitattributes 的 `*.sh eol=lf` 兜底')
+
+    def test_script_is_syntactically_valid(self) -> None:
+        """`sh -n` 做一次语法检查（本机没有可用的 sh 时跳过，不阻塞 CI）。"""
+        import shutil
+        import subprocess
+        sh = shutil.which('sh') or shutil.which('bash')
+        if not sh:
+            self.skipTest('本机没有 sh，跳过语法检查')
+        # Windows 上的 `sh` 常常只是 WSL 转发器（没有装发行版时 execvpe 失败），
+        # 那不是脚本的问题。先探一次，不可用就跳过。
+        probe = subprocess.run([sh, '-c', 'echo ok'], capture_output=True, text=True,
+                               encoding='utf-8', errors='replace', timeout=60)
+        if probe.returncode != 0 or 'ok' not in (probe.stdout or ''):
+            self.skipTest(f'本机的 sh 不可用（{probe.stderr.strip()[:80]}），跳过语法检查')
+        proc = subprocess.run([sh, '-n', str(self.script)],
+                              capture_output=True, text=True, encoding='utf-8',
+                              errors='replace', timeout=60)
+        self.assertEqual(proc.returncode, 0, f'入口脚本语法错误：{proc.stderr}')
+
+    def test_detects_only_real_mount_points(self) -> None:
+        """只认 /proc/mounts 里确实是挂载点的目录。
+
+        不加这层判断的话，镜像里预建的同名目录（属主 10001）也会被当成挂载点，
+        于是没挂载时也会去改属主，并据此推断出错误的 PUID。
+        """
+        self.assertIn('/proc/mounts', self.body, '没有判断真实挂载点')
+        self.assertIn('is_mount', self.body)
+        for path in ('/app/data', '/opt/workbuddy2api'):
+            self.assertIn(path, self.body, f'没有覆盖挂载目录 {path}')
+
+    def test_never_runs_business_process_as_root(self) -> None:
+        """探测到属主是 0 时必须回落 10001，绝不以 root 跑业务进程。"""
+        self.assertRegex(self.body, r'PUID"\s*=\s*"0"',
+                         '没有对 PUID=0 的处理 —— 会以 root 运行业务进程')
+        self.assertIn('PUID=10001', self.body, 'PUID=0 时没有回落到 10001')
+        self.assertIn('setpriv', self.body, '没有降权执行')
+
+    def test_fix_ownership_switch_only_skips_chown(self) -> None:
+        """WB_FIX_OWNERSHIP=0 只跳过属主修正，不能把整个脚本 early-exit。
+
+        上游第一版写成 `exec "$@"` 直接跳出，把「首启生成上游 config.json」也
+        一起跳过了，结果上游容器读不到配置反复重启，日志里只有上游的报错。
+        本仓没有那一步，但**同样不能让开关变成 early-exit** —— 它会把
+        「非 root 启动时只提示」那段也一起吞掉，问题现场就没有任何线索。
+        """
+        self.assertIn('WB_FIX_OWNERSHIP', self.body)
+        # 开关只能出现在条件里，不能是脚本开头的无条件 exec。
+        head = self.body[:self.body.index('MOUNT_CANDIDATES')]
+        self.assertNotIn('exec "$@"', head,
+                         '开关写成了 early-exit —— 后续提示与降权路径全被跳过')
+
+    def test_puid_pgid_must_be_numeric(self) -> None:
+        """非数字的 PUID 必须显式报错退出，不能带着错值继续跑。"""
+        self.assertIn('*[!0-9]*', self.body, '没有校验 PUID/PGID 是数字')
+        self.assertIn('exit 1', self.body)
+
+    def test_compose_passes_puid_pgid(self) -> None:
+        import yaml
+        dc = yaml.safe_load((_ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        env = dc['services']['token-farm'].get('environment') or {}
+        for name in ('PUID', 'PGID'):
+            self.assertIn(name, env, f'compose 没有透传 {name}')
+            self.assertIn(f'${{{name}', env[name], f'{name} 应写成 ${{{name}:-}} 形式')
+
+    def test_entrypoint_is_executable_in_image(self) -> None:
+        """脚本要 chmod +x，并 sed 掉可能残留的 CR（Windows 检出）。"""
+        self.assertIn('chmod +x /app/deploy/docker-entrypoint.sh', self.df)
+        self.assertRegex(self.df, r"sed -i 's/\\r\$//' /app/deploy/docker-entrypoint.sh",
+                         '没有清理脚本里的 CR —— 会报 ": not found"')
+
+    def test_runtime_stage_has_entrypoint_tools(self) -> None:
+        """入口脚本用到的外部命令，最终阶段必须都有。
+
+        上游 issue #473 的根因：su-exec/shadow 只装在中间阶段，跨阶段 COPY 只
+        搬文件、不带依赖。当时那条断言在**整个文件**里搜，中间阶段那行就满足了
+        它 —— 等于从没检查过「工具是否真的在最终镜像里」。
+        """
+        last_stage = self.df.rsplit('\nFROM ', 1)[-1]
+        for cmd, pkg in (('setpriv', 'util-linux'), ('usermod', 'passwd'),
+                         ('groupmod', 'passwd')):
+            self.assertIn(cmd, self.body, f'入口脚本应该用 {cmd}')
+            self.assertIn(pkg, last_stage,
+                          f'最终阶段没装 {pkg} —— {cmd} 会在运行期 not found')
 
 
 class DockerSocketPreflightTest(unittest.TestCase):

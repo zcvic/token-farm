@@ -575,11 +575,20 @@ curl -s http://127.0.0.1:7863/healthz
 ```
 
 **Q：account 目录权限报错（Permission denied）**
-容器内以 uid 10001 运行，宿主机目录需归属该 uid：
+管理端容器的入口脚本会按 `PUID` / `PGID` 自动对齐挂载目录的属主（不填则取
+挂载目录的实际属主），所以**正常不用手工 chown**。先确认两件事：
+
+- 没有设 `WB_FIX_OWNERSHIP=0`（那会跳过属主对齐）；
+- 挂载目录不是 NFS/SMB（那种文件系统改不了属主，入口脚本会打印警告后继续）。
+
+确认后仍然报错时，手工把目录归属改成容器内进程的 uid：
 
 ```bash
 chown -R 10001:10001 /opt/workbuddy2api/auths /opt/workbuddy2api/data
 ```
+
+想看容器实际以哪个 uid 运行：`docker compose exec token-farm id`。如果输出是
+`uid=0`，说明入口脚本没生效（检查 `ENTRYPOINT` 是否还在、镜像是否重新构建过）。
 
 若管理端跑在宿主机（systemd）而**不是**容器里，建议再给 `auths` 打开 setgid
 并把属组对齐服务账号。这样容器里新建的账号文件继承同一个属组，管理端重登时
