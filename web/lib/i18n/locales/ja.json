@@ -113,7 +113,7 @@
     "platforms": "プラットフォーム"
   },
   "login": {
-    "subtitle": "Tencent CodeBuddy アカウントプール管理 · OpenAI 互換リバースプロキシゲートウェイ",
+    "subtitle": "Tencent CodeBuddy アカウントプール管理 · OpenAI 互換ゲートウェイ",
     "username": "ユーザー名",
     "usernamePlaceholder": "ユーザー名（既定: admin）",
     "password": "パスワード",
@@ -256,7 +256,7 @@
     "descriptionPlatform": "{platform} のアカウント・クレジット・本日の使用量の概要（30 秒ごとに自動更新）",
     "platformAccountsHint": "{platform} に取り込んだアカウント",
     "platformPanel": "{platform} プラットフォーム",
-    "platformScope": "リバースプロキシの上流とアカウントプールの健全性は WorkBuddy 専用です。{platform} のリクエストはプラットフォームアダプターが直接送信するため、ここではアカウントのトークン状態を表示します。",
+    "platformScope": "ゲートウェイの上流とアカウントプールの健全性は WorkBuddy 専用です。{platform} のリクエストはプラットフォームアダプターが直接送信するため、ここではアカウントのトークン状態を表示します。",
     "platformNoCredits": "{platform} はクレジット残高を提供していません",
     "platformTokenOk": "すべてのトークンが有効",
     "creditsIncomeNotTracked": "プラットフォームモードではクレジット収入を集計しません（チェックインの記録は WorkBuddy のみ）。支出と使用量は通常どおり集計します。",
