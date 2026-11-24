@@ -219,6 +219,7 @@ registry.register(FooAdapter())
 | `supports_web_login` | 能否在网页里直接发起登录（需要平台实现 `login_start` / `login_poll`） |
 | `supports_tasks()` | **可选**：是否有平台任务面板（签到之外的邀请码 / 兑换码等，见 §4.1） |
 | `list_accounts()` | 不含明文凭据的账号列表 |
+| `export_accounts()` | **可选**：导出含明文凭据的账号行，只由管理员导出接口调用（默认不支持） |
 | `import_account(payload)` | 导入 / 更新一个账号 |
 | `delete_account(id)` | 删除 |
 | `refresh_account(id, force)` | 刷新令牌（轮换式必须原子落盘） |
@@ -255,6 +256,7 @@ registry.register(FooAdapter())
 | --- | --- | --- |
 | GET | `/api/platforms` | 平台清单与能力（含账号数） |
 | GET | `/api/platforms/{name}/accounts` | 脱敏账号列表 |
+| GET | `/api/platforms/{name}/accounts/export` | 导出账号（**含明文凭据**；仅会话管理员，写审计） |
 | POST | `/api/platforms/{name}/accounts/import` | 手工导入（单条或 `{accounts:[...]}`） |
 | POST | `/api/platforms/{name}/accounts/import-desktop` | 从本机客户端导入 |
 | POST | `/api/platforms/{name}/accounts/{id}/refresh` | 刷新令牌 |
@@ -280,8 +282,9 @@ registry.register(FooAdapter())
   `require_session_account_adder`：管理员或 `operator`（只读 + 添加账号）都能用，
   但 operator 只能**新增**（重复 uid 会被拒绝），仍拒绝 API Token；
 - **操作**（刷新令牌 / 签到 / 批量签到）→ `require_admin`；
-- **删除账号** → `require_session_admin`，与 `/api/accounts/upload` 同级：
-  把外部平台凭据写进池子或从池子里删掉这件事只对真人开放。
+- **删除账号 / 导出账号** → `require_session_admin`，与 `/api/accounts/upload` 同级：
+  把外部平台凭据写进池子、从池子里删掉、或打包带走这件事只对真人开放。
+  导出会写一条 `export_platform_accounts` 审计。
 
 这些写端点已登记进 `test_api_tokens` 的 `SESSION_ONLY` 清单；`realm` /
 `force` 两个 query 参数已登记进 `test_request_binding` 的
@@ -578,6 +581,32 @@ Trae 的账号按 `realm`（`cn` / `intl`）分成两池，前端沿用 WorkBudd
 任务里的 `checkin` 与账号页的 `/checkin` 共用同一把「平台 + 账号」锁，避免
 手动签到与批量签到同时命中同一个号、把当天的奖励记两遍。写操作一律审计
 （`run_platform_task`）。
+
+#### DuMate 的任务体系
+
+DuMate（百度搭子）复用同一组契约，但动作集合不同：任务来自「成长计划」，
+另有抽奖与「邀请有礼」。`task_status` 只读地并发拉四路（任务 / 抽奖 /
+邀请码 / 邀请统计），单路失败按路回落上次缓存，错误放 `errors`：
+
+| 动作 | 上游 | 说明 |
+| --- | --- | --- |
+| `checkin` | `login_bonus_info` + `claim_login_bonus` | 与账号页签到同一实现 |
+| `complete_task` | `POST /activity/growth-plan/task/complete` | `task_id` 为空时只跑可自动任务（`QUERY_INPUT` / `USE_SKILL`） |
+| `draw` | `POST /activity/growth-plan/draw` | 每次由后端生成新 UUID 幂等键；UI 禁连点 |
+| `claim_prize` | `POST /activity/growth-plan/prize/claim` | 只给实物奖；积分 / 会员奖自动到账 |
+| `bind_invite` | `POST /invitation_code/redeem` | 填写别人的邀请码，一次性；不能填自己的 |
+
+`QUERY_INPUT` 会先用该账号发一条匹配 `query` 的消息（`model-text`，
+`max_tokens=64`）再上报完成。`completed_count >= repeat_count` 即已完成；
+上游业务码 `410121`（次数已发放）按已完成处理，不算失败。抽奖响应里的奖品
+字段在**顶层**（`prize_name` / `prize_type`），不是嵌套的 `prize`。
+
+任务写操作按账号串行，但用的是独立的 `_task_locks`，不能复用 token 锁：
+完成任务途中 `_token_for` 会拿 token 锁，同一把锁不可重入会死锁。
+
+前端按 `platform === 'dumate'` 渲染成长任务 / 抽奖 / 邀请三个分段；Loomy 的
+「激活状态 / 兑换码」分段不出现。任务面板字段见 `web/lib/types.ts`
+的 `PlatformTaskItem` / `PlatformDrawStatus` / `PlatformInviteStatus`。
 
 ---
 
@@ -1265,8 +1294,10 @@ Trae 事件 → OpenAI chunk：
 - `server/tests/test_platform_loomy_adapter.py`：Loomy 的签名 / RSA 原语、账号文件、
   模型别名与输出上限、`/no_think` 翻译、本机会话导入、微信扫码登录状态机。
 - `server/tests/test_platform_dumate_adapter.py`：DuMate 的 Cookie 归一与脱敏、
-  目录降级、选号、token 缓存与 401 重试、`max_tokens` 钳制、SSE 扫描、签到与积分，
-  以及百度扫码登录的事件 / 兑换解析与会话状态机。
+  目录降级、选号、token 缓存与 401 重试、`max_tokens` 钳制、SSE 扫描、签到与积分、
+  成长任务（字段归一 / 自动完成 / 410121 / 一键完成的跳过口径）、抽奖（请求体
+  双幂等键、每次新 UUID、空池）、邀请码（拒绝自己的码 / 大小写只 strip）、
+  任务缓存的按路回落，以及百度扫码登录的事件 / 兑换解析与会话状态机。
 - `server/tests/test_platform_minimax_adapter.py`：MiniMax Code 的账号脱敏、目录解析、
   双区选号、refresh token 轮换落盘（含换发后清掉旧 refresh 到期时间）、401 重试、
   签到 / 积分、OpenAI ↔ Anthropic 请求 / 响应 / 流式翻译。

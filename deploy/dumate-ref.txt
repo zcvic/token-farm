@@ -194,4 +194,68 @@
 #
 #      锚点提交：db5c434833（2026-11-23）
 #      上一次基线：9f02228edf（2026-11-16）
+#
+# ---- 2026-11 任务 / 抽奖 / 邀请码（网页端，无参考仓提交）
+#
+#      来源不是参考仓，而是 DuMate 网页客户端 bundle（`dumate.cn` 的
+#      5090.*.js / app.*.js）。逐条从压缩代码里核对，参考仓只作旁证。
+#      实现落点：server/platforms/dumate/{constants,client,adapter}.py。
+#
+#      ① 成长任务列表
+#        GET /api/dumate/activity/growth-plan/tasks?device=web[&version=]
+#        → {code:0, result:{groups:[{group_code, group_name, tasks:[...]}]}}
+#        任务字段：task_id / task_type / title / sub_title / query /
+#        suite_name / files / reward_count / reward_points / repeat_count /
+#        completed_count / display_terminal / jump_link。
+#        完成判据：completed_count >= repeat_count（与客户端 completedIds 同口径）。
+#        任务**非每日重置**；`device` 缺省会让上游按未知终端裁掉一部分任务。
+#
+#      ② 上报完成
+#        POST /api/dumate/activity/growth-plan/task/complete
+#        body {task_id, source:"web"} → result 含 reward_count。
+#        业务失败仍是 HTTP 200 + code；410121 = 「该任务次数已发放」，
+#        按「已完成」处理（并发 / 重复提交的常态，不是错误）。
+#        可自动完成的类型：QUERY_INPUT（先发一条匹配 query 的消息）与
+#        USE_SKILL。PC_PUSH / INVITATION / INVITED / SUITE 等需在客户端或
+#        由真人完成，面板只展示不代跑。
+#
+#      ③ 抽奖
+#        GET  /api/dumate/activity/growth-plan/draw/status?source=web
+#        → {code:0, result:{remaining_draws, prizes, my_prizes, winning_records}}
+#        POST /api/dumate/activity/growth-plan/draw
+#        body {"x-bce-request-id": <uuid>, "source":"web"}
+#        网页 bundle 把幂等键放在 body 的 `x-bce-request-id`；参考实现实测
+#        `request_id` 也被接受，本仓两个键都带。每次必须新 UUID——复用会
+#        被上游当成重复请求。
+#        成功 result 顶层就是中奖记录：draw_record_id / remaining_draws /
+#        prize_name / prize_type / prize_value / draw_time（不是嵌套的 prize）。
+#        prize_type=PHYSICAL 的实物奖未自动到账，需要下一步领取。
+#
+#      ④ 领奖
+#        POST /api/dumate/activity/growth-plan/prize/claim
+#        body {draw_record_id, contact?}
+#        积分 / 会员类奖品抽到即到账，**不要**再调这个接口——对已 SUCCESS
+#        的记录会报「参数错误:DrawRecordID」。
+#
+#      ⑤ 邀请码（「邀请有礼」）
+#        GET  /api/dumate/invitation_code/get?activityId=
+#        → {code:0, result:{invitationCode, createdAt, type, inviteMessage}}
+#        GET  /api/dumate/invitation_code/invited/count?activityId=
+#        → {code:0, result:{invitedCount, totalPoints}}
+#        POST /api/dumate/invitation_code/redeem
+#        body {invitationCode, timezone:"Asia/Shanghai", source:"web", activityId?}
+#        → {code:0, message, result:<notice>}
+#        规则：邀请码区分大小写（只 strip，不折叠）；新账号注册 7 天内可填
+#        一次，不能填自己的码；活动 id = `growth_plan_2026`，官方文案「双方
+#        各领 2000 积分」。`createdAt` 距今 ≤ 7 天（6048e5 ms）用于界面提示。
+#
+#      ⑥ 活动状态（只读，面板暂未直接展示）
+#        GET /api/dumate/activity/status?activity_id=growth_plan_2026&activity_version=2
+#        → {enabled, start_time, end_time}
+#        GET /api/dumate/activity/growth-plan/modules
+#        GET /api/dumate/activity/growth-plan/page/status
+#
+#      鉴权与错误：全部走网页 Cookie（`BDUSS` 为核心），复用 client._web_json
+#      的 401 / 业务码 / 错误文案处理。读接口失败不拖垮整页：task_status
+#      按路回落上次缓存，并把 `{endpoint, code, message}` 放进 errors。
 

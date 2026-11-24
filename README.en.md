@@ -244,6 +244,7 @@ Threat model and hardening notes: [security notes](docs/security-notes.md) and t
 - [Prometheus metrics](docs/metrics.md) — scrape config, metric semantics and auth
 - [Qoder](docs/qoder.md) — CN / international editions, model prefixes and the built-in gateway
 - [Loomy](docs/loomy.md) — iFlytek Spark accounts, points / check-in and the `loomy/` prefix
+- [DuMate](docs/dumate.md) — Baidu DuMate cookie, QR login, growth tasks / lucky draw / invite codes
 - [QQ notifications & open API](docs/qq-bot.md) — AstrBot integration, UMO, bot control boundaries
 
 ---

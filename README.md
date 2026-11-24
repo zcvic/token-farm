@@ -253,6 +253,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zcvic/token-farm/main/deploy
 - [Prometheus 指标](docs/metrics.md) —— 抓取配置、指标口径与鉴权
 - [Qoder 接入](docs/qoder.md) —— 国内版 / 国际版、模型前缀与内置网关
 - [Loomy 接入](docs/loomy.md) —— 讯飞星火账号、积分 / 签到与 `loomy/` 前缀
+- [DuMate 接入](docs/dumate.md) —— 百度搭子 Cookie、扫码登录、成长任务 / 抽奖 / 邀请码
 - [QQ 机器人通知与开放接口](docs/qq-bot.md) —— AstrBot 对接、UMO 与机器人控制边界
 
 ---
