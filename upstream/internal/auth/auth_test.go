@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -39,6 +40,7 @@ func TestParseMissingToken(t *testing.T) {
 	}
 }
 
+// TestSaveAtomicRoundtrip 秒制文件写回仍是秒制（毫秒归一不能把正常文件改成毫秒）。
 func TestSaveAtomicRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "workbuddy-u1.json")
@@ -60,6 +62,91 @@ func TestSaveAtomicRoundtrip(t *testing.T) {
 	}
 	if b.AccessToken != "at" || b.UID != "u1" || b.EnterpriseID != "e1" {
 		t.Errorf("roundtrip: %+v", b)
+	}
+}
+
+// TestParseNormalizesMillisExpiresAt 官方 CLI 凭据的 expiresAt 是**毫秒**，解析入口
+// 必须归一到秒：不归一的话到期时间落到公元 58800 年，NeedsRefresh 恒 false，token
+// 永不刷新，到期后账号静默 401。
+//
+// 夹具**相对当前时间**构造，不写死毫秒串：写死具体值的用例会在那一天之后变成
+// 「已过期」，断言无故变红（参考仓 2026-11-21 就是这么挂的，与本轮改动无关）。
+func TestParseNormalizesMillisExpiresAt(t *testing.T) {
+	ms := time.Now().Add(28 * 24 * time.Hour).UnixMilli()
+	raw := []byte(fmt.Sprintf(
+		`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":%d,`+
+			`"domain":"www.codebuddy.ai"},"account":{"uid":"u1"}}`, ms))
+	a, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if want := ms / 1000; a.ExpiresAt != want {
+		t.Errorf("ExpiresAt=%d want %d（毫秒未归一）", a.ExpiresAt, want)
+	}
+	if a.NeedsRefresh(time.Hour) {
+		t.Error("28 天后的令牌不该被判定为需要刷新（毫秒被当成秒会恒 true/false）")
+	}
+	if !a.expiresAtMillis {
+		t.Error("来源是毫秒的文件应记住单位，写回时才不会改掉它的口径")
+	}
+}
+
+// TestSaveAtomicKeepsMillisUnit 毫秒来源的文件写回仍是毫秒。
+//
+// 反向代价最要紧：按秒写回会把官方桌面端 / CLI 的到期时间缩到 1970 年代，
+// 桌面端随后立刻判定过期并要求重新登录。
+func TestSaveAtomicKeepsMillisUnit(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-u1.json")
+	ms := time.Now().Add(28 * 24 * time.Hour).UnixMilli()
+	raw := []byte(fmt.Sprintf(
+		`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":%d,`+
+			`"domain":"www.codebuddy.ai"},"account":{"uid":"u1"}}`, ms))
+	a, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	a.FilePath = fp
+	a.AccessToken = "at2" // 模拟刷新后写回
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	out, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var doc struct {
+		Auth struct {
+			ExpiresAt int64 `json:"expiresAt"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc.Auth.ExpiresAt != ms {
+		// 秒是内存口径，毫秒里不足一秒的部分会被截掉（597ms 这类精度没人需要）；
+		// 关键是**量级**没变 —— 按秒写回会得到 1797916099（1970 年代）。
+		if got := doc.Auth.ExpiresAt / 1000; got != ms/1000 {
+			t.Errorf("写回 expiresAt=%d（秒值 %d）want 毫秒量级的 %d"+
+				"（毫秒来源必须仍写毫秒）", doc.Auth.ExpiresAt, got, ms)
+		}
+	}
+}
+
+// TestParseSecondUnitNotMisread 秒制文件不能被误判成毫秒（阈值两侧都要覆盖）。
+func TestParseSecondUnitNotMisread(t *testing.T) {
+	sec := time.Now().Add(28 * 24 * time.Hour).Unix()
+	raw := []byte(fmt.Sprintf(
+		`{"auth":{"accessToken":"at","expiresAt":%d},"account":{"uid":"u1"}}`, sec))
+	a, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if a.ExpiresAt != sec {
+		t.Errorf("秒制被改动: %d want %d", a.ExpiresAt, sec)
+	}
+	if a.expiresAtMillis {
+		t.Error("秒制文件不该被标记成毫秒来源")
 	}
 }
 

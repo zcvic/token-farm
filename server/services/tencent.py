@@ -392,6 +392,50 @@ def _atomic_write_json(target: Path, payload: dict) -> None:
         raise
 
 
+# 区分「秒」与「毫秒」时间戳的分界（1e11）。作为秒已是公元 5138 年（真实凭证
+# 不可能），作为毫秒是 1973 年（毫秒制当前值 ~1.8e12 远在其上），两侧都不会误判。
+_EXPIRES_AT_MILLIS_THRESHOLD = 100_000_000_000
+
+
+def _expires_at_millis(raw: object) -> bool:
+    """账号文件里的 `expiresAt` 是不是**毫秒**制（官方 CLI / 桌面端口径）。
+
+    官方 CodeBuddy CLI 的凭据文件写 `expiresAt: 1795254516410`（毫秒），插件
+    OAuth 与面板落盘的是秒。不归一的话「剩余时间」会算出五万多年、续期永远
+    不触发，最终在某个不设防的夜里静默掉线。
+    """
+    try:
+        value = int(raw or 0)
+    except (TypeError, ValueError):
+        return False
+    return value > _EXPIRES_AT_MILLIS_THRESHOLD
+
+
+def _normalise_expires_at(raw: object) -> int:
+    """把 `expiresAt` 归一到 epoch **秒**；非法/缺失返回 0（= 未知，不是已过期）。"""
+    try:
+        value = int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    if value <= 0:
+        return 0
+    return (value // 1000 if value > _EXPIRES_AT_MILLIS_THRESHOLD else value)
+
+
+def _write_back_expires_at(raw: object, millis: bool) -> int:
+    """落盘用的 `expiresAt`：先归一到秒，再按 `millis` 换回毫秒。
+
+    两个方向的代价不对称，所以先归一是必须的：
+      · 秒制文件写进毫秒 → 到期时间变公元 58800 年，永不刷新；
+      · 毫秒制文件写进秒 → 缩到 1970 年代，桌面端立刻判定过期。
+    调用方递进来的可能是任意一种（刷新响应、导入解析结果），所以不能假设是秒。
+    """
+    seconds = _normalise_expires_at(raw)
+    if seconds <= 0:
+        return 0
+    return seconds * 1000 if millis else seconds
+
+
 def update_auth_tokens(filename: str, fields: dict,
                        auth_dir: Path | None = None) -> None:
     """就地更新账号文件里的 token 字段，**其余原样保留**（issue #40）。
@@ -424,12 +468,15 @@ def update_auth_tokens(filename: str, fields: dict,
         if not isinstance(auth, dict):
             auth = {}
             raw['auth'] = auth
+        # 来源文件是毫秒制的（官方 CLI / 桌面端凭据），写回也必须是毫秒 —— 否则
+        # 刷一次 token 就把它的到期时间缩到 1970 年代，桌面端随即判定过期。
+        millis = _expires_at_millis(auth.get('expiresAt'))
         if 'access_token' in fields:
             auth['accessToken'] = fields['access_token']
         if 'refresh_token' in fields:
             auth['refreshToken'] = fields['refresh_token']
         if 'expires_at' in fields:
-            auth['expiresAt'] = fields['expires_at']
+            auth['expiresAt'] = _write_back_expires_at(fields['expires_at'], millis)
         if 'domain' in fields:
             auth['domain'] = fields['domain']
         # realm 若缺失则补上（与 write_auth_file 同口径，用 resolve_realm 不含逃生门）
@@ -540,6 +587,7 @@ def write_auth_file(account: dict, auth_dir: Path | None = None,
         old_device_token = ''
         old_proxy = ''
         old_weight = None
+        old_millis = False
         if existed:
             try:
                 old = json.loads(target.read_text(encoding='utf-8'))
@@ -547,6 +595,13 @@ def write_auth_file(account: dict, auth_dir: Path | None = None,
                     old_device_token = str(old.get('device_token') or '')
                     old_proxy = str(old.get('proxy') or '')
                     old_weight = old.get('weight')
+                    old_auth = old.get('auth')
+                    # 重登 / 覆盖导入是「按响应重建整份文件」，但**单位**要跟着
+                    # 原文件走：官方 CLI / 桌面端的凭据是毫秒制，按秒写回去
+                    # 会把它的到期时间缩到 1970 年代，桌面端随即判定过期。
+                    old_millis = _expires_at_millis(
+                        (old_auth or {}).get('expiresAt') if isinstance(old_auth, dict)
+                        else old.get('expiresAt'))
             except Exception:  # noqa: BLE001
                 old_device_token = ''
 
@@ -559,7 +614,10 @@ def write_auth_file(account: dict, auth_dir: Path | None = None,
             'auth': {
                 'accessToken': account['access_token'],
                 'refreshToken': account.get('refresh_token', ''),
-                'expiresAt': account['expires_at'],
+                # 单位跟随原文件（见上面 old_millis）：毫秒来源写回仍是毫秒。
+                # 先归一再换算 —— 调用方若哪天直接递毫秒进来（refresh 响应换单位），
+                # 无条件乘 1000 会写出一个六位数年份。
+                'expiresAt': _write_back_expires_at(account['expires_at'], old_millis),
                 'domain': domain,
                 'realm': resolved,
             },

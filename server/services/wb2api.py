@@ -23,6 +23,7 @@ from .filelock import file_lock
 from . import realm as _realm
 from .errtext import err_text
 from .realm import realm_of, supports_checkin
+from .tencent import _normalise_expires_at
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +276,10 @@ def list_auth_accounts(auth_dir: Path | None = None) -> list[dict]:
             continue
         acct = raw.get('account', {}) or {}
         auth = raw.get('auth', {}) or {}
-        exp = int(auth.get('expiresAt', 0) or 0)
+        # 官方 CLI / 桌面端的凭据把 expiresAt 写成**毫秒**（实测 1795254516410）。
+        # 不归一会让「剩余时间」算出五万多年、续期永远不触发，最终静默掉线。
+        # 归一在这里做一次，下游（进度条、续期窗口、排序）就都拿到秒。
+        exp = _normalise_expires_at(auth.get('expiresAt'))
         token = str(auth.get('accessToken') or '')
 
         # 上游 `Parse` 明确拒绝的情形：accessToken 为空时直接返回

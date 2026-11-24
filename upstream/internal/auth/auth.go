@@ -64,6 +64,11 @@ type Auth struct {
 	// 那会让低权重的号一直闲置，积分用不完就过期（正是 #187 另一半诉求要避免的）。
 	// 硬门槛（冷却 / 熔断 / 禁用 / 在途占满）与成本分层不受本字段影响。
 	Weight float64
+
+	// expiresAtMillis 来源文件的 expiresAt 是**毫秒**（官方 CLI / 桌面端口径）。
+	// 内存里统一按秒，写回时换回毫秒 —— 否则刷新一次就把用户那份官方凭据改成
+	// 「公元 58800 年」，桌面端读回去直接当成永不过期。只在 Parse 里置位。
+	expiresAtMillis bool
 }
 
 // 手写权重的取值区间：低于 MinWeight 等于「几乎不用」（但仍留一丝机会，与
@@ -101,6 +106,21 @@ func sanitizeWeight(w float64) float64 {
 		return 0
 	}
 	return w
+}
+
+// persistedExpiresAt 写回磁盘用的 expiresAt：来源是毫秒的文件仍写毫秒。
+//
+// 为什么必须跟随来源单位：官方桌面端 / CLI 的凭据文件里 expiresAt 是毫秒，
+// 刷一次 token 后按秒写回等于把它的到期时间缩到 1970 年代（或者反过来放大到
+// 公元 58800 年），桌面端随后要么立刻判定过期、要么永不刷新。内存统一用秒，
+// 只在落盘这一处换算回去。
+//
+// 调用方持 a.mu（SaveAtomic 在锁内调用它）。
+func (a *Auth) persistedExpiresAt() int64 {
+	if a.expiresAtMillis && a.ExpiresAt > 0 {
+		return a.ExpiresAt * 1000
+	}
+	return a.ExpiresAt
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -348,6 +368,19 @@ func Parse(raw []byte) (*Auth, error) {
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
+	// 官方 CodeBuddy CLI 的凭据文件写的是**毫秒**（实测 1795254516410），而插件
+	// OAuth 与面板落盘的是**秒**。不归一的话到期时间落到公元 58800 年 →
+	// NeedsRefresh 恒 false → token 永不刷新 → 到期后账号静默 401（表现为
+	// 「用了一个月突然全部失效」）。导入官方凭据是本仓支持的用法，所以必须在
+	// 解析入口归一，而不是让使用者手改文件。
+	//
+	// 阈值取 1e11：作为秒已是公元 5138 年（真实凭证不可能），作为毫秒是 1973 年
+	// （毫秒制当前值 ~1.8e12 远在其上）。两个口径都不会误判。
+	const expiresAtMillisThreshold = 100_000_000_000
+	if a.ExpiresAt > expiresAtMillisThreshold {
+		a.ExpiresAt /= 1000
+		a.expiresAtMillis = true
+	}
 	return &a, nil
 }
 
@@ -367,7 +400,7 @@ func (a *Auth) SaveAtomic() error {
 		"auth": map[string]any{
 			"accessToken":  a.AccessToken,
 			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
+			"expiresAt":    a.persistedExpiresAt(),
 			"domain":       a.Domain,
 			"realm":        a.realm,
 		},
@@ -423,7 +456,7 @@ func (a *Auth) AdoptNewer(src *Auth) bool {
 		AccessToken: src.AccessToken, RefreshToken: src.RefreshToken, ExpiresAt: src.ExpiresAt,
 		Domain: src.Domain, realm: src.realm, EnterpriseID: src.EnterpriseID,
 		Nickname: src.Nickname, ProxyName: src.ProxyName, DeviceToken: src.DeviceToken,
-		Weight: src.Weight,
+		Weight: src.Weight, expiresAtMillis: src.expiresAtMillis,
 	}
 	src.mu.Unlock()
 
@@ -455,6 +488,9 @@ func (a *Auth) AdoptNewer(src *Auth) bool {
 	}
 	a.AccessToken, a.RefreshToken, a.ExpiresAt = in.AccessToken, in.RefreshToken, in.ExpiresAt
 	a.Domain, a.realm, a.DeviceToken = in.Domain, in.realm, in.DeviceToken
+	// 单位标志跟着新凭证走：磁盘上那份若改成毫秒制（用户换成官方 CLI 凭据），
+	// 后续刷新必须继续按毫秒写回，否则文件又被写回秒。
+	a.expiresAtMillis = in.expiresAtMillis
 	return true
 }
 

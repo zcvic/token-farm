@@ -21,6 +21,7 @@ from ..services import (
     renew, tasklog, taskrun, tencent, wb2api,
 )
 from ..services.realm import realm_of, supports_checkin
+from ..services.tencent import _normalise_expires_at
 from ..services import taskpacing
 
 logger = logging.getLogger('workbuddy.accounts')
@@ -69,17 +70,26 @@ def _uploaded_account(raw: object, filename: str) -> dict:
     duration_expiry = value('expiresIn', 'expires_in')
     try:
         if absolute_expiry not in (None, ''):
-            expires_at = int(absolute_expiry)
-        elif duration_expiry in (None, ''):
+            # 非法值（非数字）要报错，不能静默当成「未知到期」—— 用户传错文件时
+            # 只会看到账号「导入成功但显示未加载」，完全不知道错在哪。
+            absolute_seconds = int(absolute_expiry)
+        else:
+            absolute_seconds = None
+        if absolute_seconds is None and duration_expiry in (None, ''):
             # Some exports only preserve opaque tokens. Zero means unknown; fabricating
             # an expiry would make scheduling and the account page report false data.
             expires_at = 0
-        else:
+        elif absolute_seconds is None:
             # Tencent's expiresIn is a duration, unlike expiresAt which is an epoch.
             expires_at = int(time.time()) + int(duration_expiry)
+        else:
+            # 官方 CLI / 桌面端的凭据是**毫秒**。按秒原样落盘会让面板算出五万多年
+            # 的剩余时间、续期永远不触发，上游也会把到期时刻当成公元 58800 年。
+            # 导入是这两种文件进入系统的唯一入口，所以在这里就归一。
+            expires_at = _normalise_expires_at(absolute_seconds)
     except (TypeError, ValueError) as exc:
         raise ValueError('expiresAt 必须是数字') from exc
-    if expires_at < 0:
+    if (absolute_seconds is not None and absolute_seconds < 0) or expires_at < 0:
         raise ValueError('expiresAt 必须是非负数字')
 
     return {
