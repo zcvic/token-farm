@@ -15,6 +15,8 @@ import {
 } from 'lucide-react';
 
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {PageHeader} from '@/components/common/layout/PageHeader';
+import {PageSectionTabs} from '@/components/common/layout/PageSectionTabs';
 import {StatCard} from '@/components/common/layout/StatCard';
 import {LoadError} from '@/components/common/states/LoadError';
 import {SkeletonBar} from '@/components/common/states/SkeletonBar';
@@ -63,15 +65,23 @@ function modelSeries(model: PlatformModel): string {
 /**
  * 非 WorkBuddy 平台的模型清单（原「多平台」页里的模型部分）。
  *
- * 页面外壳（标题、说明）由调用方提供。这里只负责一个平台的数据：
- * `platformApi.models(platform, force)`，其中 `force` 绕过**后端缓存**。
+ * 这个组件连页面外壳一起渲染：PageHeader（标题 / 说明 / 操作按钮）+ 二级导航 +
+ * 统计卡 + 筛选 + 模型表。统一放在这里，是因为刷新 / 倍率 / 目录这些操作都要
+ * 用到组件内部的数据与接口；版式与 WorkBuddy 模型页保持一致——按钮单独成行在
+ * 卡片上方，筛选独立成块，模型卡片里只留表格。
  *
+ * 数据来自 `platformApi.models(platform, force)`，其中 `force` 绕过**后端缓存**。
  * 用 ref 而不是 state 记录 `force`：它描述的是「下一次请求要不要绕缓存」，
  * 不参与渲染，也不该触发重渲染。
  */
-export function PlatformModelsPanel({platform, realm, supportsModelRates = false,
-                                     supportsModelCatalog = false}: {
+export function PlatformModelsPanel({platform, label, prefix, realm,
+                                      supportsModelRates = false,
+                                      supportsModelCatalog = false}: {
   platform: string;
+  /** 界面上显示的平台名（标题与说明用）。 */
+  label: string;
+  /** 对外模型 ID 的平台前缀（如 `traecn/`），说明与脚注都用它。 */
+  prefix: string;
   /**
    * 当前版本（平台口径：`cn` / `intl`）。分国内版 / 国际版的平台（Trae）
    * 只列这个版本的模型；不支持版本的平台不传，行为与升级前一致。
@@ -328,8 +338,176 @@ export function PlatformModelsPanel({platform, realm, supportsModelRates = false
 
   const hasFilter = q.trim() !== '' || series !== 'all' || cap !== 'all';
 
-  return (
+  /**
+   * 顶部操作行。
+   *
+   * 与 WorkBuddy 模型页 / 账号页同一版式：所有操作都放进 PageHeader 的 actions
+   * 行，不再塞进模型卡片头部。卡片里只留表格与筛选计数，视线不会被一排按钮
+   * 切断；窄屏下这行会自然折行，不会把标题挤扁。
+   *
+   * 倍率 / 目录的导入导出按平台能力出现（Trae 支持，其余平台没有这套三层来源）；
+   * 「重置」只在确实导入过时出现——没导入过时它什么也不会改，摆出来只会让人
+   * 以为内置值已经被覆盖过一次。
+   */
+  const headerActions = (
     <>
+      {supportsModelRates && (
+        <>
+          <input
+            ref={rateFile}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              // 清空 value：同一个文件改完再选一次也要能触发 onChange。
+              e.target.value = '';
+              if (file) void importRates(file);
+            }}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-full"
+            onClick={() => rateFile.current?.click()}
+            title={t('platforms.ratesImportTitle')}
+          >
+            <Upload />
+            {t('platforms.ratesImport')}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-full"
+            onClick={() => void exportRates()}
+            title={t('platforms.ratesExportTitle')}
+          >
+            <Download />
+            {t('platforms.ratesExport')}
+          </Button>
+          {importedCount > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-full text-muted-foreground"
+              onClick={() => void resetRates()}
+              title={t('platforms.ratesResetTitle')}
+            >
+              <RotateCcw />
+              {t('platforms.ratesReset')}
+            </Button>
+          )}
+        </>
+      )}
+      {supportsModelCatalog && (
+        <>
+          <input
+            ref={catalogFile}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              // 清空 value：同一个文件改完再选一次也要能触发 onChange。
+              e.target.value = '';
+              if (file) void importCatalog(file);
+            }}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-full"
+            onClick={() => catalogFile.current?.click()}
+            title={t('platforms.catalogImportTitle')}
+          >
+            <Upload />
+            {t('platforms.catalogImport')}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-full"
+            onClick={() => void exportCatalog()}
+            title={t('platforms.catalogExportTitle')}
+          >
+            <Download />
+            {t('platforms.catalogExport')}
+          </Button>
+          {importedCatalog > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-full text-muted-foreground"
+              onClick={() => void resetCatalog()}
+              title={t('platforms.catalogResetTitle')}
+            >
+              <RotateCcw />
+              {t('platforms.catalogReset')}
+            </Button>
+          )}
+        </>
+      )}
+      <Button
+        variant="outline"
+        size="sm"
+        className="rounded-full"
+        disabled={modelsState.isRefreshing}
+        onClick={() => void refreshModels()}
+      >
+        {modelsState.isRefreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+        {t('platforms.modelsRefresh')}
+      </Button>
+    </>
+  );
+
+  /** 页面外壳：标题 / 说明 / 操作 + 模型 ↔ 测试台二级导航。 */
+  const header = (
+    <>
+      <PageHeader
+        stacked
+        title={`${t('platforms.modelsTitle')} · ${label}`}
+        description={t('platforms.modelsDesc', {label, prefix})}
+        actions={headerActions}
+      />
+      <PageSectionTabs />
+    </>
+  );
+
+  /** 倍率 / 目录的来源说明：只在对应数据取到后出现，空着不占位。 */
+  const hasSources =
+    (supportsModelRates && !!rates) || (supportsModelCatalog && !!catalog);
+
+  return (
+    <div className="flex flex-col gap-4 md:gap-6" aria-busy={modelsState.isRefreshing}>
+      {header}
+
+      {/* 倍率 / 目录的来源：只说明数据从哪来，不参与操作。 */}
+      {hasSources && (
+        <section className="flex flex-col gap-1 rounded-[16px] bg-muted/60 px-3.5 py-2.5 text-[11px] text-muted-foreground">
+          {supportsModelRates && rates && (
+            <p>
+              {t('platforms.ratesSource', {
+                imported: rates.sources.imported,
+                desktop: rates.sources.desktop,
+                bundled: rates.sources.bundled,
+              })}
+              {rates.imported_at ? ` · ${rates.imported_at}` : ''}
+            </p>
+          )}
+          {supportsModelCatalog && catalog && (
+            <p>
+              {t('platforms.catalogSource', {
+                total: catalog.total,
+                imported: catalog.sources.imported,
+                desktop: catalog.sources.desktop,
+                bundled: catalog.sources.bundled,
+              })}
+              {catalog.imported_at ? ` · ${catalog.imported_at}` : ''}
+            </p>
+          )}
+        </section>
+      )}
+
       {/* 统计卡：与模型中心同一口径；首屏还没拿到目录时不显示，避免用 0 误导 */}
       {!modelsState.isInitialLoading && listed.length > 0 && (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -358,165 +536,26 @@ export function PlatformModelsPanel({platform, realm, supportsModelRates = false
         </div>
       )}
 
+      {/* 搜索与筛选独立成块，与 WorkBuddy 模型页同一版式。 */}
+      {listed.length > 0 && (
+        <section className="rounded-[20px] bg-muted p-3.5">
+          <ModelFilterBar
+            q={q}
+            onQChange={setQ}
+            series={series}
+            seriesOptions={seriesOptions}
+            onSeriesChange={setSeries}
+            cap={cap}
+            onCapChange={setCap}
+            sort={sort}
+            onSortChange={setSort}
+            showCreditSort={hasCreditRatio}
+          />
+        </section>
+      )}
+
+      {/* 模型列表：卡片里只留表格与计数，操作全在页面标题行。 */}
       <section className="overflow-hidden rounded-[20px] bg-muted">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3.5 py-3">
-          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <Boxes className="h-3.5 w-3.5" />
-            <h2 className="text-xs font-medium text-foreground">{t('platforms.modelsTitle')}</h2>
-            <Badge variant="secondary" className="rounded-md px-1.5 text-[10px] tabular-nums">
-              {listed.length}
-            </Badge>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {supportsModelRates && (
-              <>
-                <input
-                  ref={rateFile}
-                  type="file"
-                  accept="application/json,.json"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    // 清空 value：同一个文件改完再选一次也要能触发 onChange。
-                    e.target.value = '';
-                    if (file) void importRates(file);
-                  }}
-                />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 rounded-full px-2.5 text-[11px]"
-                  onClick={() => rateFile.current?.click()}
-                  title={t('platforms.ratesImportTitle')}
-                >
-                  <Upload />
-                  {t('platforms.ratesImport')}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 rounded-full px-2.5 text-[11px]"
-                  onClick={() => void exportRates()}
-                  title={t('platforms.ratesExportTitle')}
-                >
-                  <Download />
-                  {t('platforms.ratesExport')}
-                </Button>
-                {importedCount > 0 && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 rounded-full px-2.5 text-[11px] text-muted-foreground"
-                    onClick={() => void resetRates()}
-                    title={t('platforms.ratesResetTitle')}
-                  >
-                    <RotateCcw />
-                    {t('platforms.ratesReset')}
-                  </Button>
-                )}
-              </>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 rounded-full px-2.5 text-[11px]"
-              disabled={modelsState.isRefreshing}
-              onClick={() => void refreshModels()}
-            >
-              {modelsState.isRefreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              {t('platforms.modelsRefresh')}
-            </Button>
-          </div>
-        </div>
-
-        {supportsModelRates && rates && (
-          <p className="border-b border-border/60 px-3.5 py-2 text-[11px] text-muted-foreground">
-            {t('platforms.ratesSource', {
-              imported: rates.sources.imported,
-              desktop: rates.sources.desktop,
-              bundled: rates.sources.bundled,
-            })}
-            {rates.imported_at ? ` · ${rates.imported_at}` : ''}
-          </p>
-        )}
-
-        {supportsModelCatalog && catalog && (
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3.5 py-2 text-[11px] text-muted-foreground">
-            <span>
-              {t('platforms.catalogSource', {
-                total: catalog.total,
-                imported: catalog.sources.imported,
-                desktop: catalog.sources.desktop,
-                bundled: catalog.sources.bundled,
-              })}
-              {catalog.imported_at ? ` · ${catalog.imported_at}` : ''}
-            </span>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <input
-                ref={catalogFile}
-                type="file"
-                accept="application/json,.json"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  // 清空 value：同一个文件改完再选一次也要能触发 onChange。
-                  e.target.value = '';
-                  if (file) void importCatalog(file);
-                }}
-              />
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 rounded-full px-2.5 text-[11px]"
-                onClick={() => catalogFile.current?.click()}
-                title={t('platforms.catalogImportTitle')}
-              >
-                <Upload />
-                {t('platforms.catalogImport')}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 rounded-full px-2.5 text-[11px]"
-                onClick={() => void exportCatalog()}
-                title={t('platforms.catalogExportTitle')}
-              >
-                <Download />
-                {t('platforms.catalogExport')}
-              </Button>
-              {importedCatalog > 0 && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 rounded-full px-2.5 text-[11px] text-muted-foreground"
-                  onClick={() => void resetCatalog()}
-                  title={t('platforms.catalogResetTitle')}
-                >
-                  <RotateCcw />
-                  {t('platforms.catalogReset')}
-                </Button>
-              )}
-            </div>
-          </div>
-        )}
-
-        {listed.length > 0 && (
-          <div className="border-b border-border/60 p-3.5">
-            <ModelFilterBar
-              q={q}
-              onQChange={setQ}
-              series={series}
-              seriesOptions={seriesOptions}
-              onSeriesChange={setSeries}
-              cap={cap}
-              onCapChange={setCap}
-              sort={sort}
-              onSortChange={setSort}
-              showCreditSort={hasCreditRatio}
-            />
-          </div>
-        )}
-
         {!!modelsState.errors.models && (
           <div className="px-3.5 pt-3">
             <LoadError
@@ -634,6 +673,10 @@ export function PlatformModelsPanel({platform, realm, supportsModelRates = false
           </div>
         )}
       </section>
-    </>
+
+      <p className="text-[11px] leading-4 text-muted-foreground">
+        {t('platforms.footnote', {prefix})}
+      </p>
+    </div>
   );
 }

@@ -359,6 +359,10 @@ class LoomyAdapter(PlatformAdapter):
     def list_accounts(self) -> list[dict]:
         return [store.public_account(a) for a in store.list_accounts()]
 
+    def export_accounts(self) -> list[dict]:
+        """导出含明文凭据的账号，仅供管理员导出接口调用。"""
+        return store.list_accounts()
+
     def import_account(self, payload: dict) -> dict:
         """导入账号：手机号 + 密码（服务端登录）或直接粘 session。
 

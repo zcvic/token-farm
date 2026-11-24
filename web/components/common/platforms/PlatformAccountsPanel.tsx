@@ -30,6 +30,7 @@ import {
 
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {EmptyState} from '@/components/common/layout/EmptyState';
+import {PageHeader} from '@/components/common/layout/PageHeader';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {LoadError} from '@/components/common/states/LoadError';
 import {SkeletonBar} from '@/components/common/states/SkeletonBar';
@@ -93,6 +94,7 @@ import {
 } from '@/lib/platform-realm';
 import {cn} from '@/lib/utils';
 import {PlatformCoolingDialog} from './PlatformCoolingDialog';
+import {PlatformImportExportButton} from './PlatformImportExportButton';
 import {PlatformProxyDialog} from './PlatformProxyDialog';
 import {PlatformTasksPanel} from './PlatformTasksPanel';
 import {PlatformWeightDialog} from './PlatformWeightDialog';
@@ -155,8 +157,9 @@ function creditNum(value: number | null | undefined,
 /**
  * 非 WorkBuddy 平台的账号管理（原「多平台」页里的账号部分）。
  *
- * 页面外壳（标题、说明）由调用方提供，这里只负责一个平台的数据与操作：
- * 账号列表、积分、签到、令牌刷新、导入与网页登录。
+ * 这个组件连页面外壳一起渲染：PageHeader（标题 / 说明 / 操作按钮）+ 账号列表。
+ * 统一放在这里，是因为所有操作按钮都要用到组件内部的状态与接口，版式又与
+ * WorkBuddy 账号页保持一致——按钮单独成行在卡片上方，不挤进账号卡片。
  *
  * 权限档位由后端强制：刷新 / 签到要管理员；导入 / 删除 / 网页登录动的是凭据，
  * 只对会话管理员开放。这里只是把不可用的按钮藏掉。
@@ -919,6 +922,8 @@ export function PlatformAccountsPanel({
   // 平台任务（Loomy：签到 / 绑定邀请码 / 兑换兑换码）。没有这套概念的平台
   // 不显示分段切换，整块任务页也不渲染。
   const supportsTasks = !!info?.supports_tasks;
+  // 能否导出账号（含明文凭据）。虚拟平台没有账号文件，不给导出入口。
+  const supportsExport = !!info?.supports_export;
   // 回调固定指向 `127.0.0.1:<端口>`（Trae 的授权页强校验），只有这类平台
   // 才需要提示「面板与浏览器必须同机」。Loomy 的回调落在 loomy.xunfei.cn，
   // 走的也是「粘链接」，不受这条约束。
@@ -1034,6 +1039,185 @@ export function PlatformAccountsPanel({
     </div>
   ) : null;
 
+  /**
+   * 顶部操作行。
+   *
+   * 与 WorkBuddy 账号页同一版式：所有操作都放进 PageHeader 的 actions 行，
+   * 不再塞进账号卡片头部。卡片里只留表格与分页，视线不会被一排按钮切断；
+   * 窄屏下这行会自然折行，不会把标题挤扁。
+   */
+  const headerActions = (
+    <>
+      {/* 单账号并发：每个账号最多几个在途请求（0 = 不限）。
+          非管理员只读展示——它影响的是整体吞吐，不是单个账号的开关。 */}
+      {pool && (
+        <label
+          className="flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground"
+          title={t('platforms.poolHint')}
+        >
+          <span className="whitespace-nowrap">{t('platforms.poolLimit')}</span>
+          {isAdmin ? (
+            <Input
+              value={poolDraft}
+              onChange={(e) => setPoolDraft(e.target.value)}
+              onBlur={() => void commitPool()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void commitPool();
+                }
+              }}
+              inputMode="numeric"
+              disabled={poolBusy}
+              aria-label={t('platforms.poolLimit')}
+              className="h-6 w-12 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
+            />
+          ) : (
+            <span className="tabular-nums text-foreground">{pool.max_in_flight}</span>
+          )}
+          <span className="text-[10px] opacity-70">
+            {pool.max_in_flight === 0 ? t('platforms.poolUnlimited') : ''}
+          </span>
+        </label>
+      )}
+      {/* 批量签到节奏：几个账号同时跑 + 相邻两个账号隔多久开始。
+          默认并发 2、间隔 2–5 秒；间隔 0 = 不间隔。非管理员只读展示。 */}
+      {pool?.checkin_limits && (
+        <div
+          className="flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground"
+          title={t('platforms.checkinPaceHint')}
+        >
+          <CalendarClock className="h-3.5 w-3.5" />
+          <span className="whitespace-nowrap">{t('platforms.checkinPace')}</span>
+          {isAdmin ? (
+            <>
+              <Input
+                value={paceDraft.concurrency}
+                onChange={(e) => setPaceDraft((d) => ({...d, concurrency: e.target.value}))}
+                onBlur={() => void commitPace()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void commitPace();
+                  }
+                }}
+                inputMode="numeric"
+                disabled={paceBusy}
+                aria-label={t('platforms.checkinConcurrency')}
+                className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
+              />
+              <span className="whitespace-nowrap">{t('platforms.checkinConcurrency')}</span>
+              <span className="opacity-40">·</span>
+              <Input
+                value={paceDraft.min}
+                onChange={(e) => setPaceDraft((d) => ({...d, min: e.target.value}))}
+                onBlur={() => void commitPace()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void commitPace();
+                  }
+                }}
+                inputMode="numeric"
+                disabled={paceBusy}
+                aria-label={t('platforms.checkinDelayMin')}
+                className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
+              />
+              <span className="opacity-60">–</span>
+              <Input
+                value={paceDraft.max}
+                onChange={(e) => setPaceDraft((d) => ({...d, max: e.target.value}))}
+                onBlur={() => void commitPace()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void commitPace();
+                  }
+                }}
+                inputMode="numeric"
+                disabled={paceBusy}
+                aria-label={t('platforms.checkinDelayMax')}
+                className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
+              />
+              <span className="whitespace-nowrap">{t('platforms.checkinSeconds')}</span>
+            </>
+          ) : (
+            <span className="tabular-nums text-foreground">
+              {pool.checkin_concurrency} · {pool.checkin_delay_min}–{pool.checkin_delay_max}
+              {t('platforms.checkinSeconds')}
+            </span>
+          )}
+        </div>
+      )}
+      <Button
+        variant="outline"
+        size="sm"
+        className="rounded-full"
+        disabled={accountsState.isRefreshing}
+        onClick={() => void reloadAll()}
+      >
+        {accountsState.isRefreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+        {t('common.refresh')}
+      </Button>
+      {canAddAccount && (
+        <>
+          {supportsWebLogin && (
+            <Button
+              size="sm"
+              className="rounded-full"
+              disabled={busyAny || loginStarting || login !== null}
+              onClick={() => void startWebLogin()}
+              title={platform === 'dumate'
+                ? t('platforms.loginHintDumate')
+                : supportsLoginCallback
+                  ? t('platforms.loginHint')
+                  : t('platforms.loginHintDevice')}
+            >
+              {loginStarting ? <Loader2 className="animate-spin" /> : <LogIn />}
+              {t('platforms.login')}
+            </Button>
+          )}
+          {supportsDesktop && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-full"
+              disabled={busyAny}
+              onClick={() => void importDesktop()}
+              title={t('platforms.importDesktopHint')}
+            >
+              {busy === 'import' ? <Loader2 className="animate-spin" /> : <MonitorDown />}
+              {t('platforms.importDesktop')}
+            </Button>
+          )}
+          <PlatformImportExportButton
+            platform={platform}
+            label={label}
+            supportsExport={supportsExport}
+            onSuccess={reloadAll}
+            onPasteImport={() => {
+              setImportText('');
+              setImportOpen(true);
+            }}
+          />
+          {/* 批量签到会改动每个账号的签到状态，仍只对管理员开放。 */}
+          {isAdmin && supportsCheckin && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-full"
+              disabled={busyAny || !accounts.length}
+              onClick={() => void checkinAll()}
+            >
+              {busy === 'all' ? <Loader2 className="animate-spin" /> : <CircleCheck />}
+              {t('platforms.checkinAll')}
+            </Button>
+          )}
+        </>
+      )}
+    </>
+  );
+
   // 视图切换：账号列表 / 平台任务。只有声明了 `supports_tasks` 的平台才出现
   // ——其余平台没有任务概念，多一个永远空的页签只是噪音。
   const viewSwitch = supportsTasks ? (
@@ -1064,7 +1248,13 @@ export function PlatformAccountsPanel({
   // 多出三个按钮和两个输入框。调度参数弹窗只服务账号行，这里不必渲染。
   if (supportsTasks && view === 'tasks') {
     return (
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4 md:gap-6">
+        <PageHeader
+          stacked
+          title={`${t('platforms.accountsTitle')} · ${label}`}
+          description={t('platforms.accountsDesc', {label})}
+          actions={headerActions}
+        />
         {viewSwitch}
         <PlatformTasksPanel
           platform={platform}
@@ -1076,197 +1266,21 @@ export function PlatformAccountsPanel({
   }
 
   return (
-    <>
+    <div className="flex flex-col gap-4 md:gap-6" aria-busy={accountsState.isRefreshing}>
+      <PageHeader
+        stacked
+        title={`${t('platforms.accountsTitle')} · ${label}`}
+        description={t('platforms.accountsDesc', {label})}
+        actions={headerActions}
+      />
       {viewSwitch}
-      <section className="overflow-hidden rounded-[20px] bg-muted">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3.5 py-3">
-          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <KeyRound className="h-3.5 w-3.5" />
-            <h2 className="text-xs font-medium text-foreground">{t('platforms.accountsTitle')}</h2>
-            <span>· {label}</span>
-            <Badge variant="secondary" className="rounded-md px-1.5 text-[10px] tabular-nums">
-              {scopedAccounts.length}
-            </Badge>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {/* 单账号并发：每个账号最多几个在途请求（0 = 不限）。
-                非管理员只读展示——它影响的是整体吞吐，不是单个账号的开关。 */}
-            {pool && (
-              <label
-                className="flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground"
-                title={t('platforms.poolHint')}
-              >
-                <span className="whitespace-nowrap">{t('platforms.poolLimit')}</span>
-                {isAdmin ? (
-                  <Input
-                    value={poolDraft}
-                    onChange={(e) => setPoolDraft(e.target.value)}
-                    onBlur={() => void commitPool()}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        void commitPool();
-                      }
-                    }}
-                    inputMode="numeric"
-                    disabled={poolBusy}
-                    aria-label={t('platforms.poolLimit')}
-                    className="h-6 w-12 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
-                  />
-                ) : (
-                  <span className="tabular-nums text-foreground">{pool.max_in_flight}</span>
-                )}
-                <span className="text-[10px] opacity-70">
-                  {pool.max_in_flight === 0 ? t('platforms.poolUnlimited') : ''}
-                </span>
-              </label>
-            )}
-            {/* 批量签到节奏：几个账号同时跑 + 相邻两个账号隔多久开始。
-                默认并发 2、间隔 2–5 秒；间隔 0 = 不间隔。非管理员只读展示。 */}
-            {pool?.checkin_limits && (
-              <div
-                className="flex items-center gap-1.5 rounded-full border border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground"
-                title={t('platforms.checkinPaceHint')}
-              >
-                <CalendarClock className="h-3.5 w-3.5" />
-                <span className="whitespace-nowrap">{t('platforms.checkinPace')}</span>
-                {isAdmin ? (
-                  <>
-                    <Input
-                      value={paceDraft.concurrency}
-                      onChange={(e) => setPaceDraft((d) => ({...d, concurrency: e.target.value}))}
-                      onBlur={() => void commitPace()}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          void commitPace();
-                        }
-                      }}
-                      inputMode="numeric"
-                      disabled={paceBusy}
-                      aria-label={t('platforms.checkinConcurrency')}
-                      className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
-                    />
-                    <span className="whitespace-nowrap">{t('platforms.checkinConcurrency')}</span>
-                    <span className="opacity-40">·</span>
-                    <Input
-                      value={paceDraft.min}
-                      onChange={(e) => setPaceDraft((d) => ({...d, min: e.target.value}))}
-                      onBlur={() => void commitPace()}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          void commitPace();
-                        }
-                      }}
-                      inputMode="numeric"
-                      disabled={paceBusy}
-                      aria-label={t('platforms.checkinDelayMin')}
-                      className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
-                    />
-                    <span className="opacity-60">–</span>
-                    <Input
-                      value={paceDraft.max}
-                      onChange={(e) => setPaceDraft((d) => ({...d, max: e.target.value}))}
-                      onBlur={() => void commitPace()}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          void commitPace();
-                        }
-                      }}
-                      inputMode="numeric"
-                      disabled={paceBusy}
-                      aria-label={t('platforms.checkinDelayMax')}
-                      className="h-6 w-8 border-0 bg-transparent px-1 text-center text-[11px] tabular-nums shadow-none focus-visible:ring-0"
-                    />
-                    <span className="whitespace-nowrap">{t('platforms.checkinSeconds')}</span>
-                  </>
-                ) : (
-                  <span className="tabular-nums text-foreground">
-                    {pool.checkin_concurrency} · {pool.checkin_delay_min}–{pool.checkin_delay_max}
-                    {t('platforms.checkinSeconds')}
-                  </span>
-                )}
-              </div>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 rounded-full px-2.5 text-[11px]"
-              disabled={accountsState.isRefreshing}
-              onClick={() => void reloadAll()}
-            >
-              {accountsState.isRefreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              {t('common.refresh')}
-            </Button>
-            {canAddAccount && (
-              <>
-                {supportsWebLogin && (
-                  <Button
-                    size="sm"
-                    className="h-7 rounded-full px-2.5 text-[11px]"
-                    disabled={busyAny || loginStarting || login !== null}
-                    onClick={() => void startWebLogin()}
-                    title={platform === 'dumate'
-                      ? t('platforms.loginHintDumate')
-                      : supportsLoginCallback
-                        ? t('platforms.loginHint')
-                        : t('platforms.loginHintDevice')}
-                  >
-                    {loginStarting ? <Loader2 className="animate-spin" /> : <LogIn />}
-                    {t('platforms.login')}
-                  </Button>
-                )}
-                {supportsDesktop && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 rounded-full px-2.5 text-[11px]"
-                    disabled={busyAny}
-                    onClick={() => void importDesktop()}
-                    title={t('platforms.importDesktopHint')}
-                  >
-                    {busy === 'import' ? <Loader2 className="animate-spin" /> : <MonitorDown />}
-                    {t('platforms.importDesktop')}
-                  </Button>
-                )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 rounded-full px-2.5 text-[11px]"
-                  disabled={busyAny}
-                  onClick={() => {
-                    setImportText('');
-                    setImportOpen(true);
-                  }}
-                >
-                  <FileJson />
-                  {t('platforms.importManual')}
-                </Button>
-                {/* 批量签到会改动每个账号的签到状态，仍只对管理员开放。 */}
-                {isAdmin && supportsCheckin && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 rounded-full px-2.5 text-[11px]"
-                    disabled={busyAny || !accounts.length}
-                    onClick={() => void checkinAll()}
-                  >
-                    {busy === 'all' ? <Loader2 className="animate-spin" /> : <CircleCheck />}
-                    {t('platforms.checkinAll')}
-                  </Button>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* 检索 / 状态筛选 / 排序：与 WorkBuddy 账号页同一套语义。
-            账号还没取到时整块不渲染——那时计数全是 0，摆出来等于说
-            「一个账号都没有」。 */}
-        {scopedAccounts.length > 0 && (
-          <div className="flex flex-col gap-3 border-b border-border/60 px-3.5 py-3 lg:flex-row lg:items-center">
+      {/* 检索 / 状态筛选 / 排序：与 WorkBuddy 账号页同一套语义。
+          账号还没取到时整块不渲染——那时计数全是 0，摆出来等于说
+          「一个账号都没有」。独立成一块（而不是塞进账号卡片），与 WorkBuddy
+          的检索区版式一致。 */}
+      {scopedAccounts.length > 0 && (
+        <section className="rounded-[20px] bg-muted p-3.5">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -1307,8 +1321,10 @@ export function PlatformAccountsPanel({
               </Select>
             </div>
           </div>
-        )}
+        </section>
+      )}
 
+      <section className="overflow-hidden rounded-[20px] bg-muted">
         {!!accountsState.errors.accounts && (
           <div className="px-3.5 pt-3">
             <LoadError
@@ -2268,6 +2284,6 @@ export function PlatformAccountsPanel({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+    </div>
   );
 }

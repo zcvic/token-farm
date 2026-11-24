@@ -182,6 +182,20 @@ class QoderClient:
         return [a for a in accounts if isinstance(a, dict)] \
             if isinstance(accounts, list) else []
 
+    def export_accounts(self, realm: str | None = None) -> list[dict]:
+        """导出**含明文凭据**的账号行（内置网关的标准导出文档）。
+
+        仅供管理员导出接口调用：`secrets=1` 时 vendor 不会剥掉
+        accessToken / refreshToken / personalToken。
+        """
+        params: dict[str, Any] = {'secrets': '1'}
+        if realm in ('cn', 'intl'):
+            params['realm'] = realm
+        data = self._request('GET', '/accounts/export', params=params)
+        rows = data.get('accounts')
+        return [a for a in rows if isinstance(a, dict)] \
+            if isinstance(rows, list) else []
+
     def import_account(self, payload: dict) -> dict:
         """导入一份账号文档，返回网关里的账号对象。
 

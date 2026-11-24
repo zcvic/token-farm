@@ -88,7 +88,6 @@ export default function ModelsPage() {
 }
 
 function PlatformModelsPage() {
-  const t = useT();
   const {platform, label, platformInfo} = usePlatform();
   const {realm} = useRealm();
   // 分版本平台的对外模型 ID 带区域后缀（`traecn/` / `traecom/`）；
@@ -99,25 +98,18 @@ function PlatformModelsPage() {
   // 分版本的平台只列当前版本；界面口径 `global` 在这里翻成平台口径 `intl`。
   const modelRealm = platformInfo?.supports_realm ? platformRealmOf(realm) : undefined;
 
+  // 标题 / 说明 / 操作按钮 / 二级导航与脚注都由 panel 自己渲染：模型页的所有
+  // 操作（刷新模型、导入导出倍率与目录）都在 PageHeader 的 actions 行，与
+  // WorkBuddy 模型页同版式。
   return (
-    <div className="flex flex-col gap-4 md:gap-6">
-      <PageHeader
-        title={`${t('platforms.modelsTitle')} · ${label}`}
-        description={t('platforms.modelsDesc', {label, prefix})}
-      />
-      {/* 二级导航：模型 ↔ 聊天测试台。平台模式下原本缺这一段，切到 Trae 后
-          测试台入口就消失了；两页是同一件事的两半，入口必须成对出现。 */}
-      <PageSectionTabs />
-      <PlatformModelsPanel
-        platform={platform}
-        realm={modelRealm}
-        supportsModelRates={Boolean(platformInfo?.supports_model_rates)}
-        supportsModelCatalog={Boolean(platformInfo?.supports_model_catalog)}
-      />
-      <p className="text-[11px] leading-4 text-muted-foreground">
-        {t('platforms.footnote', {prefix})}
-      </p>
-    </div>
+    <PlatformModelsPanel
+      platform={platform}
+      label={label}
+      prefix={prefix}
+      realm={modelRealm}
+      supportsModelRates={Boolean(platformInfo?.supports_model_rates)}
+      supportsModelCatalog={Boolean(platformInfo?.supports_model_catalog)}
+    />
   );
 }
 

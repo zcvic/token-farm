@@ -232,6 +232,10 @@ class QoderAdapter(PlatformAdapter):
     def list_accounts(self) -> list[dict]:
         return [mapping.public_account(a) for a in self._accounts_snapshot()]
 
+    def export_accounts(self) -> list[dict]:
+        """导出含明文凭据的账号，仅供管理员导出接口调用。"""
+        return self.client.export_accounts()
+
     def import_account(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise PlatformError('账号必须是 JSON 对象', status=400,

@@ -139,6 +139,9 @@ def list_platforms(user: dict = Depends(security.current_user)) -> dict:
             # 是否有「平台任务」面板（签到之外的邀请码 / 兑换码等）
             'supports_tasks': type(adapter).supports_tasks
             is not PlatformAdapter.supports_tasks,
+            # 能否导出账号（含明文凭据）。虚拟平台没有自己的账号文件，为 false。
+            'supports_export': type(adapter).export_accounts
+            is not PlatformAdapter.export_accounts,
             'account_count': 0,
         }
         try:
@@ -355,6 +358,36 @@ async def list_accounts(name: str,
                         user: dict = Depends(security.current_user)) -> dict:
     adapter = _adapter(name)
     return {'platform': name, 'accounts': adapter.list_accounts()}
+
+
+@router.get('/{name}/accounts/export')
+async def export_accounts(name: str,
+                          user: dict = Depends(security.require_session_admin)) -> dict:
+    """导出本平台账号（**含明文凭据**），格式与导入接口一致。
+
+    为什么单独一个接口、且只给会话管理员：账号列表刻意脱敏，但迁移需要完整
+    凭据。导出的文档是 `{format, version, exportedAt, count, accounts}`，
+    直接把 `accounts` 交给 `POST /accounts/import` 就能回灌。
+
+    Qoder 的账号在内置网关里，适配器会走网关的 `/accounts/export`；其余平台
+    直接读自己的账号目录。两者都只在这里被允许返回明文。
+    """
+    adapter = _adapter(name)
+    exporter = getattr(adapter, 'export_accounts', None)
+    if type(adapter).export_accounts is PlatformAdapter.export_accounts:
+        raise HTTPException(status_code=400,
+                            detail=f'{adapter.label} 不支持导出账号')
+    # 读盘 / 调网关都是同步工作，放进线程避免堵住事件循环。
+    accounts = await asyncio.to_thread(exporter)
+    security.audit(user, 'export_platform_accounts', name,
+                   f'count={len(accounts)}')
+    return {
+        'format': f'{name}-accounts',
+        'version': 1,
+        'exportedAt': datetime.now(timezone.utc).isoformat(),
+        'count': len(accounts),
+        'accounts': accounts,
+    }
 
 
 @router.post('/{name}/accounts/import')

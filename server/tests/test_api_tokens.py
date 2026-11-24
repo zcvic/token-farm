@@ -452,12 +452,18 @@ class ExportRequiresSessionTest(unittest.TestCase):
                 candidates = [x for x in inner.routes if isinstance(x, APIRoute)]
             else:
                 candidates = [r] if isinstance(r, APIRoute) else []
-            found.extend(x for x in candidates if x.path == '/api/accounts/export')
+            found.extend(x for x in candidates if x.path in (
+                '/api/accounts/export',
+                '/api/platforms/{name}/accounts/export',
+            ))
         return found
 
     def test_export_is_session_only(self) -> None:
         routes = self._export_routes()
-        self.assertTrue(routes, '找不到 /api/accounts/export —— 路由改名了？这条守卫会空转')
+        self.assertEqual(
+            {route.path for route in routes},
+            {'/api/accounts/export', '/api/platforms/{name}/accounts/export'},
+            '找不到账号导出路由 —— 路由改名了？这条守卫会空转')
 
         def dep_names(route) -> list[str]:  # noqa: ANN001
             names: list[str] = []

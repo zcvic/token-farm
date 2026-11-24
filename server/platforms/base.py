@@ -310,6 +310,17 @@ class PlatformAdapter(ABC):
     def list_accounts(self) -> list[dict]:
         """账号列表；**不含** token / refreshToken 明文。"""
 
+    def export_accounts(self) -> list[dict]:
+        """导出**含明文凭据**的原始账号（可选能力）。
+
+        与 `list_accounts` 刻意分开：列表接口给所有只读令牌看，导出的账号文件
+        等于一把钥匙，只能由管理员接口调用（路由负责鉴权与审计）。
+
+        基类默认不支持——虚拟平台（组合 / WorkBuddy 成员）没有自己的账号文件。
+        """
+        raise PlatformError('该平台不支持导出账号', status=400,
+                            code='export_unsupported')
+
     @abstractmethod
     def import_account(self, payload: dict) -> dict:
         """导入或更新一个账号，返回脱敏后的账号。"""

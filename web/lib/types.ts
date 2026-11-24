@@ -2212,6 +2212,11 @@ export interface PlatformInfo {
    * 为 true 时账号页出现「任务」标签页。
    */
   supports_tasks?: boolean;
+  /**
+   * 能否导出账号（含明文凭据）为可再导入的 JSON。
+   * 虚拟平台（组合 / WorkBuddy 成员）没有账号文件，为 false。
+   */
+  supports_export?: boolean;
   account_count: number;
   /** 单个平台坏掉时的原因（该平台其余字段仍然有效） */
   error?: string;
@@ -2684,12 +2689,87 @@ export interface PlatformTaskStatus {
   uid: string;
   nickname?: string;
   realm?: string;
-  activation: PlatformActivation;
+  /** Loomy：邀请码激活状态（DuMate 没有这个概念） */
+  activation?: PlatformActivation;
   /** 上次同步到的签到结果（null = 还没同步过） */
-  checkin: PlatformTaskCheckin | null;
-  invite_codes: PlatformInviteCode[];
+  checkin?: PlatformTaskCheckin | null;
+  invite_codes?: PlatformInviteCode[];
   /** 上次同步时刻（epoch 秒） */
   synced_at: number;
+  /** DuMate：成长任务（扁平列表，便于统计进度） */
+  tasks?: PlatformTaskItem[];
+  /** DuMate：按分组展示的成长任务 */
+  task_groups?: PlatformTaskGroup[];
+  /** DuMate：抽奖状态（没有活动 / 读取失败时为 null） */
+  draw?: PlatformDrawStatus | null;
+  /** DuMate：邀请码与邀请统计 */
+  invite?: PlatformInviteStatus;
+  /** DuMate：单路读取失败的明细（面板照常显示其它分段） */
+  errors?: PlatformTaskEndpointError[];
+}
+
+/** 成长任务的一条（DuMate `/activity/growth-plan/tasks`）。 */
+export interface PlatformTaskItem {
+  task_id: string;
+  task_type?: string;
+  title?: string;
+  sub_title?: string;
+  query?: string;
+  suite_name?: string;
+  jump_link?: string;
+  reward_count?: number;
+  reward_points?: number;
+  repeat_count?: number;
+  completed_count?: number;
+  /** completed_count >= repeat_count */
+  done?: boolean;
+  /** QUERY_INPUT / USE_SKILL：后端可以自动完成 */
+  auto?: boolean;
+  display_terminal?: string[];
+  group_code?: string;
+  group_name?: string;
+  /** 执行结果（`results[]` 里用）：是否成功 / 是否本来就已完成 */
+  ok?: boolean;
+  already?: boolean;
+  code?: string;
+  error?: string;
+  skipped?: boolean;
+}
+
+/** 成长任务分组。 */
+export interface PlatformTaskGroup {
+  group_code?: string;
+  group_name?: string;
+  tasks: PlatformTaskItem[];
+}
+
+/** 单路读取失败（任务面板是尽力而为，不因一路失败整页报错）。 */
+export interface PlatformTaskEndpointError {
+  endpoint: string;
+  code?: string;
+  message: string;
+}
+
+/** 抽奖状态（DuMate `/activity/growth-plan/draw/status`）。 */
+export interface PlatformDrawStatus {
+  /** null / undefined = 上游没给，不等于 0 次 */
+  remaining_draws?: number | null;
+  prizes?: Record<string, unknown>[];
+  my_prizes?: Record<string, unknown>[];
+  winning_records?: Record<string, unknown>[];
+}
+
+/** 邀请码与邀请统计（DuMate `/invitation_code/*`）。 */
+export interface PlatformInviteStatus {
+  invitation_code?: string;
+  type?: string;
+  created_at?: number;
+  invite_message?: string;
+  invited_count?: number;
+  total_points?: number;
+  /** 邀请码生成时间距今是否在 7 天内（null = 未知） */
+  within_7_days?: boolean | null;
+  error?: string;
 }
 
 /** 任务动作的执行结果（签到 / 绑定邀请码 / 兑换）。 */
@@ -2699,6 +2779,18 @@ export interface PlatformTaskResult extends Partial<PlatformTaskStatus> {
   invite_code?: string;
   account?: string;
   data?: Record<string, unknown>;
+  /** DuMate：抽奖返回 */
+  draw_record_id?: string;
+  remaining_draws?: number;
+  prize?: Record<string, unknown> | null;
+  prize_name?: string;
+  prize_type?: string;
+  needs_claim?: boolean;
+  /** DuMate：一批任务的逐项结果 */
+  results?: PlatformTaskItem[];
+  done_count?: number;
+  already_count?: number;
+  fail_count?: number;
 }
 
 /** 批量签到里每个账号的结局。 */
@@ -2785,6 +2877,21 @@ export interface PlatformImportResult {
   failed: {uid?: string; error: string; code?: string}[];
   /** 一键导入时还会带上读取过的客户端存储路径 */
   sources?: string[];
+}
+
+/**
+ * 平台账号导出文档。
+ *
+ * `accounts` 里是**含明文凭据**的原始账号行（与导入接口接受的形状一致）；
+ * 只有管理员能拿到，服务端会记审计。`format` / `version` 供未来兼容判断，
+ * 回灌时直接把这个对象或它里面的 `accounts` 交给导入接口即可。
+ */
+export interface PlatformExportDocument {
+  format: string;
+  version: number;
+  exportedAt: string;
+  count: number;
+  accounts: unknown[];
 }
 
 /* ── 计费价目（issue #380）──────────────────────────────── */

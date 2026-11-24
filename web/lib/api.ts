@@ -55,6 +55,7 @@ import type {
   PlatformCheckinAllResult,
   PlatformCheckinResult,
   PlatformCreditsResult,
+  PlatformExportDocument,
   PlatformImportResult,
   PlatformInfo,
   PlatformLoginPoll,
@@ -563,6 +564,13 @@ export const platformApi = {
   /** 手工导入：接受单个账号对象，或 `{accounts: [...]}` 批量 */
   import: (name: string, body: unknown) =>
     post<PlatformImportResult>(`${platformPath(name)}/accounts/import`, body),
+  /**
+   * 导出全部账号（含明文凭据），返回可直接再导入的 JSON 文档。
+   *
+   * 仅会话管理员可调：后端会校验权限并写审计日志。
+   */
+  exportAccounts: (name: string) =>
+    get<PlatformExportDocument>(`${platformPath(name)}/accounts/export`),
   /** 从本机客户端一键导入（Trae：读 %APPDATA%\Trae CN 的登录态） */
   importDesktop: (name: string, realm?: string | null) =>
     post<PlatformImportResult>(
@@ -747,7 +755,8 @@ export const platformApi = {
     del<{platform: string; account: PlatformAccount}>(
       `${platformPath(name)}/accounts/${encodeURIComponent(uid)}/cooling`),
   /**
-   * 账号的任务状态（Loomy：激活情况 + 上次同步的签到 / 邀请码缓存）。
+   * 账号的任务状态（Loomy：激活情况 + 上次同步的签到 / 邀请码缓存；
+   * DuMate：成长任务 / 抽奖 / 邀请码）。
    *
    * 只读，不会顺手签到——签到是显式动作，走 `runTask(name, uid, 'checkin')`。
    */
@@ -755,15 +764,29 @@ export const platformApi = {
     get<{platform: string; task: PlatformTaskStatus}>(
       `${platformPath(name)}/accounts/${encodeURIComponent(uid)}/tasks`),
   /**
-   * 执行任务动作：`checkin`（签到 + 同步邀请码）/ `bind_invite` / `redeem`。
+   * 执行任务动作：`checkin`（签到 + 同步邀请码）/ `bind_invite` / `redeem`
+   * / `complete_task` / `draw` / `claim_prize`。
    *
-   * 绑定邀请码是一次性的（绑错无法解绑），后端在已绑定时直接 409。
+   * 绑定邀请码是一次性的（绑错无法解绑），后端在已绑定时直接 409；
+   * DuMate 抽奖每次必须由后端生成新的幂等键。
    */
   runTask: (
     name: string,
     uid: string,
-    action: 'checkin' | 'bind_invite' | 'redeem',
-    body?: {invite_code?: string; code?: string},
+    action:
+      | 'checkin'
+      | 'bind_invite'
+      | 'redeem'
+      | 'complete_task'
+      | 'draw'
+      | 'claim_prize',
+    body?: {
+      invite_code?: string;
+      code?: string;
+      task_id?: string;
+      draw_record_id?: string;
+      contact?: string;
+    },
   ) =>
     post<{platform: string; action: string; task: PlatformTaskResult}>(
       `${platformPath(name)}/accounts/${encodeURIComponent(uid)}/tasks/${action}`,

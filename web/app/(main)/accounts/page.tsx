@@ -139,18 +139,11 @@ export default function AccountsPage() {
 }
 
 function PlatformAccountsPage() {
-  const t = useT();
   const {platform, label, platformInfo} = usePlatform();
 
-  return (
-    <div className="flex flex-col gap-4 md:gap-6">
-      <PageHeader
-        title={`${t('platforms.accountsTitle')} · ${label}`}
-        description={t('platforms.accountsDesc', {label})}
-      />
-      <PlatformAccountsPanel platform={platform} label={label} info={platformInfo} />
-    </div>
-  );
+  // 标题 / 说明与操作按钮都由 panel 自己渲染：账号页的所有操作（导入 / 导出 /
+  // 网页登录 / 签到）都在 PageHeader 的 actions 行，与 WorkBuddy 账号页同版式。
+  return <PlatformAccountsPanel platform={platform} label={label} info={platformInfo} />;
 }
 
 /**

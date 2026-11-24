@@ -414,6 +414,10 @@ class TraeAdapter(PlatformAdapter):
     def list_accounts(self) -> list[dict]:
         return [store.public_account(a) for a in store.list_accounts()]
 
+    def export_accounts(self) -> list[dict]:
+        """导出含明文凭据的账号，仅供管理员导出接口调用。"""
+        return store.list_accounts()
+
     def import_account(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise PlatformError('账号必须是 JSON 对象', status=400, code='invalid_account')
