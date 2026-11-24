@@ -108,6 +108,17 @@ class UsageAllowanceTest(unittest.TestCase):
         self.assertEqual(got['daily_tokens']['used'], 343)
         self.assertEqual(got['daily_tokens']['remaining'], 657)
 
+    def test_daily_credits_keep_decimals(self) -> None:
+        """每日积分段与 credits 同口径：小数原样返回，且日期不是今天即为 0。"""
+        key_id, token = self._key(models=['x'], realm='cn', daily_quota_credit=0.5)
+        db.execute('UPDATE api_keys SET daily_used_credit = ?, daily_credit_day = ? '
+                   'WHERE id = ?', (0.04, db.day_of(), key_id))
+        got = self._usage(token)
+        self.assertAlmostEqual(got['daily_credits']['used'], 0.04, places=6)
+        self.assertAlmostEqual(got['daily_credits']['limit'], 0.5, places=6)
+        self.assertAlmostEqual(got['daily_credits']['remaining'], 0.46, places=6)
+        self.assertIsNone(got['credits']['limit'])
+
 
 if __name__ == '__main__':
     unittest.main()

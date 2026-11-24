@@ -107,6 +107,7 @@ const REASON_KEYS: Record<string, string> = {
   key_expired: 'security.reasonKeyExpired',
   quota_exhausted: 'security.reasonQuotaExhausted',
   daily_quota_exhausted: 'security.reasonDailyQuota',
+  daily_credit_quota_exhausted: 'security.reasonDailyCreditQuota',
   credit_quota_exhausted: 'security.reasonCreditQuota',
   ip_not_allowed: 'security.reasonIpNotAllowed',
   too_many_ips: 'security.reasonTooManyIps',

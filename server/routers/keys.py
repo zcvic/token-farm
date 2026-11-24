@@ -127,6 +127,9 @@ class KeyIn(BaseModel):
     quota_credit: float = 0
     # 每日 token 限额：0 = 不限。与总额度 quota 各自独立，按本地日期每天 0 点恢复。
     daily_quota: int = Field(default=0, ge=0)
+    # 每日积分限额：0 = 不限。与总额度 quota_credit 各自独立，按本地日期每天
+    # 0 点恢复。用 float 的理由同上（上游 credit 是小数）。
+    daily_quota_credit: float = Field(default=0, ge=0)
     # 版本归属：'' = 不限制（存量密钥的形态）。非 cn/global 的值由
     # keysvc._norm_realm 归一化成 ''——不报错，免得旧前端（不带该字段）被拒。
     realm: str = Field(default='', max_length=16)
@@ -153,6 +156,7 @@ class KeyPatch(BaseModel):
     quota: int | None = None
     quota_credit: float | None = None
     daily_quota: int | None = Field(default=None, ge=0)
+    daily_quota_credit: float | None = Field(default=None, ge=0)
     realm: str | None = None
     # 显式传 null / '' = 清除优先账号（与 upstream_id / realm 同口径）。
     preferred_account: str | None = Field(default=None, max_length=128)
@@ -244,6 +248,7 @@ def create_key(body: KeyIn, request: Request,
             realm=body.realm,
             quota_credit=body.quota_credit,
             daily_quota=body.daily_quota,
+            daily_quota_credit=body.daily_quota_credit,
             upstream_id=body.upstream_id,
             preferred_account=body.preferred_account,
             group_name=body.group_name,

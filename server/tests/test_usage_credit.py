@@ -208,10 +208,16 @@ class KeyCreditQuotaTest(unittest.TestCase):
         cols = {r[1] for r in db.query('PRAGMA table_info(api_keys)')}
         self.assertIn('quota_credit', cols)
         self.assertIn('used_credit', cols)
+        self.assertIn('daily_quota_credit', cols)
+        self.assertIn('daily_used_credit', cols)
+        self.assertIn('daily_credit_day', cols)
         # 存量行的默认值必须是 0（不限），不能变成「已超限」
-        row = db.query_one('SELECT quota_credit, used_credit FROM api_keys WHERE id = 1')
+        row = db.query_one('SELECT quota_credit, used_credit, daily_quota_credit, '
+                           'daily_used_credit FROM api_keys WHERE id = 1')
         self.assertEqual(float(row['quota_credit']), 0.0)
         self.assertEqual(float(row['used_credit']), 0.0)
+        self.assertEqual(float(row['daily_quota_credit']), 0.0)
+        self.assertEqual(float(row['daily_used_credit']), 0.0)
 
 
 class UsageCreditParsing(unittest.TestCase):

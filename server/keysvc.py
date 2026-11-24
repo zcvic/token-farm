@@ -334,6 +334,30 @@ def _norm_daily_quota(value: object) -> int:
     return max(0, n)
 
 
+def _daily_credit_used(row) -> float:
+    """今天（本地日期，与 usage_daily 同口径）已用的积分；记账日不是今天即为 0。"""
+    if (_row_get(row, 'daily_credit_day') or '') != db.day_of():
+        return 0.0
+    try:
+        return max(0.0, float(_row_get(row, 'daily_used_credit') or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _norm_daily_credit_quota(value: object) -> float:
+    """归一化每日积分额度。0 = 不限（与总额度同口径）。
+
+    与 `_norm_credit_quota` 同一套容错：脏值吃掉成 0 而不是抛错，负数钳到 0。
+    """
+    try:
+        v = float(value if value not in (None, '') else 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v or v in (float('inf'), float('-inf')):  # NaN / inf
+        return 0.0
+    return max(0.0, v)
+
+
 def _parse(row) -> dict:
     return {
         'id': row['id'],
@@ -362,6 +386,9 @@ def _parse(row) -> dict:
         # 每日 token 限额：0 = 不限。已用量只算今天（本地日期），记账日不是今天即为 0。
         'daily_quota': int(_row_get(row, 'daily_quota') or 0),
         'daily_used_tokens': _daily_used(row),
+        # 每日积分限额：0 = 不限。已用量只算今天（本地日期），记账日不是今天即为 0。
+        'daily_quota_credit': _norm_daily_credit_quota(_row_get(row, 'daily_quota_credit')),
+        'daily_used_credit': _daily_credit_used(row),
         'created_at': row['created_at'],
         'last_used_at': row['last_used_at'],
     }
@@ -399,6 +426,7 @@ def create_key(
     quota_credit: float = 0,
     upstream_id: int | None = None,
     daily_quota: int = 0,
+    daily_quota_credit: float = 0,
     preferred_account: str = '',
     group_name: str = '',
     custom_token: str | None = None,
@@ -428,9 +456,9 @@ def create_key(
         else TOKEN_PREFIX + secrets.token_urlsafe(32)
     sql = ('INSERT INTO api_keys(name, key_hash, key_plain, prefix, enabled, expires_at, '
            'max_ips, ip_allowlist, models, realm, quota, used_tokens, quota_credit, '
-           'used_credit, created_at, upstream_id, daily_quota, preferred_account, '
-           'group_name) '
-           'VALUES(?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?)')
+           'used_credit, created_at, upstream_id, daily_quota, daily_quota_credit, '
+           'preferred_account, group_name) '
+           'VALUES(?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?, ?, ?, ?)')
     args = (
         name,
         _hash(token),
@@ -446,6 +474,7 @@ def create_key(
         int(time.time()),
         _norm_upstream_id(upstream_id),
         _norm_daily_quota(daily_quota),
+        _norm_daily_credit_quota(daily_quota_credit),
         _norm_preferred_account(preferred_account),
         _norm_group_name(group_name),
     )
@@ -521,6 +550,8 @@ def update_key(key_id: int, patch: dict) -> dict | None:
         fields['quota_credit'] = _norm_credit_quota(patch['quota_credit'])
     if 'daily_quota' in patch:
         fields['daily_quota'] = _norm_daily_quota(patch['daily_quota'])
+    if 'daily_quota_credit' in patch:
+        fields['daily_quota_credit'] = _norm_daily_credit_quota(patch['daily_quota_credit'])
     if 'upstream_id' in patch:
         # 显式传 null / 0 是**允许**的：管理员可以把密钥改回「默认上游」。
         # 与 realm 同口径，不能用真值判断（否则改不回默认上游）。
@@ -547,20 +578,20 @@ def delete_key(key_id: int) -> bool:
 
 
 def reset_usage(key_id: int) -> bool:
-    """把已用 Token 与已用积分一起归零。返回是否真的命中了密钥。
+    """把已用 Token、已用积分与两者的今日用量一起归零。返回是否真的命中了密钥。
 
     返回布尔值是为了让路由能对「不存在的 id」报 404 —— 原来静默成功会让
     前端提示「已重置」，而实际什么都没发生。
 
-    两个量一起归零是刻意的：界面上它们是同一个「重置用量」按钮，只清 token
-    不清积分会留下一个看不见的残留额度，下次超额时用户会莫名其妙（「我明明
-    重置过」）。若只想放开其中一项，正确做法是把对应的**额度**调大，而不是
-    靠重置。
+    这些量一起归零是刻意的：界面上它们是同一个「重置用量」按钮，只清 token
+    不清积分、或不清每日用量，会留下一个看不见的残留额度，下次超额时用户会
+    莫名其妙（「我明明重置过」）。若只想放开其中一项，正确做法是把对应的
+    **额度**调大，而不是靠重置。
     """
     if not db.query_one('SELECT id FROM api_keys WHERE id = ?', (key_id,)):
         return False
     db.execute('UPDATE api_keys SET used_tokens = 0, used_credit = 0, '
-               'daily_used_tokens = 0 WHERE id = ?', (key_id,))
+               'daily_used_tokens = 0, daily_used_credit = 0 WHERE id = ?', (key_id,))
     return True
 
 
@@ -914,6 +945,15 @@ def validate(key: dict, ip: str, model: str | None,
         return Rejection(
             f'密钥积分额度已用尽（已用 {key["used_credit"]:g} / 上限 {key["quota_credit"]:g}）',
             429, 'insufficient_quota', 'credit_quota_exhausted')
+    # 每日积分限额：与总额度各自独立；按本地日期计，次日 0 点自动恢复。
+    # 文案同样带具体数字（口径与上面的积分总额度一致）。
+    daily_credit_quota = float(key.get('daily_quota_credit') or 0)
+    daily_credit_used = float(key.get('daily_used_credit') or 0)
+    if daily_credit_quota and daily_credit_used >= daily_credit_quota:
+        return Rejection(
+            f'密钥今日积分额度已用尽（已用 {daily_credit_used:g} / '
+            f'上限 {daily_credit_quota:g}），次日 0 点恢复',
+            429, 'insufficient_quota', 'daily_credit_quota_exhausted')
 
     allow = key['ip_allowlist']
     if allow and not any(ip_matches(ip, c) for c in allow):
@@ -988,5 +1028,16 @@ def touch(key: dict, ip: str, tokens: int = 0, credit: float | None = None) -> N
             'WHERE id = ?',
             (today, tokens, tokens, today, key['id']))
     if credit:
-        db.execute('UPDATE api_keys SET used_credit = used_credit + ? WHERE id = ?',
-                   (float(credit), key['id']))
+        # 每日积分已用：与每日 token 同一套写法（记账日是今天就累加，否则从本次
+        # 开始重新计），但用**独立的日期列** —— 一笔调用可能只记 token 不记积分，
+        # 共用一个日期列会让那种调用把积分当日累计错误地重置成 0。
+        today = db.day_of()
+        value = float(credit)
+        db.execute(
+            'UPDATE api_keys SET '
+            '  used_credit = used_credit + ?, '
+            '  daily_used_credit = CASE WHEN daily_credit_day = ? '
+            '    THEN daily_used_credit + ? ELSE ? END, '
+            '  daily_credit_day = ? '
+            'WHERE id = ?',
+            (value, today, value, value, today, key['id']))

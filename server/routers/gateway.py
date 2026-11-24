@@ -963,6 +963,9 @@ def key_usage(request: Request):
         'credits': allowance(key.get('quota_credit'), key.get('used_credit'), integral=False),
         # 今日 token（本地日期，次日 0 点恢复）；limit 为 None = 不限
         'daily_tokens': allowance(key.get('daily_quota'), key.get('daily_used_tokens')),
+        # 今日积分（小数，落点与 credits 相同）；limit 为 None = 不限
+        'daily_credits': allowance(key.get('daily_quota_credit'),
+                                   key.get('daily_used_credit'), integral=False),
         'last_used_at': int(key.get('last_used_at') or 0),
         # 这几个数字是面板**已记录**的值，读取时刻即 snapshot_at；不是向上游现问的。
         'snapshot_at': now,

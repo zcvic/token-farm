@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
   daily_quota       INTEGER NOT NULL DEFAULT 0,
   daily_used_tokens INTEGER NOT NULL DEFAULT 0,
   daily_used_day    TEXT    NOT NULL DEFAULT '',
+  -- 每日积分限额：0 = 不限。与总额度 quota_credit 各自独立，任一超限即拒绝。
+  -- 日期口径与每日 token 限额相同（本地日期，跨天自动归零），但**单独记一天**
+  -- （daily_credit_day）：两笔用量可能不同步（只有 token 没有 credit，或反之），
+  -- 共用一个日期列会让对方在换日时把这次用量悄悄归到新的一天。
+  daily_quota_credit  REAL NOT NULL DEFAULT 0,
+  daily_used_credit   REAL NOT NULL DEFAULT 0,
+  daily_credit_day    TEXT NOT NULL DEFAULT '',
   created_at    INTEGER NOT NULL,
   last_used_at  INTEGER,
   -- 密钥明文（供管理员在密钥页再次查看 / 复制）。
@@ -736,6 +743,12 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ('api_keys', 'daily_quota', 'INTEGER NOT NULL DEFAULT 0'),
     ('api_keys', 'daily_used_tokens', 'INTEGER NOT NULL DEFAULT 0'),
     ('api_keys', 'daily_used_day', "TEXT NOT NULL DEFAULT ''"),
+    # 每日积分限额。存量密钥为 0 = **不限**，行为不变。
+    # 与每日 token 限额**各自记账**（daily_credit_day）：累计口径不同，
+    # 共用日期列会让一次只有 token 的调用把积分当日用量错误地重置掉。
+    ('api_keys', 'daily_quota_credit', 'REAL NOT NULL DEFAULT 0'),
+    ('api_keys', 'daily_used_credit', 'REAL NOT NULL DEFAULT 0'),
+    ('api_keys', 'daily_credit_day', "TEXT NOT NULL DEFAULT ''"),
     # 密钥明文（供「密钥页再次查看 / 复制」，见 SCHEMA 里这一列的说明）。
     # 存量密钥为空串 = 取不回明文：那一版只存哈希，界面上要说清「去重建一把」，
     # 而不是显示一个空密钥让人以为复制坏了。
