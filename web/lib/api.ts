@@ -982,6 +982,28 @@ export const logApi = {
    */
   comboLogs: (name: string, params?: {days?: number; limit?: number}) =>
     get<ComboLogsResponse>(`/api/logs/combo/${encodeURIComponent(name)}`, params),
+  /**
+   * 组合日志导出（CSV）。不受弹窗列表条数限制，按所选时间范围导出。
+   *
+   * 后端有行数上限，超出时只给最近的一段；`truncated` / `rows` / `total`
+   * 直接取自响应头，前端据此**如实**提示用户缩小范围，而不是假装导全了。
+   */
+  comboLogsExport: async (name: string, params?: {days?: number}) => {
+    const response = await http.get<Blob>(
+      `/api/logs/combo/${encodeURIComponent(name)}/export`,
+      {params, responseType: 'blob'},
+    );
+    const disposition = String(response.headers['content-disposition'] || '');
+    const filename = /filename="?([^";]+)"?/.exec(disposition)?.[1]
+      || `combo-${name}-logs.csv`;
+    return {
+      blob: response.data,
+      filename,
+      truncated: response.headers['x-export-truncated'] === '1',
+      rows: Number(response.headers['x-export-rows'] || 0),
+      total: Number(response.headers['x-export-total'] || 0),
+    };
+  },
 };
 
 /* ── 用量统计 ───────────────────────────────────────── */

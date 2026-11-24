@@ -11,7 +11,7 @@
  */
 
 import {useCallback, useEffect, useState} from 'react';
-import {RefreshCw, ScrollText} from 'lucide-react';
+import {Download, RefreshCw, ScrollText} from 'lucide-react';
 
 import {
   Dialog,
@@ -44,6 +44,7 @@ import {
 import {errText, logApi} from '@/lib/api';
 import {fmtCredit, fmtDateTimeMarked, fmtLatency, fmtNumber} from '@/lib/format';
 import {useT} from '@/lib/i18n/provider';
+import {notify} from '@/lib/toast';
 import type {ComboLogsResponse, RequestLog} from '@/lib/types';
 
 /** 一次最多展示多少条。汇总由后端按整段时间算，不受这个上限影响。 */
@@ -62,6 +63,7 @@ export function ComboLogsDialog({
   const [days, setDays] = useState('7');
   const [data, setData] = useState<ComboLogsResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
@@ -86,6 +88,37 @@ export function ComboLogsDialog({
     if (!open) return;
     void load();
   }, [open, load]);
+
+  /**
+   * 导出当前时间范围的**全部**记录（不受列表 100 条限制）。
+   *
+   * 后端有行数上限，超出时只给最近的一段并用响应头说明；这里必须把
+   * 「没导全」如实说出来，否则用户会拿一份不完整的数据做统计。
+   */
+  const exportLogs = useCallback(async () => {
+    if (!name || exporting) return;
+    setExporting(true);
+    try {
+      const out = await logApi.comboLogsExport(name, {days: Number(days) || 7});
+      const url = URL.createObjectURL(out.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = out.filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      if (out.truncated) {
+        notify.info(t('combos.logExportTruncated', {
+          rows: fmtNumber(out.rows), total: fmtNumber(out.total),
+        }));
+      } else {
+        notify.ok(t('combos.logExportDone', {rows: fmtNumber(out.rows)}));
+      }
+    } catch (e) {
+      notify.err(t('combos.logExportFail'), errText(e));
+    } finally {
+      setExporting(false);
+    }
+  }, [name, days, exporting, t]);
 
   const comboId = `combo/${name}`;
   const items = data?.items ?? [];
@@ -131,6 +164,16 @@ export function ComboLogsDialog({
                 >
                   <RefreshCw className={loading ? 'animate-spin' : undefined} />
                   {t('common.refresh')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="rounded-full"
+                  disabled={loading || exporting || !summary || summary.total <= 0}
+                  onClick={() => void exportLogs()}
+                >
+                  <Download className={exporting ? 'animate-pulse' : undefined} />
+                  {t('combos.logExport')}
                 </Button>
               </div>
               {summary && (

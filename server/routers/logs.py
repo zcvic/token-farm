@@ -1,14 +1,79 @@
 """请求日志查询。"""
 from __future__ import annotations
 
+import csv
+import io
+import re
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from .. import db, keysvc, security
 from ..services import accountlog
 
 router = APIRouter(prefix='/api/logs', tags=['logs'])
+
+# 组合日志导出一次最多给多少行。导出没有分页，上限是**响应体与内存**的护栏：
+# 7 天的高频组合可能有几十万行，一次全塞进内存既拖慢面板也拖慢浏览器。
+# 超出时只给最近的一段，并用响应头如实告知（前端提示「缩小时间范围」）。
+COMBO_EXPORT_MAX_ROWS = 20_000
+
+# 导出列：顺序固定，表头中文（服务端文案不翻译，与界面其它导出同一口径）。
+# 「生成耗时 / 输出速率」按统计页同一公式算（latency − first_token），排查
+# 「组合为什么比直连慢」时不用再自己拿计算器算一遍。
+_COMBO_EXPORT_HEADER = [
+    '时间', '实际成员', '版本', '状态', '流式',
+    '输入tokens', '输出tokens', '总tokens',
+    '缓存命中tokens', '缓存未命中tokens',
+    '首字延迟ms', '总耗时ms', '生成耗时ms', '输出速率tok/s',
+    '积分', '费用(元)', '密钥', '账号', 'IP', '请求ID', '错误',
+]
+
+
+def _combo_model(name: object) -> str:
+    """组合入口名（`combo/<name>`）：查询与导出文件名共用同一份拼法。"""
+    return f'combo/{str(name or "").strip()}'
+
+
+def _combo_where(name: object, days: int | None) -> tuple[str, list[object]]:
+    """组合日志的 WHERE 子句（入口名等值 + 可选时间范围）。
+
+    日志页的 `model` 筛选用的是 LIKE（`combo/fast` 会连带 `combo/fast2`），
+    而组合卡片要看的永远是「这一个组合」，所以这里必须是等值查询。抽成函数
+    是为了 JSON 列表与 CSV 导出不会各写一份、慢慢漂移。
+    """
+    where = ['l.model = ?']
+    args: list[object] = [_combo_model(name)]
+    if days:
+        # 与日志页同一口径：钳到 [1, 3650]，0 / 空 = 不限时间。
+        d = min(3650, max(1, int(days)))
+        where.append('l.ts >= ?')
+        args.append(int(time.time()) - d * 86400)
+    return 'WHERE ' + ' AND '.join(where), args
+
+
+def _csv_cell(value: object) -> object:
+    """挡住 CSV 公式注入（Excel / WPS 会把 `= + - @` 开头的单元格当公式执行）。
+
+    日志里的模型名与错误文案都来自上游响应，属于不可信输入：一条
+    `=HYPERLINK("http://…")` 的错误信息就能在用户打开表格时变成可点击的
+    外链。数字列不受影响（都是 int / float，不是字符串）。
+    """
+    if not isinstance(value, str):
+        return value
+    if value[:1] in ('=', '+', '-', '@'):
+        return "'" + value
+    return value
+
+
+def _combo_export_filename(name: object) -> str:
+    """下载文件名：只保留 ASCII 安全字符，顺带挡住响应头注入。
+
+    组合名本身的合法字符集是 `[a-z0-9._-]`，但路由参数来自 URL，不能假设
+    调用方一定按规矩传——引号 / 换行进 `Content-Disposition` 就是响应头注入。
+    """
+    safe = re.sub(r'[^A-Za-z0-9._-]+', '-', str(name or '').strip())[:64]
+    return f"combo-{safe.strip('-') or 'logs'}-logs-{time.strftime('%Y%m%d-%H%M')}.csv"
 
 
 @router.get('/account-backfill')
@@ -176,15 +241,9 @@ def combo_logs(
     平均耗时只取成功请求——429 / 上游 5xx 往往几毫秒就返回，混进去会把均值
     拉低，看起来比实际更快。
     """
-    combination = f'combo/{str(name or "").strip()}'
+    combination = _combo_model(name)
     limit = max(1, min(int(limit), 200))
-    where = ['l.model = ?']
-    args: list[object] = [combination]
-    if days:
-        d = min(3650, max(1, int(days)))
-        where.append('l.ts >= ?')
-        args.append(int(time.time()) - d * 86400)
-    clause = 'WHERE ' + ' AND '.join(where)
+    clause, args = _combo_where(name, days)
 
     stats = db.query_one(
         f'SELECT COUNT(*) AS total, '
@@ -220,6 +279,99 @@ def combo_logs(
             'total_credit': stats['credit'] or 0,
         },
     }
+
+
+@router.get('/combo/{name}/export')
+def export_combo_logs(
+    name: str,
+    days: int = 7,
+    user: dict = Depends(security.current_user),
+) -> Response:
+    """把某个组合的请求日志导出成 CSV（Excel / 表格工具可直接打开）。
+
+    与弹窗列表的区别只有两点，都是导出该有的语义：
+
+      · **不受列表条数限制**：弹窗一次只显示 100 条，导出要按整个时间范围给，
+        否则「导出」只是把屏幕上的几行复制出去；
+      · **带上生成耗时与输出速率**：同一套公式（`latency − first_token`）与
+        统计页一致，排查「组合为什么比直连慢」时可以直接按成员 / 时间透视。
+
+    行数仍有上限（`COMBO_EXPORT_MAX_ROWS`），超出时只给**最近**的一段，并用
+    响应头 `X-Export-Truncated` / `X-Export-Rows` / `X-Export-Total` 如实告知，
+    前端据此提示用户缩小时间范围——不静默截断。
+    """
+    combination = _combo_model(name)
+    clause, args = _combo_where(name, days)
+    total = int(db.query_one(
+        f'SELECT COUNT(*) AS c FROM request_logs l {clause}', args)['c'])
+    # 多取一行只为判断「是否被截断」，返回前再切掉。
+    rows = db.query(
+        f'SELECT l.*, k.name AS key_name FROM request_logs l '
+        f'LEFT JOIN api_keys k ON k.id = l.key_id {clause} '
+        f'ORDER BY l.id DESC LIMIT ?',
+        (*args, COMBO_EXPORT_MAX_ROWS + 1),
+    )
+    truncated = len(rows) > COMBO_EXPORT_MAX_ROWS
+    if truncated:
+        rows = rows[:COMBO_EXPORT_MAX_ROWS]
+    # 查的时候按 id 倒序取「最近 N 条」，导出时翻回时间正序：CSV 是拿去画表 /
+    # 透视的，倒序会让最旧的一行跑在最上面。
+    rows = list(reversed(rows))
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_COMBO_EXPORT_HEADER)
+    has_request_id = bool(rows) and 'request_id' in rows[0].keys()
+    for r in rows:
+        first = int(r['first_token_ms'] or 0)
+        latency = int(r['latency_ms'] or 0)
+        gen_ms = latency - first if latency > first else None
+        completion = int(r['completion_tokens'] or 0)
+        tps = (round(completion / (gen_ms / 1000.0), 2)
+               if gen_ms and completion > 0 else '')
+        # 成员全失败时 `mapped_model` 会回填成组合入口名本身——那不是「实际
+        # 成员」，导出里留空，与弹窗显示「—」同一口径。
+        member = (r['mapped_model'] or '')
+        if member == combination:
+            member = ''
+        writer.writerow([
+            time.strftime('%Y-%m-%d %H:%M:%S',
+                          time.localtime(int(r['ts'] or 0))),
+            _csv_cell(member),
+            r['realm'] or 'cn',
+            int(r['status'] or 0),
+            '是' if r['stream'] else '否',
+            int(r['prompt_tokens'] or 0),
+            completion,
+            int(r['prompt_tokens'] or 0) + completion,
+            int(r['cache_hit_tokens'] or 0),
+            int(r['cache_miss_tokens'] or 0),
+            first or '',
+            latency,
+            gen_ms if gen_ms is not None else '',
+            tps,
+            r['credit'] if r['credit'] is not None else '',
+            r['cost'] if r['cost'] is not None else '',
+            _csv_cell(r['key_name'] or ''),
+            _csv_cell(r['account'] or ''),
+            r['ip'] or '',
+            (r['request_id'] or '') if has_request_id else '',
+            _csv_cell(r['error'] or ''),
+        ])
+
+    # 加 BOM：Excel 打开 UTF-8 CSV 才不会把中文变成乱码（与红包导出同一做法）。
+    body = ('\ufeff' + buf.getvalue()).encode('utf-8')
+    return Response(
+        content=body,
+        media_type='text/csv; charset=utf-8',
+        headers={
+            'Content-Disposition':
+                f'attachment; filename="{_combo_export_filename(name)}"',
+            'X-Export-Rows': str(len(rows)),
+            'X-Export-Truncated': '1' if truncated else '0',
+            'X-Export-Total': str(total),
+        },
+    )
 
 
 @router.post('/clear')

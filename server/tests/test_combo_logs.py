@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import csv
+import io
 import sys
 import tempfile
 import time
@@ -45,12 +47,13 @@ class ComboLogsTest(unittest.TestCase):
     def _add(self, *, model: str, mapped: str, status: int, latency: int,
              prompt: int = 0, completion: int = 0, realm: str = 'cn',
              error: str | None = None, ts: int | None = None,
-             credit: float | None = None) -> None:
+             credit: float | None = None,
+             first_token: int | None = None) -> None:
         db.add_request_log(
             ts=self.now if ts is None else ts,
             key_id=None, ip='127.0.0.1', model=model, mapped_model=mapped,
             status=status, prompt_tokens=prompt, completion_tokens=completion,
-            latency_ms=latency, first_token_ms=None, ua='UA', error=error,
+            latency_ms=latency, first_token_ms=first_token, ua='UA', error=error,
             stream=1, credit=credit, realm=realm, platform='',
         )
 
@@ -129,6 +132,85 @@ class ComboLogsTest(unittest.TestCase):
                       'prompt_tokens', 'completion_tokens', 'latency_ms',
                       'error', 'credit', 'cost', 'platform'):
             self.assertIn(field, item)
+
+    # ── CSV 导出 ────────────────────────────────────────────
+    def _export(self, name: str = 'fast', days: int = 7):
+        return logs_router.export_combo_logs(
+            name, days=days, user={'username': 'admin'})
+
+    def _export_rows(self, name: str = 'fast', days: int = 7) -> list[list[str]]:
+        """跳过 BOM 后按 CSV 解析，返回数据行（不含表头）。"""
+        text = self._export(name, days).body.decode('utf-8-sig')
+        return list(csv.reader(io.StringIO(text)))[1:]
+
+    def test_export_is_csv_with_bom_and_exact_match(self) -> None:
+        """导出必须是「Excel 能打开」的 CSV，且与列表一样按入口名等值筛选。
+
+        等值这一点最容易被写成另一个 LIKE：`combo/fast2` 与直连 `trae/x`
+        一旦混进来，用户按成员做的统计就全错了。
+        """
+        self._seed()
+        resp = self._export()
+        self.assertTrue(resp.body.startswith('\ufeff'.encode('utf-8')),
+                        '缺 BOM 时 Excel 会把中文显示成乱码')
+        self.assertIn('text/csv', resp.headers['content-type'])
+        self.assertIn('attachment;', resp.headers['content-disposition'])
+
+        text = resp.body.decode('utf-8-sig')
+        self.assertIn('输出速率tok/s', text)
+        self.assertNotIn('fast2', text, '名字相近的组合不能被 LIKE 带出来')
+        rows = self._export_rows()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(
+            [row[1] for row in rows], ['trae/x', 'minimax/y', ''],
+            '导出按时间正序；成员全失败的行没有「实际成员」，留空而不是写组合名',
+        )
+        self.assertEqual(resp.headers['x-export-rows'], '3')
+        self.assertEqual(resp.headers['x-export-truncated'], '0')
+        self.assertEqual(resp.headers['x-export-total'], '3')
+
+    def test_export_computes_generation_speed(self) -> None:
+        """生成耗时 / tok/s 必须与统计页同一公式（latency − first_token）。"""
+        self._add(model='combo/fast', mapped='trae/x', status=200,
+                  latency=1000, prompt=10, completion=10, first_token=200)
+        row = self._export_rows()[0]
+        header = next(csv.reader(io.StringIO(
+            self._export().body.decode('utf-8-sig'))))
+        cell = dict(zip(header, row))
+        self.assertEqual(cell['首字延迟ms'], '200')
+        self.assertEqual(cell['生成耗时ms'], '800')
+        self.assertEqual(cell['输出速率tok/s'], '12.5')
+
+    def test_export_truncates_to_latest_rows_honestly(self) -> None:
+        """超过上限时只给最近的一段，并把「没导全」写在响应头里。"""
+        self._seed()
+        original = logs_router.COMBO_EXPORT_MAX_ROWS
+        logs_router.COMBO_EXPORT_MAX_ROWS = 2
+        try:
+            resp = self._export(days=0)
+        finally:
+            logs_router.COMBO_EXPORT_MAX_ROWS = original
+        self.assertEqual(resp.headers['x-export-rows'], '2')
+        self.assertEqual(resp.headers['x-export-truncated'], '1')
+        self.assertEqual(resp.headers['x-export-total'], '4')
+        self.assertEqual(len(self._export_rows(days=0)), 4,
+                         '标本上限恢复后应能导全')
+
+    def test_export_neutralizes_csv_formula_injection(self) -> None:
+        """错误文案来自上游，不能让它以 `=` 开头变成 Excel 公式。"""
+        self._add(model='combo/fast', mapped='trae/x', status=500,
+                  latency=10, error='=HYPERLINK("http://evil.example")')
+        row = self._export_rows()[0]
+        self.assertTrue(row[-1].startswith("'="), row[-1])
+
+    def test_export_filename_rejects_header_injection(self) -> None:
+        """URL 里的组合名不能把引号 / 换行带进 Content-Disposition。"""
+        resp = self._export(name='fast"\r\nX-Evil: 1')
+        disposition = resp.headers['content-disposition']
+        self.assertNotIn('\r', disposition)
+        self.assertNotIn('\n', disposition)
+        self.assertEqual(disposition.count('"'), 2,
+                         '只应有包住文件名的两个引号')
 
 
 if __name__ == '__main__':
