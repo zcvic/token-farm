@@ -955,6 +955,14 @@ a9063d79b6b95c482b9037b7ca2722354120fc9d
 #          一律用
 #          `time.Now().Add(28*24*time.Hour)` / `int(time.time()) + 28*86400`
 #          构造，写死的那份旧值只用于验证换算本身 —— 教训直接落进新用例的写法。
+#          **同类「用例依赖外部条件」的毛病本仓也有一处**（全量回归时撞出来的，
+#          不是从参考仓抄的）：Cline 的 test_list_models_adds_prefix_and_falls_back
+#          要验「拿不到线上目录 → 退回内置免费档」，却没 patch 两个抓取函数，
+#          有网机器上会真的拉线上目录、断言必然红。已按该文件开头的「全部离线」
+#          约定堵住。顺着它又发现真缺口：list_models 只判 `models is None`，
+#          而 _live_models 在两个接口都失败时按设计返回**空表**，内置免费档的
+#          兜底永远走不到（模型页整片空白）。已改为按「空 / 没有」判断并补
+#          test_both_endpoints_down_falls_back_to_builtin_free_tier。
 #      未取：
 #        · c27d73114c 视频参考素材补成上游要的对象数组、e2d0eb6a40 该形状与
 #          参考图 URL 可达性的真号实测、4221f2b202 视频提交阶段 4xx 不罚号
