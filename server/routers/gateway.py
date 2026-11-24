@@ -1010,6 +1010,9 @@ async def list_models(request: Request):
         # 全局隐藏名单最后裁一次：前面的合并 / 去前缀会改变 id 的写法，
         # 放在最末能同时覆盖上游模型与平台模型。
         payload = modelpolicy.filter_payload(payload)
+        # 同名兄弟的优惠模型补标签（issue #286）：必须放在隐藏名单之后 —— 先补
+        # 后裁会按「被隐藏的兄弟」给唯一剩下的那条也加上后缀。
+        payload = _disambiguate_promo_names(payload)
         # Anthropic 客户端（Claude Code 等）也会调这个路径，但期望的结构不同
         if request.headers.get('anthropic-version'):
             payload = _as_anthropic_models(payload)
@@ -1242,6 +1245,72 @@ def _bare_cn_model_ids(payload: object) -> object:
             continue
         index[mid] = len(out)
         out.append(entry)
+    return {**payload, 'data': out}
+
+
+def _disambiguate_promo_names(payload: object) -> object:
+    """给「同域内与兄弟重名」的优惠条目在显示名后补上标签（issue #286）。
+
+    上游把限时免费的 `hy4flash-free` 与付费的 `hy4flash` 的显示名都写成
+    「Hy4 flash」。只认 `name` 的客户端里这两行长一样：用户以为选了免费那条，
+    实际发出去的却是付费 id，积分照扣。这里给**带 `promo_label` 且真有同名
+    兄弟**的条目补一个「（限时免费）」后缀，两行就能区分开。
+
+    只改 `name`，`id` 一个字节不动 —— 客户端发的是 id，改 id 等于改路由。
+    名字唯一的优惠模型（如 `glm-5.2` 的夜间折扣）不碰：加后缀只会让列表变吵；
+    跨域同名也不碰，`global:` 与国内版本来就是两条不同的路由，前缀已经能区分。
+
+    认不出的结构原样透传。
+    """
+    if not isinstance(payload, dict):
+        return payload
+    items = payload.get('data')
+    if not isinstance(items, list):
+        return payload
+
+    def _domain(model_id: str) -> str:
+        # 调用点在建单**之后**（`cn:` 已剥掉），所以不能靠前缀区分国内版条目。
+        # 口径与 `_model_realm_of` 一致：`global:` = 国际版，其余裸名 = 国内版；
+        # 平台模型是 `<平台>/<模型>`，按平台分段，免得与国内版同名撞在一起。
+        low = model_id.lower()
+        if low.startswith('global:'):
+            return 'global'
+        head, sep, _ = model_id.partition('/')
+        return f'platform:{head}' if sep else 'cn'
+
+    count: dict[tuple[str, str], int] = {}
+    for m in items:
+        if not isinstance(m, dict):
+            continue
+        mid, name = m.get('id'), m.get('name')
+        if not isinstance(mid, str) or not mid:
+            continue
+        if not isinstance(name, str) or not name:
+            continue
+        key = (_domain(mid), name)
+        count[key] = count.get(key, 0) + 1
+
+    out: list = []
+    for m in items:
+        mid = m.get('id') if isinstance(m, dict) else None
+        name = m.get('name') if isinstance(m, dict) else None
+        label = m.get('promo_label') if isinstance(m, dict) else None
+        if not isinstance(mid, str) or not mid:
+            out.append(m)
+            continue
+        if not isinstance(name, str) or not name:
+            out.append(m)
+            continue
+        if not isinstance(label, str) or not label:
+            out.append(m)
+            continue
+        key = (_domain(mid), name)
+        if count.get(key, 0) < 2:
+            out.append(m)
+            continue
+        # 同名同标签的兄弟只改一条，够区分即可（改两条会变成两个带后缀的长名字）
+        count[key] -= 1
+        out.append({**m, 'name': f'{name}（{label}）'})
     return {**payload, 'data': out}
 
 
