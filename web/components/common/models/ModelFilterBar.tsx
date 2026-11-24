@@ -47,7 +47,10 @@ export function ModelFilterBar({
 
   return (
     <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-      <div className="relative flex-1">
+      {/* 输入框保底宽度：系列一多时筛选条会把 `flex-1` 压到接近 0，而 Input
+          本身是 `min-w-0`，结果连字都输不进去。给一个下限后，空间不足时由右侧
+          筛选条换行/滚动，而不是牺牲搜索框。 */}
+      <div className="relative flex-1 lg:min-w-[240px]">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={q}
@@ -56,7 +59,7 @@ export function ModelFilterBar({
           className="h-9 bg-background pl-8"
         />
       </div>
-      <div className="-mx-0.5 flex flex-wrap items-center gap-1.5 overflow-x-auto px-0.5 pb-0.5">
+      <div className="-mx-0.5 flex min-w-0 flex-wrap items-center gap-1.5 overflow-x-auto px-0.5 pb-0.5">
         <span className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
           <Layers className="h-3.5 w-3.5" />
           {t('models.series')}
