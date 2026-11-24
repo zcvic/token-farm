@@ -99,6 +99,35 @@ git commit -m "upstream: 说清这次改了什么"
 除 misakano 面板仓外，2026-11 还有多个参考源（manager 仓、Qoder、Loomy，以及
 trae / discovery / dumate / cline / kilo 五个协议源）。
 
+> **面板仓批（2026-11-24，`c4052548` → `d221c721fc`）**：8 个非 merge 提交里
+> 取 1 个、5 个不取、1 个只取教训，另**补了一笔基线之前的漏取**。
+>
+> - `d221c721fc` 同域同名的优惠模型在列表里补标签（issue #286）：上游把限时免费
+>   的 `hy4flash-free` 与付费的 `hy4flash` 的显示名都写成「Hy4 flash」，只认
+>   `name` 的客户端里两行长一样，用户以为选了免费那条、实际发出的却是付费 id。
+>   参考仓改在 Go 侧 `modelList()` 末尾；本仓的 `/v1/models` 是**面板侧**组装的，
+>   所以重写为 `server/routers/gateway.py` 的 `_disambiguate_promo_names`。两处
+>   有意偏离：① 域判据不能用 `cn:` 前缀 —— 本仓在 `_bare_cn_model_ids` 之后已把
+>   `cn:` 剥掉，照抄会让功能静默失效，改为「`global:` = 国际版、其余裸名 =
+>   国内版、`<平台>/` 单独分段」；② 必须放在 `modelpolicy.filter_payload`
+>   **之后**，否则被隐藏的兄弟仍参与计数，唯一剩下的那条会白拿后缀。
+>   `id` 一个字节不动。
+> - `f0c427d2ce` 的**毫秒 `expiresAt` 归一**（漏取补课）：官方 CodeBuddy CLI /
+>   桌面端的凭据把 `expiresAt` 写成毫秒（实测 `1795254516410`），本仓按秒读。
+>   后果已用探针实测：到期时间落到公元 58800 年 → `NeedsRefresh` 恒 false →
+>   token 永不刷新 → 到期后账号静默 401；Python 侧更早暴露（面板算出「剩余五万
+>   多年」、续期永不触发）。Go 侧补 `Parse` 归一 + `expiresAtMillis` 标志 +
+>   `SaveAtomic` 按来源单位写回；Python 侧在读（`wb2api`）、导入
+>   （`routers/accounts`）、写回（`tencent.update_auth_tokens`）与整份重建
+>   （`tencent.write_auth_file`，重登 / 覆盖导入）四处都归一或跟随原单位。
+>   这个提交此前只在 baseline-gaps 的 P2-4 下被评估过（只取了登录链路那半）。
+> - `c84b6f2be7` 只取**教训**：参考仓把该归一的测试夹具写成固定毫秒串，到期那天
+>   CI 必然变红。本仓没有这个夹具、也没有这个故障，但新增用例一律用相对当前
+>   时间构造。
+> - 不取三条视频提交（`c27d73114c` / `e2d0eb6a40` / `4221f2b202`）与一条 MCP
+>   提交（`24e59f89e3`）：本仓没有 `/v1/videos/generations`、没有 MCP 工具面，
+>   整条数据面不存在。两个 README 提交（加代理广告位）与本项目无关。
+
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
 已核对的范围是 `80b4b21`（v2.11.10）→ `caa82c22`（v2.11.23）：
 

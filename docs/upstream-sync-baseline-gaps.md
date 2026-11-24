@@ -1282,6 +1282,28 @@ L1419 另有一处点名调用判 hidden；Go `handler.go` 与 `internal/server`
 
 **成本/风险**：低，但要真实抓包复核，不要凭 npm dist-tag 猜。
 
+> **同一提交的另一半：毫秒 `expiresAt` 归一（2026-11-24 补）**。`f0c427d2` 除了
+> 登录链路版本，还加了 `normalizeExpiresAt`（阈值 `1e11`）+ `expiresAtMillis`
+> 标志。此前只取了登录链路那半，**归一这半从未落地**，两侧都缺：
+>
+> - 官方 CodeBuddy CLI / 桌面端的凭据文件把 `expiresAt` 写成**毫秒**（实测
+>   `1795254516410`），本仓按秒读 → 到期时间落在公元 58800 年 →
+>   `NeedsRefresh` 恒 false → token 永不刷新 → 到期后账号静默 401；
+> - Python 侧更早暴露：面板算出「剩余五万多年」、进度条永远满格，续期巡检因此
+>   永不触发；导入官方凭据时还会把这个毫秒值原样落盘。
+>
+> 已落地：Go 侧 `Parse` 末尾归一 + 私有 `expiresAtMillis` + `SaveAtomic` 按来源
+> 单位写回（写回方向同样重要：只归一读、按秒写回会把官方凭据缩到 1970 年代）；
+> Python 侧 `tencent._normalise_expires_at` / `_expires_at_millis`，在
+> `wb2api.list_auth_accounts`（读）、`routers/accounts._uploaded_account`（导入）、
+> `tencent.update_auth_tokens`（写回）三处归一。测试见
+> `upstream/internal/auth/auth_test.go` 新增 3 项与
+> `server/tests/test_expires_at_millis.py`（20 项）。
+>
+> 夹具一律相对当前时间构造 —— 参考仓把测试写成固定毫秒串，到期那天
+> （2026-11-21T09:48Z）CI 必然变红（`c84b6f2be7` 就是修这个）。本仓没有那份
+> 夹具，但同一条教训适用。
+
 ### P2-5　`internal/probe`（测量工具）
 
 **来源**：`probe169.go`、`probe_channel.go`，均为 `//go:build ignore`。

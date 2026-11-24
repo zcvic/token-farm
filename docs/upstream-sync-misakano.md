@@ -3255,3 +3255,125 @@ assistant。推理仍按既有口径累积拼接（进度前的 `inspect` 与调
 | 测试 | `client_test.go` / `hint_test.go` / `fallback_model_missing_test.go` / 新增 `model_missing_test.go`；`test_responses_replay.py` 的 `SameTurnReplayTest`；`test_clear_cooling_non_docker.py` / `test_model_recovery_scheduler.py` / `test_probe_models.py` |
 
 记录同步写进 `deploy/workbuddy-panel-ref.txt` 第十八批。
+
+## 附录 I：`c4052548..d221c721fc` 增量评估（2026-11-24 扫）
+
+### I.1 范围与统计
+
+参考仓在第十八批（`c4052548`）之后又推了 **8 个非 merge 提交**，`d221c721fc` 为
+当前 `main` 头：
+
+| 提交 | 主题 | 判定 |
+|---|---|---|
+| `d221c721fc` | 同域同名的优惠模型在列表里补标签（issue #286） | **取** |
+| `24e59f89e3` | MCP `generate_video` 暴露三个 `reference_*` 参数 | 不取 |
+| `4221f2b202` | 视频提交阶段 4xx 不罚号不换号 | 不取 |
+| `e2d0eb6a40` | 视频参考素材形状与参考图 URL 可达性实测 | 不取 |
+| `c84b6f2be7` | 过期时间夹具改成相对当前时间 | 只取教训 |
+| `c27d73114c` | 视频参考素材补成上游要的对象数组 | 不取 |
+| `5b40d46d8c` / `0eeeb1e69e` | 两个 README（合作伙伴广告位） | 不取 |
+
+**1 取、5 不取、1 只取教训**。三条视频提交 + 一条 MCP 提交都围绕本仓不存在的
+数据面（`/v1/videos/generations`、MCP 工具面），两个 README 与本项目无关。
+
+另外**顺带补了一笔基线之前的漏取**：`f0c427d2ce` 的毫秒 `expiresAt` 归一。
+它此前只在 [upstream-sync-baseline-gaps.md](upstream-sync-baseline-gaps.md) 的
+P2-4「登录链路版本对齐」下被评估过（只取了登录链路那半），归一那半从未落地。
+本批复核 `c84b6f2be7`（正是这个归一逻辑的测试夹具过期）时发现。
+
+### I.2 `d221c721fc`：同名优惠模型补标签
+
+**现场**（issue #286「使用免费模型也在消耗积分」）：上游把限时免费的
+`hy4flash-free` 与付费的 `hy4flash` 的**显示名都写成「Hy4 flash」**，而前者
+`x0.00`、后者 `x0.03`。只认 `name` 的客户端里这两行长完全一样，用户以为选了免费
+那条，实际发出的却是付费 id。真号实测两条 id 本身都没问题（`-free` 12/12 次
+credit=0，`hy4flash` 同一 prompt credit=0.01），错的只是展示。
+
+**参考仓改法**：`/v1/models` 组装完成后跑 `disambiguatePromoNames` —— 同域内与
+兄弟重名的条目若带 `promo_label`，就把标签并进 `name`（`Hy4 flash（限时免费）`）。
+名字唯一的条目不碰，跨域同名也不碰，**id 一个字节没动**。代价是 `name` 不再是
+上游原文，与官方客户端显示会差一个括号，且只在真有重名时发生。
+
+**本仓落点不同**：本仓的 `/v1/models` 是**面板侧**组装的
+（`server/routers/gateway.py` 的 `list_models`），Go 侧只负责返回上游原文。
+所以按本仓结构重写为 `_disambiguate_promo_names(payload)`，挂在 `list_models`
+的最后一步。
+
+两处**有意偏离**：
+
+1. **域判据**。参考仓靠 id 上的 `cn:` / `global:` 前缀取域。本仓在
+   `_bare_cn_model_ids` 之后 `cn:` 已被剥掉（那是另一项既有能力：让 Cherry
+   Studio 这类按 id 识别推理档位的客户端能认出国内版模型），照抄参考仓的实现会
+   把国内版条目算成「另一个域」，永远判不出同名兄弟 —— 功能静默失效。改为：
+   `global:` 前缀 = 国际版，其余裸名 = 国内版（与 `_model_realm_of` 同口径）；
+   `<平台>/<模型>` 按平台分段，免得 Trae 的同名模型被算成国内版的兄弟。
+2. **位置**。参考仓放在 Go 侧末尾，本仓必须放在 `modelpolicy.filter_payload`
+   **之后**。反过来的话，被隐藏名单剔掉的那个兄弟仍参与计数，唯一剩下的那条会
+   白拿一个后缀。
+
+### I.3 `f0c427d2ce` 的漏取：毫秒 `expiresAt`
+
+**现场**：官方 CodeBuddy CLI / 桌面端的凭据文件
+（`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`）把 `expiresAt`
+写成**毫秒**（实测 `1795254516410`），而插件 OAuth 与本仓落盘的是**秒**。
+
+**真实后果**（已用探针在 `upstream/internal/auth` 里实测，不是推测）：毫秒值按秒
+解释 → 到期时间落在**公元 58800 年** → `NeedsRefresh` 恒 false → token 永不刷新
+→ 到期后账号静默 401，表现为「用了一个月突然全部失效」。Python 侧同源且更早暴露：
+`wb2api.list_auth_accounts` 会算出「剩余五万多年」（进度条永远满格），续期巡检
+因此永不触发；`accounts._uploaded_account` 还会把这个毫秒值原样落盘。
+
+**参考仓改法**：`normalizeExpiresAt`（阈值 `1e11`）+ 私有 `expiresAtMillis`
+标志 —— 内存统一秒，`SaveAtomic` 按来源单位写回毫秒。反向的一步同样重要：只归一
+读、写回按秒，会把官方凭据的到期时间缩到 1970 年代，桌面端随即判定过期。
+
+**本仓落地**（两侧都补，因为两侧都能独立把文件读进来）：
+
+| 位置 | 改动 |
+|---|---|
+| `upstream/internal/auth/auth.go` | `Parse` 末尾归一（阈值 `1e11`，两侧都不会误判）；新增私有 `expiresAtMillis`；`SaveAtomic` 经 `persistedExpiresAt()` 按来源单位写回；`AdoptNewer` 把标志一起带走（磁盘那份换成官方凭据后，后续刷新必须继续写毫秒） |
+| `server/services/tencent.py` | 新增 `_normalise_expires_at` / `_expires_at_millis`；`update_auth_tokens` 写回按来源单位换算（上游若哪天回毫秒，也不会把毫秒写进秒制文件）；`write_auth_file` 重建整份文件时也跟随原文件单位（重登 / 覆盖导入不跟随就会把官方凭据缩到 1970 年代） |
+| `server/services/wb2api.py` | `list_auth_accounts` 读侧归一（进度条 / 续期窗口 / 排序都拿秒） |
+| `server/routers/accounts.py` | `_uploaded_account` 导入侧归一（官方凭据进入系统的入口） |
+
+**为什么阈值取 `1e11`**：作为秒已是公元 5138 年（真实凭证不可能），作为毫秒是
+1973 年（毫秒制当前值 ~1.8e12 远在其上）。两个口径都不会误判，也不依赖「现在
+是哪一年」。
+
+### I.4 `c84b6f2be7` 的教训（不取提交）
+
+参考仓把这个归一逻辑的测试夹具写成了固定毫秒串 `1795254516410`
+（2026-11-21T09:48Z 到期），到期那天 `NeedsRefresh(time.Hour)` 断言必然变红，
+CI 的 binaries 就是这么挂的。改法是取 `now + 28 天`。
+
+本仓 `upstream/internal/auth` 没有 `expires_test.go`，此前也没有任何写死毫秒的
+夹具，**没有这个故障**。但 I.3 新增的用例同样要断言「未过期」，所以一律用
+`time.Now().Add(28*24*time.Hour)` / `int(time.time()) + 28*86400` 构造；
+写死的那份旧值（`1795254516410`，现在只出现在 I.3 的用例里）**只用来验证换算
+本身**，不与当前时刻比较 —— 它已经过期，任何「未过期」断言挂在它上面都会在某天
+变红。
+
+### I.5 未取的三条视频与一条 MCP
+
+`c27d73114c` / `e2d0eb6a40` / `4221f2b202` 全部围绕
+`internal/server/videos.go` 的 `/v1/videos/generations`（参考素材从字符串数组补成
+`[{image_url: ...}]` 对象数组、参考图 URL 必须上游自己拉得到、提交阶段 4xx 归
+请求级不罚号）；`24e59f89e3` 是给 MCP 的 `generate_video` schema 补三个
+`reference_*` 字段。本仓 Go 侧没有 `videos.go`、面板没有视频入口、也没有 MCP
+工具面（全仓搜 `/v1/videos` 与 `mcp.go` 均零命中），整条数据面不存在。
+
+其中 `4221f2b202` 的判据（提交阶段 4xx 除 401/403/429 归请求级、零动作不罚号）
+与本仓 chat 链路既有的「请求级错误不罚号」同源 —— 本仓在第十八批（`d629a8ca`）
+就已按同一思路落地，不需要为视频再抄一遍。
+
+### I.6 落地清单
+
+| 位置 | 改动 |
+|---|---|
+| `server/routers/gateway.py` | 新增 `_disambiguate_promo_names`，挂在 `list_models` 的 `filter_payload` 之后 |
+| `upstream/internal/auth/auth.go` | `expiresAtMillis`、`persistedExpiresAt`、`Parse` 归一、`SaveAtomic` / `AdoptNewer` 跟随单位 |
+| `server/services/tencent.py` · `wb2api.py` · `routers/accounts.py` | `_normalise_expires_at` / `_expires_at_millis`；读、导入、写回、整份重建四处归一 / 跟随单位 |
+| 测试 | 新增 `server/tests/test_models_listing_promo_names.py`（10 项）、`server/tests/test_expires_at_millis.py`（20 项）；`upstream/internal/auth/auth_test.go` 新增 3 项 |
+
+记录同步写进 `deploy/workbuddy-panel-ref.txt` 第二十批。
+
