@@ -3381,8 +3381,9 @@ CI 的 binaries 就是这么挂的。改法是取 `now + 28 天`。
 |---|---|
 | `server/routers/gateway.py` | 新增 `_disambiguate_promo_names`，挂在 `list_models` 的 `filter_payload` 之后 |
 | `upstream/internal/auth/auth.go` | `expiresAtMillis`、`persistedExpiresAt`、`Parse` 归一、`SaveAtomic` / `AdoptNewer` 跟随单位 |
-| `server/services/tencent.py` · `wb2api.py` · `routers/accounts.py` | `_normalise_expires_at` / `_expires_at_millis`；读、导入、写回、整份重建四处归一 / 跟随单位 |
-| 测试 | 新增 `server/tests/test_models_listing_promo_names.py`（10 项）、`server/tests/test_expires_at_millis.py`（20 项）；`upstream/internal/auth/auth_test.go` 新增 3 项 |
+| `server/services/tencent.py` · `wb2api.py` · `routers/accounts.py` | `_normalise_expires_at` / `_expires_at_millis` / `_write_back_expires_at`；读、导入、写回、整份重建四处归一 / 跟随单位 |
+| `server/platforms/cline/adapter.py` | 目录兜底判据 `is None` → `not models`（两个接口都失败时退回内置免费档） |
+| 测试 | 新增 `server/tests/test_models_listing_promo_names.py`（10 项）、`server/tests/test_expires_at_millis.py`（20 项）；`upstream/internal/auth/auth_test.go` 新增 3 项；`test_platform_cline_adapter.py` 修 1 项、新增 1 项 |
 
 记录同步写进 `deploy/workbuddy-panel-ref.txt` 第二十批。
 
