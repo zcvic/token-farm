@@ -324,7 +324,7 @@ git diff --stat cb27afd...loomy-ref/HEAD                # 只看协议文件有�
 `server/platforms/{trae,discovery,dumate,cline,kilo}/` 重写。各自的锚点提交、
 逐项取用 / 未取原因与实测记录在 `deploy/*-ref.txt`。
 
-> > **协议批（2026-11-24）**：五个来源各判一轮，共取 10 项（另取 1 项的一半）。
+> **协议批（2026-11-24）**：五个来源各判一轮，共取 10 项（另取 1 项的一半）。
 >
 > - **trae**（`e7eef187` → `f7b75787`，5 个非 merge）：取 `355503e6` SOLO 内联图片
 >   边界校验（单张 5 MiB / 单请求合计 10 MiB，decoded 字节，只对 user 角色、严格
