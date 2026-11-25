@@ -81,5 +81,47 @@
 #      锚点提交：35a8d552da（2026-10-12）
 #      上一次基线：3e8463a67d
 #
+# ---- 2026-11 第三批：35a8d552 → 763ed2f510（1 个提交，取 3 项、有意不跟 3 项）
+#      本批是参考仓的一次生产事故复盘（SOCKS5 代理随机出口被上游 403、隧道
+#      超时约 50%，两类失败都被记在当时在飞的 Key 上，800 把 Key 三连失败后
+#      整池冷却，实际每把 Key 直连探活都 200）。
+#      已取（按能力重写，不引入参考仓的 keypool/relay 结构）：
+#        · 链路失败不归因到 Key：`client._network_error` 仍标 `network_error`；
+#          `adapter._cool_down` 对 `network_error` 直接返回 False——即使运维把
+#          `cooldown_5xx` 打开，DNS/超时/代理断开也不冻号。`_chat_accounts` 遇到
+#          network_error 改为**换下一个账号继续**（不冷却）：每个账号可以走不同
+#          代理，换号仍有意义；全部失败才抛出最后一个错误。
+#        · Cluster TPM 429 是账户级上限：`client._response_error` 在 429 且文案含
+#          `Cluster TPM` / `cluster rate limit` 时标记 `cluster_rate_limited`
+#          （保留 retry-after），而不是普通的 `rate_limited`。适配器不冷却、不
+#          轮换账号，而是按 retry-after 等共享窗口（每次 ≤15s、每请求最多 2 次），
+#          然后把**同一个账号**放回队首重试；超过预算才把 429 交给客户端。
+#          冷却单个账号只会把整池轮着冻一遍，而 ceiling 在所有 Key 之上。
+#        · 模型下线提示：上游返回 404 `error.code=model_disabled` 且带
+#          `suggested_model` 时，`_response_error` 保留 404 与稳定 code，并把
+#          「上游建议改用 X；不会自动改写请求」写进错误文案。
+#      有意不跟：
+#        · `model_disabled` 的**静默改写 + 自动重试**：参考仓为了旧客户端配置
+#          能用，直接把请求体 model 换成 suggested_model 再打一次。本仓在
+#          `docs`/适配器里明确不做 force-model 静默改写——客户端要 A 回来 B 无法
+#          解释，且 suggested_model 未必在本仓目录里（还有 `discovery/` 前缀和
+#          别名映射）。只透出建议，由用户/客户端决定。
+#        · 池级 `ReviveStaleLinkRests` / `ProbeRound` / `NoteProbeSuccess` 与
+#          「连续 8 次失败才 rest 一个 Key」：本仓探针是人工触发的
+#          `refresh_account` / `_probe`，没有定时 sample 整池的状态机；冷却清除
+#          有显式入口（`clear_account_cooling`）。照搬会多出一套没人驱动的池级
+#          修复逻辑。参考仓需要它，是因为旧版本把链路错误写进了 Key 的冷却，
+#          本仓这次改完源头后没有需要修复的历史状态。
+#        · 模型缓存落盘 / 15 分钟刷新 / 静态目录更新：本仓已有等价或更强实现——
+#          `list_models()` 把目录存进 DB（`platforms.discovery.models`），TTL 由
+#          `catalog_ttl` 控制（默认 6h，不是硬编码 60s），在线拉取失败时优先用
+#          上一份真实目录（`allow_stale`），完全没有历史目录才退内置快照。
+#          参考仓的 `rate-limit-retries` 独立预算也不取：本仓用
+#          `max_accounts_try` 作为总尝试预算，足够且有界。
+#        · `.gitignore` 补 `.env` / 配置备份 / `backups/`：本仓 `.gitignore` 已覆盖
+#          运行时数据目录，配置与密钥有独立存放约定，不随本批改动。
+#      锚点提交：763ed2f510264dacf1a220db0236f6c5c50bdce1（2026-11-24）
+#      上一次基线：35a8d552da
+#
 # ---- 同类实现（阅读用，不引入代码）----
 #   · Intern-AI 的 TokenPlan 控制台是唯一的凭证来源（API Key 页）。
