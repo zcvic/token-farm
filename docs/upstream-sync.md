@@ -280,11 +280,26 @@ git fetch qoder-ref --no-tags
 ```
 
 已核对到 `44b6f33`（v1.9.11）→ `25d0594`（v1.9.12）→ `285d98be`（v1.9.13）→
-`88753423`（v1.9.14）。基线、取用范围与本地唯一补丁（账号权重）记录在
-`deploy/qoder-ref.txt`。升级方式是重跑
+`88753423`（v1.9.14）→ `3cc8617e88`（v1.10.1）。基线、取用范围与本地唯一补丁
+（账号权重）记录在 `deploy/qoder-ref.txt`。升级方式是重跑
 `python server/platforms/qoder/tools/vendor_qoder.py --source <clone>`，
 `--check` 校验一致性；重新 vendor 后必须重新应用那份补丁
 （`server/tests/test_qoder_vendor.py` 守着）。
+
+> **Qoder 批（2026-11-25，`88753423` → `3cc8617e88`，v1.10.1）**：8 个代码提交，
+> 整目录重 vendor。四条线：①抓取（fetch）后端可与搜索后端分开配置
+> （`web_fetch_backend` / `web_fetch_external`，默认 `inherit`；endpoint 变化清旧
+> Key，环境变量覆盖时不写盘）；②Anthropic 入口按请求决定 thinking（客户端显式
+> 要思考才发空签名 block，显式 off 仍优先；thinking 固定在 text 前；
+> `stream_anthropic_events` 重写块生命周期与工具参数缓冲）；③usage 补
+> `output_tokens_details.thinking_tokens`（兼容保留 `reasoning_tokens`）；
+> ④上游 `provider_error` + `Cannot find model` 归请求级故障，不重试、不换号、
+> 不冷却，SSE 内嵌错误同样识别。模型目录新增限时活动模型 HungerG
+> （INTL、free，`CATALOG_SUPPLEMENTS` 到期自动隐藏）。`vendor_qoder.py` 清单不变，
+> 账号权重补丁已重新应用（`/accounts/weight` 路由锚点跟随上游迁到 `/accounts/set`
+> 段后），`--check` 与 qoder 相关 132 项测试通过；`embedded.py` 无需改动。
+> 面板侧 web fetch 表单与 docs 更新不取（同上批：token-farm 无托管工具设置界面，
+> 配置走环境变量或 `accounts/settings.json`）。
 
 > **Qoder 批（2026-11-24，`285d98be` → `88753423`，v1.9.14）**：6 个非 merge 提交，
 > 整目录重 vendor。这一批是 **Anthropic 托管网络工具**：新增
@@ -408,6 +423,17 @@ git diff --stat cb27afd...loomy-ref/HEAD                # 只看协议文件有�
 > 面板 / 调度组件。详细理由与实测结论见 `deploy/dumate-ref.txt` 第三批。
 > 核对过程中另外发现并修掉两个真实缺口（嵌套业务码解析、探测会话头族的等值
 > 关系），见该文件同段。
+>
+> **discovery 增量（2026-11-25，`35a8d552` → `763ed2f510`，1 个提交）**：取三项
+> 工程语义——①链路失败（DNS / 超时 / 代理断开）不归因到 Key：即使打开
+> `cooldown_5xx` 也不冻号，`_chat_accounts` 换下一个账号继续（每个账号可走不同
+> 代理），全部失败才抛出最后错误；②`Cluster TPM` 429 是账户级上限，标记为
+> `cluster_rate_limited`，不冷却、不轮换，按 retry-after 等窗口（≤15s × 2 次）
+> 后重试**同一账号**；③`model_disabled` + `suggested_model` 保留 404 与稳定
+> code，并把替代模型写进错误文案。参考仓的 model 静默改写、池级
+> `ReviveStaleLinkRests` / `ProbeRound` / 定时 sample、缓存落盘与 15 分钟刷新
+> 不取（本仓已有 DB 目录缓存 + `catalog_ttl` + 陈旧兜底；探针是人工触发，
+> 冷却清除有显式入口）。测试从 35 项扩到 42 项。
 
 这些来源的仓库布局与运行时都不同，**不要互相 cherry-pick**，按能力在本项目
 对应文件重写。
@@ -509,6 +535,38 @@ CN 专发的 `X-Client-*` 三头、小程序口径撤头、global UA 品牌段�
   `wbforward.model_missing_body` 同时认 14401 的 `route config not found`
   （旧版本上游会把它包成 503，同样改判 404）。
   逐条见附录 H，已同步项登记在 `deploy/workbuddy-panel-ref.txt` 第十八批。
+
+### 已评估：misakano `d221c721fc..b1233f09`
+
+第二十批之后参考仓又推了 6 个非 merge 提交（2026-11-25），**取 1 项**：
+
+- **取 `392f8ac7`**（issue #283）：模型目录降级 WARN 每种只报一次。global 域的企业
+  端点永续 500、而 `/v3/config` 每次都接住时，每轮 warm model rates 都重打一行
+  WARN，真故障会被淹掉。参考仓新增 `degradedWarnOnce(key, format, args...)`
+  （进程内 map + mutex，同 key 只打一次），四条降级路径各给一个 key。本仓按结构重写：
+  `upstream/internal/upstream/global_models.go` 放 `degradedWarnOnce` 与两个包级变量，
+  两处等价落点各给两个 key——`probeGlobalModels`（`global-models/v3`、
+  `global-models/enterprise`）与 `client.go` 的 `FetchModels`（`fetch-models/v3`、
+  `fetch-models/enterprise`）。新增 `upstream/internal/upstream/degraded_warn_test.go`。
+  反向代价与参考仓相同：恢复后再失败不会重新告警，得等重启。
+- **不取 `6dc02b30` / `f60c68d5` / `2e2358ca`**（browser-complete 控制标记救援、
+  续写提示中性化、合成续写不带网关身份）：落点集中在
+  `internal/server/{browser_complete.go,continue.go,narration.go,toolonly.go}`。
+  本仓 `upstream/internal/server/` 有 60 个 go 文件但**没有**这几个——推理续写状态机
+  与 browser-complete 的独立控制标记在本仓整段不存在，照搬会凭空多出一套没人驱动的
+  中间层。
+- **不取 `53fbd2ec`**（面板「错误汇总可标已读」+ 账号池批量导出）：前者依赖参考仓
+  内嵌 Go 面板的日志环聚合表（`internal/panel/errors.go` 的 `ErrStat` + `last_unix`），
+  本仓日志页按请求行直出，没有「按账号 × 错误类型聚合 + 本机已读标记」这一层；
+  后者的能力本仓已有——`GET /accounts/export`（明文凭据、批量、审计日志
+  user/count/ip），导出格式与本仓导入格式的对齐已由 `test_account_upload.py` 覆盖，
+  不需要再抄一份参考仓的 `{accounts:[...]}` 形状。
+- **不取 `b1233f09`**（每日变化柱状图 `<title>` 挪进柱子自身）：参考仓是手写 SVG
+  字符串，把 `<title>` 挂在 `<svg>` 根下导致所有柱子共用第一条提示；本仓仪表盘的
+  柱子/折线是 React + recharts（`dashboard/page.tsx` 的 `<Bar>` + `<Tooltip>`），悬停
+  提示由组件按每个数据点渲染，不存在「兄弟节点 `<title>` 被当成整图说明」这个形态。
+
+逐条见 `deploy/workbuddy-panel-ref.txt` 第二十一批。
 
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）
