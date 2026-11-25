@@ -2,6 +2,7 @@
 
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
+  Activity,
   CalendarClock,
   Gauge,
   Loader2,
@@ -79,7 +80,7 @@ const GATEWAY_DEFAULT = '__gateway_default__';
 const NUMERIC_KEYS: readonly NumericKey[] = [
   'max_in_flight', 'checkin_concurrency', 'checkin_delay_min', 'checkin_delay_max',
   'request_timeout', 'idle_timeout', 'max_accounts_try', 'min_credits',
-  'session_affinity_ttl',
+  'session_affinity_ttl', 'usage_sync_days',
   'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout',
   'catalog_backoff_base', 'catalog_backoff_max',
   'credits_ttl', 'credits_timeout', 'cooldown_429', 'cooldown_5xx',
@@ -87,7 +88,7 @@ const NUMERIC_KEYS: readonly NumericKey[] = [
 ];
 
 const SWITCH_KEYS: readonly PlatformSwitchField[] = [
-  'session_affinity', 'desktop_sync', 'web_tools',
+  'session_affinity', 'desktop_sync', 'web_tools', 'usage_ledger',
   'native_tools', 'text_tool_rescue', 'text_tool_tags', 'tool_protocol_hint',
   'degenerate_call_error', 'rescue_tail_strict',
   'reasoning_effort', 'reasoning_as_content',
@@ -106,6 +107,7 @@ const NUMERIC_LABEL: Record<PlatformNumericField, string> = {
   max_accounts_try: 'configMaxAccountsTry',
   min_credits: 'configMinCredits',
   session_affinity_ttl: 'configAffinityTtl',
+  usage_sync_days: 'configUsageSyncDays',
   catalog_ttl: 'configCatalogTtl',
   catalog_retry_ttl: 'configCatalogRetryTtl',
   catalog_timeout: 'configCatalogTimeout',
@@ -606,6 +608,31 @@ export function PlatformConfigPanel({
                       t('platforms.configCooldown429Hint'))}
             {numField('cooldown_5xx', t('platforms.configCooldown5xx'),
                       t('platforms.configCooldown5xxHint'))}
+          </div>
+        </section>
+      )}
+
+      {/* ── DuMate：对话消耗入账 ── */}
+      {(caps?.usage_ledger || caps?.usage_sync_days) && (
+        <section className="rounded-[20px] bg-muted p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-sm font-medium">
+              {t('platforms.configSectionUsageLedger')}
+            </span>
+          </div>
+          <p className="mb-2.5 text-[11px] leading-4 text-muted-foreground">
+            {t('platforms.configUsageLedgerIntro')}
+          </p>
+          <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
+            {caps?.usage_ledger && switchRow(
+              'usage_ledger',
+              t('platforms.configUsageLedger'),
+              t('platforms.configUsageLedgerHint'))}
+            {caps?.usage_sync_days && numField(
+              'usage_sync_days',
+              t('platforms.configUsageSyncDays'),
+              t('platforms.configUsageSyncDaysHint'))}
           </div>
         </section>
       )}

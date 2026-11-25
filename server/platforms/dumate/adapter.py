@@ -1043,13 +1043,93 @@ class DumateAdapter(PlatformAdapter):
         def amount(value: object) -> float:
             return abs(_num(value) or 0.0)
 
+        ledger = runtime_settings.usage_ledger(self.name)
         out['consumed'] = {
             'today': amount(day.get('consumed_points')),
             'today_records': int(_num(day.get('total_count')) or 0),
             'week': amount(week.get('consumed_points')),
             'week_records': int(_num(week.get('total_count')) or 0),
             'recent': _without_raw(week.get('list') or []),
+            'ledger': ledger,
+            'ledger_days': (runtime_settings.usage_sync_days(self.name)
+                            if ledger else 0),
         }
+        if ledger:
+            # 展示不依赖同步结果：失败只影响「积分收支」的补账，不影响弹窗。
+            synced = await self.sync_usage_ledger(str(account.get('uid') or ''))
+            for failure in synced.get('errors') or []:
+                out['errors'].append({
+                    'endpoint': 'usage_ledger',
+                    'code': str(failure.get('code') or 'ledger_failed'),
+                    'message': str(failure.get('message') or ''),
+                })
+
+    async def _usage_window_records(self, account: dict, *, days: int,
+                                    proxy: str | None,
+                                    timeout: float) -> list[dict]:
+        """拉取最近 N 天的对话扣费明细（自动翻页，去掉 `raw`）。
+
+        上游一条记录没有稳定 id，同步只能靠窗口 + 指纹去重；因此这里尽量把
+        窗口内的 `list` 取全（`totalCount` 是窗口总数，`limit` 给 100）。翻页
+        上限 20 页是防御：上游若忽略 `page` 反复返回同一页，不能无限打下去。
+        """
+        now = int(time.time())
+        start = db.day_start_ts(
+            db.day_of(now - max(0, int(days) - 1) * 86400))
+        cookie = str(account.get('cookie') or '')
+        rows: list[dict] = []
+        total = 0
+        page = 1
+        while page <= 20:
+            data = await client.usage_records(
+                cookie, start_at=start, end_at=now, page=page, limit=100,
+                proxy=proxy, timeout=timeout)
+            chunk = data.get('list') or []
+            rows.extend(chunk)
+            total = max(total, int(_num(data.get('total_count')) or 0))
+            if not chunk:
+                break
+            # `totalCount` 是权威总数：上游若把 limit 压得比 100 小，仅凭
+            # `len(chunk) < limit` 会提前收手。没有 total 时才按页大小判断。
+            if total and len(rows) >= total:
+                break
+            if not total and len(chunk) < 100:
+                break
+            page += 1
+        return _without_raw(rows)
+
+    async def sync_usage_ledger(self, account_id: str | None = None) -> dict:
+        """把对话扣费同步进积分收支账本（幂等，只在开关打开时执行）。
+
+        `account_id` 为空表示全部账号（每日签到任务调用）；否则只同步一个账号
+        （用量弹窗打开时调用）。单个账号失败只记进 `errors`，不拖垮其余账号。
+        """
+        if not runtime_settings.usage_ledger(self.name):
+            return {'enabled': False, 'days': 0, 'accounts': 0,
+                    'records': 0, 'errors': []}
+        days = runtime_settings.usage_sync_days(self.name)
+        accounts = ([self._require(account_id)] if account_id
+                    else store.list_accounts())
+        timeout = runtime_settings.credits_timeout(self.name)
+        stored = 0
+        errors: list[dict] = []
+        for account in accounts:
+            uid = str(account.get('uid') or '')
+            if not uid:
+                continue
+            try:
+                rows = await self._usage_window_records(
+                    account, days=days, proxy=self._proxy_for(account),
+                    timeout=timeout)
+                stored += db.add_dumate_usage_records(uid, rows)
+            except PlatformError as exc:
+                errors.append({'uid': uid, 'code': exc.code,
+                               'message': exc.message})
+            except Exception as exc:  # noqa: BLE001 —— 账本是旁路，不能拖垮弹窗
+                errors.append({'uid': uid, 'code': 'ledger_failed',
+                               'message': str(exc)})
+        return {'enabled': True, 'days': days, 'accounts': len(accounts),
+                'records': stored, 'errors': errors}
 
     async def credits(self, account_id: str) -> dict:
         """积分余额快照（默认 60 秒缓存，`platforms.dumate.credits_ttl`）。"""

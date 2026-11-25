@@ -369,6 +369,10 @@ async def usage_records(cookie: str, *, start_at: int | None = None,
                                 or item.get('conversation_name') or ''),
             'package_id': str(item.get('packageId')
                               or item.get('package_id') or ''),
+            # 上游没有文档化的记录 id；有就带上，指纹能更精确地避免把同一秒内
+            # 两笔同额扣费合并成一条。没有时退回其余字段组合。
+            'record_id': str(item.get('id') or item.get('recordId')
+                             or item.get('record_id') or ''),
         })
     return {
         'consumed_points': _optional_float(

@@ -2369,6 +2369,10 @@ export interface PlatformUsage {
       conversation?: string;
       package_id?: string;
     }[];
+    /** DuMate：这些消耗是否已计入「积分收支」的支出（由平台设置决定） */
+    ledger?: boolean;
+    /** 入账时回溯同步的窗口（天）；未开启时为 0 */
+    ledger_days?: number;
   };
   errors: {endpoint: string; code: string; message: string}[];
 }
@@ -2390,6 +2394,8 @@ export type PlatformNumericField =
   | 'session_affinity_ttl'
   // Loomy：保底积分（低于该值的账号只作最后候选）
   | 'min_credits'
+  // DuMate：对话消耗入账的回补窗口（天）
+  | 'usage_sync_days'
   // Trae：模型目录缓存 / 刷新退避
   | 'catalog_ttl' | 'catalog_retry_ttl' | 'catalog_timeout'
   | 'catalog_backoff_base' | 'catalog_backoff_max'
@@ -2403,6 +2409,8 @@ export type PlatformNumericField =
 /** 布尔开关：会话 / 回写 / 本地 Web 工具 + Trae 的协议兼容开关。 */
 export type PlatformSwitchField =
   | 'session_affinity' | 'desktop_sync' | 'web_tools'
+  // DuMate：把对话扣费计入积分收支（默认关闭）
+  | 'usage_ledger'
   | 'native_tools' | 'text_tool_rescue' | 'text_tool_tags'
   | 'tool_protocol_hint' | 'degenerate_call_error' | 'rescue_tail_strict'
   | 'reasoning_effort' | 'reasoning_as_content'
@@ -2472,6 +2480,10 @@ export interface PlatformSettings {
   max_accounts_try: number;
   /** 保底积分（仅 Loomy，默认 5000）：低于该值的账号只作最后候选；0 = 关闭 */
   min_credits: number;
+  /** DuMate：对话消耗入账时回溯同步最近多少天（1–90，默认 7） */
+  usage_sync_days: number;
+  /** DuMate：是否把对话扣费计入积分收支（默认关闭 = 只在用量弹窗展示） */
+  usage_ledger: boolean;
   /** 同一会话是否固定到同一账号（仅 Trae，默认开启） */
   session_affinity: boolean;
   /** 会话亲和的滑动 TTL（秒，默认 30 分钟） */

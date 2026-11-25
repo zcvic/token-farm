@@ -18,6 +18,7 @@ import httpx
 
 from server import config, db
 from server.platforms.base import PlatformError
+from server.platforms import settings as runtime_settings
 from server.platforms.dumate import catalog, client, constants as C, login, store
 from server.platforms.dumate.adapter import DumateAdapter, _scan_sse
 
@@ -573,11 +574,96 @@ class DumateAdapterTest(unittest.TestCase):
         self.assertEqual(consumed['today_records'], 3)
         self.assertEqual(consumed['week'], 12.5)
         self.assertEqual(consumed['recent'][0]['conversation'], 'c1')
+        self.assertFalse(consumed['ledger'])
+        self.assertEqual(consumed['ledger_days'], 0)
         self.assertEqual(out['errors'], [])
-        # 第一次查今天、第二次查近 7 天（含今天）。
+        # 第一次查今天、第二次查近 7 天（含今天）；开关关闭时不该额外同步账本。
+        self.assertEqual(len(windows), 2)
         self.assertEqual(windows[0][0], db.day_start_ts())
         self.assertEqual(windows[1][0], db.day_start_ts() - 6 * 86400)
         self.assertTrue(all(end > start for start, end, _ in windows))
+
+    def test_usage_ledger_persists_and_dedupes_records(self) -> None:
+        self._seed()
+        runtime_settings.save('dumate', {'usage_ledger': True,
+                                         'usage_sync_days': 2})
+        now = int(time.time())
+        rows = [
+            {'at': now - 60, 'points': -3.5, 'conversation': 'c1',
+             'package_id': 'p1'},
+            {'at': now, 'points': -1.5, 'conversation': 'c2',
+             'package_id': 'p1'},
+        ]
+        calls: list[dict] = []
+
+        async def fake_quota(cookie, **kwargs):
+            return {'left': 100, 'total': 500, 'used': 0, 'packages': []}
+
+        async def fake_records(cookie, *, start_at=None, end_at=None,
+                               limit=None, page=None, **kwargs):
+            calls.append({'start_at': start_at, 'limit': limit, 'page': page})
+            return {'consumed_points': 5, 'total_count': len(rows),
+                    'list': rows}
+
+        with mock.patch.object(client, 'quota_overview', new=fake_quota), \
+                mock.patch.object(client, 'usage_records', new=fake_records):
+            out = asyncio.run(self.adapter.usage('dm_1'))
+            # 再同步一次：窗口重叠，但指纹相同，不应重复入账。
+            await_result = asyncio.run(self.adapter.sync_usage_ledger('dm_1'))
+
+        self.assertTrue(out['consumed']['ledger'])
+        self.assertEqual(out['consumed']['ledger_days'], 2)
+        self.assertTrue(await_result['enabled'])
+        self.assertEqual(await_result['records'], 0)
+        stored = db.query(
+            'SELECT uid, points, conversation FROM dumate_usage_records '
+            'ORDER BY ts')
+        self.assertEqual(len(stored), 2)
+        self.assertEqual([r['conversation'] for r in stored], ['c1', 'c2'])
+        self.assertAlmostEqual(sum(float(r['points']) for r in stored), 5.0)
+        # 同步窗口是「近 2 天」：起点为昨天 00:00，不是今天。
+        sync_call = [c for c in calls if c['limit'] == 100][0]
+        self.assertEqual(sync_call['start_at'],
+                         db.day_start_ts(db.day_of(now - 86400)))
+        self.assertEqual(sync_call['page'], 1)
+
+    def test_usage_ledger_skips_network_when_disabled(self) -> None:
+        self._seed()
+        calls: list[dict] = []
+
+        async def fake_records(cookie, **kwargs):
+            calls.append(kwargs)
+            return {'consumed_points': 0, 'total_count': 0, 'list': []}
+
+        out = asyncio.run(self.adapter.sync_usage_ledger('dm_1'))
+        self.assertFalse(out['enabled'])
+        self.assertEqual(calls, [])
+
+    def test_usage_window_records_paginates_until_total(self) -> None:
+        self._seed()
+        account = store.read_account('dm_1')
+        calls: list[dict] = []
+
+        async def fake_records(cookie, *, start_at=None, end_at=None,
+                               page=None, limit=None, **kwargs):
+            calls.append({'page': page, 'limit': limit,
+                          'start_at': start_at, 'end_at': end_at})
+            if page == 1:
+                return {'total_count': 103,
+                        'list': [{'at': int(time.time()), 'points': -1}] * 100}
+            return {'total_count': 103,
+                    'list': [{'at': int(time.time()), 'points': -1}] * 3}
+
+        with mock.patch.object(client, 'usage_records', new=fake_records):
+            rows = asyncio.run(self.adapter._usage_window_records(
+                account, days=3, proxy=None, timeout=5))
+
+        self.assertEqual(len(rows), 103)
+        self.assertEqual([c['page'] for c in calls], [1, 2])
+        self.assertTrue(all(c['limit'] == 100 for c in calls))
+        # 3 天窗口 = 前天 00:00 起（含今天）。
+        self.assertEqual(calls[0]['start_at'],
+                         db.day_start_ts(db.day_of(int(time.time()) - 2 * 86400)))
 
     def test_credits_maps_quota_overview(self) -> None:
         self._seed()

@@ -222,6 +222,17 @@ async def _run_platform_checkin() -> tuple[bool, str]:
         if hint is not None and not hint():
             continue
         label = str(getattr(adapter, 'label', '') or adapter.name)
+        # DuMate 的对话扣费只在上游会话记录里：每天签到这一轮顺手补一次账
+        # （开关关闭时该方法自己返回 enabled=False，不发任何请求）。
+        sync_usage = getattr(adapter, 'sync_usage_ledger', None)
+        if callable(sync_usage):
+            try:
+                synced = await sync_usage()
+                if synced.get('records'):
+                    logger.info('%s 对话消耗入账 %s 条', label,
+                                synced['records'])
+            except Exception as exc:  # noqa: BLE001 —— 补账失败不影响签到
+                logger.warning('%s 对话消耗入账同步失败：%s', label, exc)
         try:
             out = await platforms_router.checkin_all(adapter.name,
                                                      user={'role': 'admin'})
