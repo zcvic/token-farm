@@ -55,8 +55,10 @@ class DefaultListFallbackTest(unittest.TestCase):
                                      only_codes=only)
         stats = _stats()
         calls: list[tuple] = []
+        mp_rows = [mp_row] if mp_row else []
         with mock.patch.object(self.tr.tc, 'do_get', return_value=(200, {'code': 0})), \
                 mock.patch.object(self.tr.tc, 'list_tasks', return_value=task_list), \
+                mock.patch.object(self.tr, '_mp_list_tasks', return_value=mp_rows), \
                 mock.patch.object(self.tr, '_mp_task_status', return_value=mp_row), \
                 mock.patch.object(self.tr, 'process_task',
                                   side_effect=lambda *a: calls.append(a)):
@@ -80,11 +82,12 @@ class DefaultListFallbackTest(unittest.TestCase):
         self.assertIn('total', stats)
 
     def test_mp_probe_failure_does_not_crash(self) -> None:
-        """回落查询自己失败时也要按「任务不存在」处理，不能把整轮打断。"""
+        """回落查询自己失败时也不能把整轮打断（按「该账号没有此任务」处理）。"""
         opts = types.SimpleNamespace(yes=False, gap=0, only_claim=False, only_codes=None)
         stats = _stats()
         with mock.patch.object(self.tr.tc, 'do_get', return_value=(200, {'code': 0})), \
                 mock.patch.object(self.tr.tc, 'list_tasks', return_value=[]), \
+                mock.patch.object(self.tr, '_mp_list_tasks', return_value=[]), \
                 mock.patch.object(self.tr, '_mp_task_status',
                                   side_effect=RuntimeError('boom')):
             self.tr.process_account(self.auth, opts, stats)
@@ -97,12 +100,13 @@ class DefaultListFallbackTest(unittest.TestCase):
         stats = _stats()
         probed: list[str] = []
 
-        def _probe(_auth, code):
+        def _probe(_auth, code, tasks=None):
             probed.append(code)
             return None
 
         with mock.patch.object(self.tr.tc, 'do_get', return_value=(200, {'code': 0})), \
                 mock.patch.object(self.tr.tc, 'list_tasks', return_value=[row]), \
+                mock.patch.object(self.tr, '_mp_list_tasks', return_value=[]), \
                 mock.patch.object(self.tr, '_mp_task_status', side_effect=_probe), \
                 mock.patch.object(self.tr, 'process_minichat_task'), \
                 mock.patch.object(self.tr, 'process_task'):
@@ -222,7 +226,7 @@ class MappingWiringTest(unittest.TestCase):
                                   side_effect=lambda a, c, t, o, s: seen.append(c)), \
                 mock.patch.object(self.tr, 'process_school_tasks'), \
                 mock.patch.object(self.tr, 'process_minichat_task',
-                                  side_effect=lambda a, c, o, s, u: seen.append(c)):
+                                  side_effect=lambda a, c, o, s, u, **kw: seen.append(c)):
             self.tr.process_account(auth, opts, stats)
         self.assertIn('wb_wechat_oa_subscribe_task', seen,
                       'claimonly 任务没进入 mp 专段')
