@@ -37,6 +37,7 @@ MODULES = [
     'qoder_cache.py',
     'qoder_catalog.py',
     'qoder_fingerprint.py',
+    'qoder_identity_guard.py',
     'qoder_images.py',
     'qoder_keepalive.py',
     'qoder_logpaths.py',

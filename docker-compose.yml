@@ -118,6 +118,10 @@ services:
       # acme.vpc.qoder.com.cn / acme-openapi.vpc.qoder.com.cn /
       # acme-gateway.vpc.qoder.com.cn；留空 = 走公网 qoder.com.cn。
       QD_CN_VPC_ENDPOINT: ${QD_CN_VPC_ENDPOINT:-}
+      # 出站身份句守卫（1 = 开启，留空跟随上游默认关闭）：上游对第三方 Agent
+      # 品牌身份句做字面检测，命中直接 10605 硬拒；开启后只在中招句子里插一个
+      # 空格，无命中零改动。
+      QD_IDENTITY_GUARD: ${QD_IDENTITY_GUARD:-}
     ports:
       # **只监听本机**：管理端必须藏在反向代理之后。
       # 若确需直接从别的机器访问，改成 "7864:7864"，但请先确保有 HTTPS 与访问控制——

@@ -1,13 +1,14 @@
-"""Qoder 内置网关（`_vendor/`）的两条本地约定。
+"""Qoder 内置网关（`_vendor/`）的本地约定。
 
 `server/platforms/qoder/_vendor/` 是 qoder2api-hub 的源码副本，升级时整目录
-覆盖（`tools/vendor_qoder.py`）。覆盖会冲掉唯一一处本地补丁 —— **账号权重**，
-所以这里用离线断言把它钉住：
+覆盖（`tools/vendor_qoder.py`）。覆盖会冲掉两处本地补丁 —— **账号权重**与
+**明文导出**，所以这里用离线断言把它们钉住：
 
   · `Account` 读出 / 写回 `weight`，非法值一律归 0（= 未设置）；
   · `AccountPool.set_weight` 的 0 / 区间 / 非数值语义与 Trae 一致；
   · 没有账号设置权重时选号仍是纯轮转，设置后按权重分摊；
-  · `qoder_proxy` 里保留 `POST /accounts/weight` 路由。
+  · `qoder_proxy` 里保留 `POST /accounts/weight` 路由；
+  · `/accounts/export?secrets=1` 只对持有网关 API Key 的调用方放开。
 
 测试不联网、不启动回环网关：只用临时账号目录与纯函数。
 """
@@ -20,6 +21,7 @@ import tempfile
 import unittest
 
 from server.platforms.qoder._vendor import qoder_accounts
+from server.platforms.qoder._vendor import qoder_identity_guard
 
 
 def _write_account(directory: str, uid: str, **extra) -> None:
@@ -150,6 +152,53 @@ class WeightRouteTest(unittest.TestCase):
         self.assertIn('POOL.set_weight(uid, payload.get("weight"))', source)
 
 
+class IdentityGuardTest(unittest.TestCase):
+    """1.10.2/1.10.3 的出站身份句守卫：只中和第三方品牌，自家品牌豁免。"""
+
+    def test_default_off_without_env(self) -> None:
+        env = os.environ.pop('QD_IDENTITY_GUARD', None)
+        try:
+            self.assertFalse(qoder_identity_guard.guard_enabled())
+        finally:
+            if env is not None:
+                os.environ['QD_IDENTITY_GUARD'] = env
+
+    def test_third_party_identity_is_neutralized(self) -> None:
+        text, hits = qoder_identity_guard.neutralize_text(
+            'You are Claude Code, an interactive CLI tool.')
+        self.assertEqual(hits, 1)
+        self.assertEqual(text, 'You are Claude Code , an interactive CLI tool.')
+
+    def test_own_brand_is_exempt(self) -> None:
+        text, hits = qoder_identity_guard.neutralize_text('You are Qoder, a tool.')
+        self.assertEqual(hits, 0)
+        self.assertEqual(text, 'You are Qoder, a tool.')
+
+    def test_powered_by_sentence_is_neutralized(self) -> None:
+        text, hits = qoder_identity_guard.neutralize_text(
+            'This service is powered by DeepSeek Harness.')
+        self.assertEqual(hits, 1)
+        self.assertIn('DeepSeek Harness .', text)
+
+    def test_neutralization_is_idempotent(self) -> None:
+        once, _ = qoder_identity_guard.neutralize_text('You are Codex, ok.')
+        twice, hits = qoder_identity_guard.neutralize_text(once)
+        self.assertEqual(hits, 0)
+        self.assertEqual(twice, once)
+
+
+class ExportPatchTest(unittest.TestCase):
+    """上游 1.10.2 起 HTTP 导出默认拒发明文；本地只给 API Key 调用方放开。"""
+
+    def test_export_branch_keeps_local_api_key_gate(self) -> None:
+        path = os.path.join(os.path.dirname(qoder_accounts.__file__),
+                            'qoder_proxy.py')
+        with open(path, encoding='utf-8') as fh:
+            source = fh.read()
+        self.assertIn('identify_key(supplied)', source)
+        self.assertIn('include_secrets=include_secrets', source)
+
+
 class VendorManifestTest(unittest.TestCase):
     """`tools/vendor_qoder.py` 的模块清单必须覆盖副本里的每一条包内导入。
 
@@ -191,7 +240,8 @@ class VendorManifestTest(unittest.TestCase):
         """1.9.12 的三种联网后端各自一个模块，缺一个就少一种后端。"""
         manifest = self._manifest()
         for name in ('qoder_webtools.py', 'qoder_web_response.py',
-                     'qoder_official_web.py', 'qoder_external_web.py'):
+                     'qoder_official_web.py', 'qoder_external_web.py',
+                     'qoder_identity_guard.py'):
             self.assertIn(name, manifest)
 
 

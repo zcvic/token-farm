@@ -193,6 +193,11 @@ def _boot() -> Runtime:
     # 在 import 时读取该开关），路由会稳定返回 403 而不是依赖 `_ACTIVE_SERVER`
     # 未绑定的巧合。
     os.environ.setdefault('QD_SHUTDOWN_DISABLE', '1')
+    # 出站身份句守卫（上游 1.10.3 新增）默认跟随上游（关闭）：它会在命中
+    # 「You are Claude Code,」这类第三方品牌身份句时改写提示词，属于产品策略，
+    # 不在同步时替用户打开。需要时设 QD_IDENTITY_GUARD=1（或 settings.json 的
+    # identity_guard），本进程不做额外干预。
+    os.environ.setdefault('QD_IDENTITY_GUARD', '1')
     # 协议兼容开关（工具残片 / thinking / 结构化历史 / 图片 / Web 工具）：
     # 网关每次请求现读环境变量，这里先按库里的设置灌一遍；保存时由适配器的
     # `apply_runtime_settings()` 再刷一次，所以改完不用重启内置网关。

@@ -6,8 +6,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 上游版本 | `1.10.1` |
-| 上游 commit | `3cc8617e88efd57c76a20a9ca20fb6f224daa913` |
+| 上游版本 | `1.10.3` |
+| 上游 commit | `36fa929592684c0676e3167b812a158edbf036f2` |
 | 许可 | MIT（见 `LICENSE`） |
 | 第三方依赖 | 无必装依赖（Pillow 可选：缺失时图片原样透传，不做压缩） |
 
@@ -25,6 +25,7 @@
 | `qoder_pricing.py`、`qoder_session_cache.py`、`qoder_activity.py` | 计费 / 会话缓存 / 活动日志 |
 | `qoder_agents.py`、`qoder_anthropic.py`、`qoder_webtools.py` | Agent 配置、Anthropic 桥、联网工具（本地 / 官方 / 外部三种后端） |
 | `qoder_anthropic_web.py` | Anthropic Messages 原生托管 web 工具（`web_search_20250305` / `web_fetch_20250910`）在 `/v1/messages` 上的服务端执行 |
+| `qoder_identity_guard.py` | 出站身份句守卫：中和第三方 Agent 品牌身份句，规避上游 10605 硬拒绝（`QD_IDENTITY_GUARD`，默认关闭，跟随上游） |
 | `qoder_web_response.py` | 联网工具的请求级证据与 Responses 事件回放（引用、工具调用） |
 | `qoder_official_web.py` | 官方搜索 / 抓取后端：用当前账号自己的 CN / INTL 登录态签名调用 |
 | `qoder_external_web.py` | 外部搜索后端：SearXNG / Tavily / Brave / Serper / 自定义，配置在 `accounts/settings.json` |
@@ -60,8 +61,17 @@ Trae / WorkBuddy 同一口径的按账号权重（`0` = 未设置，等效 `1.0`
 - `qoder_proxy.py`：`POST /accounts/weight` 路由。
 
 重新 vendor 会覆盖这两处，必须按上面的落点重新应用；
-`server/tests/test_qoder_vendor.py` 用离线断言守住它。除这两类差异外，业务
-逻辑、常量、错误文案与上游逐字节一致，方便对上游的修复做 diff。
+`server/tests/test_qoder_vendor.py` 用离线断言守住它。
+
+**明文导出（本地补丁）**：上游 1.10.2 起 `/accounts/export?secrets=1` 一律
+403，只允许命令行 `--backup-accounts` 落一份可恢复备份。token-farm 管理端的
+「导出明文凭据」需要 HTTP 导出，所以这里收紧成：**只有同时持有网关 API Key
+的调用方**（内置网关由本进程拉起，Key 每进程随机、只在内存里）才允许
+`secrets=1`；只拿 `X-Panel-Token` 的浏览器面板仍然只能读到元数据。落点在
+`qoder_proxy.py` 的 `/accounts/export` 分支（多一行 `import hmac`）。
+
+除这三类差异外，业务逻辑、常量、错误文案与上游逐字节一致，方便对上游的
+修复做 diff。
 
 ## 升级
 

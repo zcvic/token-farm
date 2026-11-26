@@ -26,9 +26,11 @@ OpenAI 兼容接口。上游链路：
     python qoder_proxy.py --api-key sk-local  # require a bearer token
 """
 import argparse
+import getpass
 import copy
 import atexit
 import hashlib
+import hmac
 from collections import deque, OrderedDict
 import re
 import json
@@ -59,6 +61,7 @@ from . import qoder_catalog
 from . import qoder_keepalive
 from . import qoder_images
 from . import qoder_cache
+from . import qoder_identity_guard
 from . import qoder_routing
 from . import qoder_admin
 from . import qoder_logpaths
@@ -74,7 +77,7 @@ from .qoder_accounts import (get_realm_config, gateway_candidates,
                             local_vm_status)
 from pathlib import Path
 
-VERSION = "1.10.1"
+VERSION = "1.10.3"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 
@@ -510,6 +513,7 @@ USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "reasoning_tokens",
 # lives in accounts/settings.json, so a restart no longer forces a re-login.
 PANEL = qoder_settings.PanelSessions(lambda: ACCOUNTS_DIR)
 API_KEY_FILE_SET = False
+NETWORK_AUTH_REQUIRED = False
 
 
 def configured_keys():
@@ -523,6 +527,8 @@ def configured_keys():
 
 def auth_required():
     """Whether /v1 calls must present a key at all."""
+    if NETWORK_AUTH_REQUIRED:
+        return True
     if qoder_settings.auth_disabled(ACCOUNTS_DIR):
         return False
     if any(entry.get("enabled") for entry in configured_keys()):
@@ -2591,7 +2597,13 @@ def runtime_settings_view():
         "api_key_masked": masked,
         "auth_required": auth_required(),
         "api_keys": keys,
+        "network_auth_required": NETWORK_AUTH_REQUIRED,
         "omit_default_system_prompt": qoder_settings.omit_default_system_prompt(ACCOUNTS_DIR),
+        # 出站身份句守卫（默认关）：中和第三方 Agent 品牌身份句，
+        # 规避上游 10605 品牌检测硬拒绝（见 qoder_identity_guard）
+        "identity_guard": qoder_identity_guard.guard_enabled(ACCOUNTS_DIR),
+        # "on" / "off" when QD_IDENTITY_GUARD pins the switch ("" = panel-controlled)
+        "identity_guard_env": qoder_identity_guard.env_override(),
         # limits 与保存分支同源：limits_data 返回**完整形状**（每个守卫都补齐
         # global/intl/cn，未设时全为 0/None），面板读到即可安全回显、再保存不会
         # 把已有阈值覆盖成默认值。
@@ -3970,9 +3982,14 @@ def _update_allow_remote():
 
 
 def _is_loopback(host):
-    host = str(host or "")
-    return host in ("::1", "localhost") or host.startswith("127.") \
-        or host.startswith("::ffff:127.")
+    host = str(host or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (getattr(address, "ipv4_mapped", None) or address).is_loopback
 
 
 # ---------------------------------------------------------------------------
@@ -7293,9 +7310,22 @@ def build_qoder_body(payload, account, model_key, realm=None, conversation=None)
     # 追加真实会话
     body["messages"].extend(flat)
 
-    # 最新用户提示词（上游 chat_context 高亮 + business 会话名）
+    # 出站身份句守卫（2026-11-23 上游品牌检测对策，默认关）：命中
+    # "You are ZCode," / "powered by DeepSeek Harness." 等字面特征时做
+    # 最小字符级中和，避免被打入 p1 硬拒绝队列（10605/serviceAvailable=false）。
+    # 放在 flatten 之后：覆盖 system + 全部历史消息的文本 part。
+    if qoder_identity_guard.guard_enabled(ACCOUNTS_DIR):
+        body["messages"], _id_hits = qoder_identity_guard.neutralize_messages(
+            body["messages"])
+        if _id_hits:
+            log("identity guard: neutralized %d brand signature(s) in outbound "
+                "messages (upstream 10605 brand gate)" % _id_hits, tag="chat")
+
+    # 最新用户提示词（上游 chat_context 高亮 + business 会话名）。
+    # 必须从守卫处理后的 body["messages"] 取，不能回读 flat：chat_context 的
+    # 两个文本副本随同一个请求出站，否则最新一条用户消息里的身份句会以原文漏出。
     prompt = ""
-    for m in reversed(flat):
+    for m in reversed(body["messages"]):
         if m["role"] == "user" and m.get("content"):
             _c = m["content"]
             if isinstance(_c, list):
@@ -11502,6 +11532,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
         except Exception:
             pass
+        # Do not log a raw request target: even unsupported credential
+        # parameters can contain secrets copied from an older client or script.
+        if args and isinstance(args[0], str) and "?" in args[0]:
+            first = args[0].split(" ", 2)
+            if len(first) == 3:
+                first[1] = first[1].split("?", 1)[0]
+                args = (" ".join(first), *args[1:])
         log(fmt % args)
 
     def _sse_begin(self):
@@ -11703,22 +11740,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _supplied_key(self):
-        """The key the caller presented, from the header or the ?key= query."""
+        """Read inference credentials from headers only, never a URL."""
         supplied = (self.headers.get("Authorization") or "").removeprefix(
             "Bearer ").strip()
         if supplied:
             return supplied
         # Anthropic 客户端（Claude Code 等）用 x-api-key 头，而不是
         # Authorization: Bearer —— 漏掉这一路回退会让 /v1/messages 全量 401。
-        anthropic_key = (self.headers.get("x-api-key") or "").strip()
-        if anthropic_key:
-            return anthropic_key
-        # 浏览器顶层导航无法设置头，所以 ?key= 也接受（看板跨设备打开用）。
-        try:
-            query = parse_qs(urlparse(self.path).query)
-            return (query.get("key") or [""])[0].strip()
-        except Exception:
-            return ""
+        return (self.headers.get("x-api-key") or "").strip()
 
     def _key_ok(self):
         """True when the request carries a right key (or no key is needed)."""
@@ -11855,7 +11884,11 @@ class Handler(BaseHTTPRequestHandler):
         return (self.headers.get("X-Panel-Token") or "").strip()
 
     def _panel_ok(self):
-        return PANEL.valid(self._panel_token())
+        token = self._panel_token()
+        if not token:
+            return False
+        binding = qoder_settings.panel_password_binding(ACCOUNTS_DIR)
+        return bool(binding and PANEL.valid(token, binding))
 
     def _client_is_loopback(self):
         """agents 写配置只信 loopback：改的是网关本机的文件。"""
@@ -11939,7 +11972,7 @@ class Handler(BaseHTTPRequestHandler):
                 "authenticated": self._panel_ok(),
             }
             info["api_key_set"] = bool(API_KEY)
-            return self._json(200, info)
+            return self._json(200, info, extra_headers={"Cache-Control": "no-store"})
         if path in ("/ping", "/healthz", "/livez", "/readyz"):
             # 极简探活端点：**不需要面板密码/API Key、不查账号池**。
             # 客户端/守护脚本常用 GET /ping 判活，之前返回 404 会被判成
@@ -12065,7 +12098,7 @@ class Handler(BaseHTTPRequestHandler):
                 "realm": CURRENT_REALM,
                 "accounts": len(POOL.accounts) if POOL else 0,
                 "accounts_ready": POOL.count_ready() if POOL else 0,
-                "api_key_required": bool(API_KEY),
+                "api_key_required": auth_required(),
                 "risk": risk_snapshot(),
                 "queue_observation": queue_observation_snapshot(),
                 "env": env_report(),
@@ -12401,8 +12434,22 @@ class Handler(BaseHTTPRequestHandler):
             realm = (query.get("realm") or [None])[0] or None
             if realm not in ("intl", "cn"):
                 realm = None
-            include_secrets = (query.get("secrets") or ["1"])[0] \
-                not in ("0", "false", "no")
+            # HTTP exports are metadata-only. A restorable backup belongs on
+            # the server filesystem, not behind a transferable browser session.
+            #
+            # 本地适配（token-farm）：管理端「导出明文凭据」走的是内置网关，
+            # 携带每进程随机生成的**网关 API Key**，不是可转移的浏览器会话。
+            # 只对持有有效 API Key 的调用方放开 secrets；浏览器面板只拿得到
+            # X-Panel-Token，仍然只能读到元数据。
+            include_secrets = False
+            if any(value.lower() not in ("0", "false", "no")
+                   for value in parse_qs(parsed.query, keep_blank_values=True).get("secrets", [])):
+                supplied = self._supplied_key()
+                if not (supplied and (identify_key(supplied) is not None
+                                      or (API_KEY and hmac.compare_digest(supplied, API_KEY)))):
+                    return self._error(403, "credential export is available only through the local backup command",
+                                       "permission_error")
+                include_secrets = True
             uids = []
             for raw in query.get("uid") or []:
                 uids.extend(part.strip() for part in str(raw).split(",")
@@ -12416,8 +12463,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "invalid_request_error")
             doc = qoder_accounts.build_export_document(
                 POOL.accounts if POOL else [],
-                realm=realm, include_secrets=include_secrets,
-                uids=uids or None)
+                realm=realm, include_secrets=include_secrets, uids=uids or None)
             if (query.get("download") or ["0"])[0] in ("1", "true", "yes"):
                 stamp = time.strftime("%Y%m%d-%H%M%S")
                 if len(uids) == 1:
@@ -12426,7 +12472,7 @@ class Handler(BaseHTTPRequestHandler):
                     label = realm + "-" if realm else ""
                 name = "qoder-accounts-%s%s.json" % (label, stamp)
                 return self._download(name, doc)
-            return self._json(200, doc)
+            return self._json(200, doc, extra_headers={"Cache-Control": "no-store"})
         if path == "/accounts/login/poll":
             if not self._authorized():
                 return
@@ -12560,17 +12606,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(401, "panel password required",
                                    "invalid_request_error")
             if qoder_settings.panel_password_is_default(ACCOUNTS_DIR):
-                # 默认密码 = 局域网内任何人都能登录；明文 Key 不能这样交出去。
-                return self._error(
-                    403,
-                    "面板仍在使用默认密码，局域网内任何人都能登录后读到明文 API "
-                    "Key。请先在「设置 → 面板密码」修改密码，再查看明文 Key。",
-                    "permission_error")
+                return self._error(403, "panel password must be provisioned locally",
+                                   "permission_error")
             wanted = (query.get("id") or [""])[0]
             for entry in configured_keys():
                 if entry.get("id") == wanted:
                     return self._json(200, {"id": wanted,
-                                            "key": entry.get("key") or ""})
+                                            "key": entry.get("key") or ""},
+                                      extra_headers={"Cache-Control": "no-store"})
             return self._error(404, "no such key", "invalid_request_error")
         return self._unknown_path_error(path)
 
@@ -12784,12 +12827,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_settings_save(self):
         """Persist panel-managed settings from the web settings tab."""
+        try:
+            return self._save_settings_payload()
+        except OSError as exc:
+            # A failed read is not a fresh install: the file was left untouched.
+            return self._error(500, "settings could not be read or saved: %s" % exc)
+
+    def _save_settings_payload(self):
         payload = self._payload_or_error()
         if payload is None:
             return
+        if NETWORK_AUTH_REQUIRED and payload.get("auth_disabled"):
+            return self._error(403, "API key authentication is required on a network listener",
+                               "permission_error")
         if ("omit_default_system_prompt" in payload
                 and type(payload["omit_default_system_prompt"]) is not bool):
             return self._error(400, "omit_default_system_prompt must be a boolean",
+                               "invalid_request_error")
+        if ("identity_guard" in payload
+                and type(payload["identity_guard"]) is not bool):
+            return self._error(400, "identity_guard must be a boolean",
                                "invalid_request_error")
         reply = {}
         if "api_keys" in payload:
@@ -12917,6 +12974,12 @@ class Handler(BaseHTTPRequestHandler):
                     ACCOUNTS_DIR, payload["omit_default_system_prompt"])
             except OSError as exc:
                 return self._error(500, "save failed: %s" % exc)
+        if "identity_guard" in payload:
+            try:
+                qoder_settings.set_identity_guard(
+                    ACCOUNTS_DIR, payload["identity_guard"])
+            except OSError as exc:
+                return self._error(500, "save failed: %s" % exc)
         if payload.get("restart_scheduler"):
             if SCHEDULER:
                 SCHEDULER.stop()
@@ -12931,9 +12994,10 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         if path == "/panel/login":
-            client_ip = self.client_address[0] \
-                if hasattr(self, "client_address") and self.client_address \
-                else "127.0.0.1"
+            if qoder_settings.panel_password_is_default(ACCOUNTS_DIR):
+                return self._error(403, "panel locked: provision a password on the server with --set-panel-password",
+                                   "permission_error")
+            client_ip = self.client_address[0]
             now = time.time()
             with _login_lock:
                 _prune_login_attempts(now)
@@ -12946,8 +13010,8 @@ class Handler(BaseHTTPRequestHandler):
                                        "too many login attempts, please wait %ds"
                                        % max(1, wait_sec),
                                        "rate_limit_error")
-            password = str(payload.get("password") or "")
-            if not qoder_settings.verify_panel_password(ACCOUNTS_DIR, password):
+            binding = qoder_settings.verified_panel_password_binding(ACCOUNTS_DIR, payload.get("password"))
+            if not binding:
                 with _login_lock:
                     _login_attempts.setdefault(client_ip, []).append(now)
                 time.sleep(0.5)   # 撞库缓解
@@ -12955,13 +13019,9 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             with _login_lock:
                 _login_attempts.pop(client_ip, None)
-            token = PANEL.create()
-            return self._json(200, {
-                "ok": True,
-                "token": token,
-                "using_default_password":
-                    qoder_settings.panel_password_is_default(ACCOUNTS_DIR),
-            })
+            return self._json(200, {"ok": True, "token": PANEL.create(binding),
+                                    "using_default_password": False},
+                              extra_headers={"Cache-Control": "no-store"})
         if path == "/panel/logout":
             # issue #131-5：先认证再吊销。revoke_all() 会换签名密钥，等于把
             # **所有**已登录浏览器踢下线；此前它在 _panel_ok() 之前执行，任
@@ -12980,23 +13040,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(401, "panel password required",
                                "invalid_request_error")
         if path == "/panel/password":
-            current = str(payload.get("current") or "")
-            new = str(payload.get("new") or "")
-            if not qoder_settings.verify_panel_password(ACCOUNTS_DIR, current):
+            current = qoder_settings.verified_panel_password_binding(ACCOUNTS_DIR, payload.get("current"))
+            if not current or not PANEL.valid(self._panel_token(), current):
                 # issue #41：原密码错是**业务校验失败**，不是会话失效。
                 # 401 会让前端弹回登录遮罩（用户看到「登录 UI」而不是原因）；
                 # 403 保持「已登录但不允许」的语义，前端直接显示 msg。
                 return self._error(403, "当前密码不正确",
                                    "invalid_request_error")
-            if len(new) < 4:
-                return self._error(400, "new password must be at least 4 characters",
-                                   "invalid_request_error")
-            qoder_settings.set_panel_password(ACCOUNTS_DIR, new)
-            if new != qoder_settings.DEFAULT_PANEL_PASSWORD:
-                # 换密码使其它浏览器会话全部失效
-                PANEL.revoke_all()
-            token = PANEL.create()
-            return self._json(200, {"ok": True, "token": token})
+            try:
+                binding = qoder_settings.set_panel_password(
+                    ACCOUNTS_DIR, payload.get("new"), expected_binding=current)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            except OSError:
+                return self._error(500, "could not save panel password")
+            # The old credential revision no longer verifies across processes.
+            return self._json(200, {"ok": True, "token": PANEL.create(binding)},
+                              extra_headers={"Cache-Control": "no-store"})
         return self._unknown_path_error(path)
 
     # issue #121：/diag/model-billing 已移除——上游对网关身份一律回报 "auto"，    # 该字段不携带计费信息，据此提示用户只会误导（用户实测国际版同样如此）。
@@ -13485,6 +13545,8 @@ class Handler(BaseHTTPRequestHandler):
             clear_logs()
             return self._json(200, {"ok": True})
         if path == "/realm":
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
             new_realm = payload.get("realm")
             if new_realm in ("intl", "cn"):
                 save_persisted_realm(new_realm)
@@ -15477,10 +15539,40 @@ def _keepalive_send(entry):
     return usage
 
 
+def _write_local_account_backup(accounts_dir, destination):
+    """Save a restorable backup with exclusive creation and private POSIX mode."""
+    base = os.path.realpath(accounts_dir)
+    target = os.path.realpath(destination)
+    try:
+        inside = os.path.normcase(os.path.commonpath((base, target))) == os.path.normcase(base)
+    except ValueError:  # Different drive letters on Windows.
+        inside = False
+    if inside:
+        raise ValueError("backup destination must be outside the account directory")
+    if not os.path.isdir(base):
+        raise ValueError("account directory does not exist")
+    failures = []
+    accounts = qoder_accounts.AccountPool(base, log=failures.append).load()
+    if failures:
+        raise OSError("some account files could not be read; no backup written")
+    doc = qoder_accounts.build_export_document(accounts, include_secrets=True)
+    body = (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(body)
+    except BaseException:
+        try:
+            os.unlink(destination)
+        except OSError:
+            pass
+        raise
+    return doc["count"]
+
+
 def main():
     global POOL, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT, USAGE_DIR, USAGE_LOG, \
-        USAGE_SUMMARY, SCHEDULER, _ACTIVE_SERVER
-    API_KEY_GENERATED = False
+        USAGE_SUMMARY, SCHEDULER, _ACTIVE_SERVER, NETWORK_AUTH_REQUIRED
     ap = argparse.ArgumentParser(
         description="Qoder (qoder.com.cn / qoder.com) -> OpenAI-compatible proxy")
     ap.add_argument("--host", default=os.environ.get("HOST") or "127.0.0.1")
@@ -15507,12 +15599,55 @@ def main():
                     help="where the per-account credential files live "
                          "(default: ./accounts)")
     ap.add_argument("--panel-password", default=None,
-                    help="set the web panel password on startup (default: "
-                         "admin)")
+                    help="set an explicit panel password on startup (prefer the local prompt)")
+    offline = ap.add_mutually_exclusive_group()
+    offline.add_argument("--set-panel-password", action="store_true",
+                         help="set or reset the panel password interactively, without starting the server")
+    offline.add_argument("--backup-accounts", metavar="FILE",
+                         help="write a restorable account backup to a new file without starting the server")
+    offline.add_argument("--import-local-credential", metavar="FILE",
+                         help="import a local credentials file without starting the server")
+    ap.add_argument("--credential-format", choices=("cli", "app"), default=None,
+                    help="input format for --import-local-credential (default: cli)")
+    ap.add_argument("--credential-realm", choices=("cn", "intl"), default=None,
+                    help="required input realm for --import-local-credential")
     ap.add_argument("--pid-file", default=None,
                     help="write the server PID to this file (stop.bat uses it; "
                          "removed on exit)")
     args = ap.parse_args()
+    if args.accounts_dir:
+        ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
+    if args.import_local_credential is None and (args.credential_realm or args.credential_format):
+        ap.error("credential options require --import-local-credential")
+    if args.set_panel_password or args.backup_accounts is not None or args.import_local_credential is not None:
+        if args.panel_password is not None:
+            ap.error("--panel-password is a server startup option")
+        try:
+            if args.set_panel_password:
+                if not sys.stdin.isatty():
+                    ap.error("--set-panel-password needs an interactive terminal")
+                password = getpass.getpass("New panel password: ")
+                if password != getpass.getpass("Confirm panel password: "):
+                    ap.error("passwords did not match")
+                qoder_settings.set_panel_password(ACCOUNTS_DIR, password)
+                print("Panel password set; existing panel sessions are invalidated.")
+            elif args.backup_accounts is not None:
+                count = _write_local_account_backup(ACCOUNTS_DIR, args.backup_accounts)
+                print("Local backup written (%d accounts)." % count)
+            else:
+                if not args.credential_realm:
+                    ap.error("--import-local-credential requires --credential-realm")
+                try:
+                    pool = qoder_accounts.AccountPool(ACCOUNTS_DIR)
+                    pool.load()
+                    qoder_accounts.import_local_credential_file(args.import_local_credential,
+                        args.credential_realm, args.credential_format or "cli")
+                except Exception:
+                    ap.error("local credential import failed: check path, permissions, format and companion files")
+                print("Local credential imported. Restart the gateway to reload accounts.")
+        except (ValueError, OSError, EOFError) as exc:
+            ap.error(str(exc))
+        return
     if qoder_accounts.vpc_config_error():
         sys.stderr.write(
             "[ERROR] invalid QD_CN_VPC_ENDPOINT: %s\n"
@@ -15617,31 +15752,27 @@ def main():
 
     API_KEY = args.api_key
     SYSTEM_PROMPT = args.system_prompt
-    if args.accounts_dir:
-        ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
-    # LAN 模式绝不能带默认密钥：网关花的是账号自己的上游额度，
-    # 可猜的默认值等于让全网段的人白嫖。首次生成一次并持久化。
-    if args.lan and not API_KEY:
-        API_KEY, API_KEY_GENERATED = qoder_settings.ensure_launcher_key(
-            ACCOUNTS_DIR)
-    # 面板保存的 Key 优先于自动生成的 LAN Key（.bat 重启后浏览器改动仍生效）；
-    # 命令行 --api-key 依然最高优先级。
+    NETWORK_AUTH_REQUIRED = args.lan or not _is_loopback(args.host)
     global API_KEY_FILE_SET
     saved_key, key_from_panel = qoder_settings.api_key_override(ACCOUNTS_DIR)
     if key_from_panel and not args.api_key:
         API_KEY = saved_key
         API_KEY_FILE_SET = True
-    if args.panel_password:
-        qoder_settings.set_panel_password(ACCOUNTS_DIR, args.panel_password)
+    # A persisted empty legacy key may disable auth only on a local listener.
+    if NETWORK_AUTH_REQUIRED and not API_KEY:
+        try:
+            API_KEY, _ = qoder_settings.ensure_launcher_key(ACCOUNTS_DIR)
+        except OSError:
+            ap.error("could not read or save gateway settings; server not started")
+    if args.panel_password is not None:
+        try:
+            qoder_settings.set_panel_password(ACCOUNTS_DIR, args.panel_password)
+        except (OSError, ValueError) as exc:
+            ap.error(str(exc))
         log("panel      : password set from --panel-password")
     elif qoder_settings.panel_password_is_default(ACCOUNTS_DIR):
-        log("panel      : password is still the default 'admin' - change it "
-            "in the panel")
-        if args.host == "0.0.0.0":
-            log("SECURITY   : LAN mode + default panel password 'admin' - "
-                "anyone on this network can log in and read your API key. "
-                "Change it in the panel, or restart with --panel-password.",
-                level="WARN")
+        log("panel locked: run python qoder_proxy.py --set-panel-password "
+            "locally with the same accounts directory", level="WARN")
 
     POOL = qoder_accounts.AccountPool(ACCOUNTS_DIR, log=log)
     POOL.load()
@@ -15756,18 +15887,9 @@ def main():
             print("    API       : http://%s:%s/v1" % (ip, args.port))
             print("    Dashboard : http://%s:%s/" % (ip, args.port))
         print()
-        print("    API Key   : %s" % API_KEY)
-        if API_KEY_GENERATED:
-            print("                (newly generated & saved to "
-                  "accounts/settings.json)")
-        else:
-            print("                (reused from accounts/settings.json)")
-        print()
-        print("    Open the dashboard (key already included):")
-        print("      http://%s:%s/?key=%s" % (ips[0], args.port, API_KEY))
-        print()
-        print("    Clients: Base URL = the API address above, then paste "
-              "the key.")
+        print("    Clients: use the API address and a configured API key.")
+        print("    Manage keys in the authenticated panel. If auto-generated,")
+        print("    the launcher key is stored in the server's accounts/settings.json.")
         print()
         if IS_WINDOWS:
             print("    If nothing can connect, allow python through the")
@@ -15832,7 +15954,7 @@ def main():
             print()
             raise SystemExit(1)
     log("listening  : http://%s:%d/v1  (api key: %s)"
-        % (args.host, args.port, "on" if API_KEY else "off"))
+        % (args.host, args.port, "on" if auth_required() else "off"))
     log("dashboard  : http://%s:%d/" % (args.host, args.port))
     # 面板「关闭网关」只允许作用于本进程真正在服务的监听器：把它登记下来，
     # schedule_shutdown() 才有对象可关（子进程/测试里会是 None）。

@@ -1,10 +1,10 @@
 """qoder2api-hub 的内置副本（vendor）。
 
 上游：https://github.com/shuishuipingan/qoder2api-hub
-版本：1.10.1（commit 3cc8617e88efd57c76a20a9ca20fb6f224daa913）
+版本：1.10.3（commit 36fa929592684c0676e3167b812a158edbf036f2）
 许可：MIT，见同目录 LICENSE。
 
-与上游的差异有两类：
+与上游的差异有三类：
 
 1. **导入语句**（每次 vendor 都由 `tools/vendor_qoder.py` 自动改写）：上游按
    「脚本目录在 `sys.path` 上」写成 `import qoder_accounts` 这类绝对导入，这里
@@ -15,12 +15,15 @@
    `selection_weight` 与 `qoder_proxy.py` 的 `/accounts/weight` 路由）：与
    Trae / WorkBuddy 同一口径的按账号权重，只影响选号分摊。重新 vendor 后需要
    重新应用，`server/tests/test_qoder_vendor.py` 会守住这条补丁。
+3. **明文导出**（本地补丁，见 `qoder_proxy.py` 的 `/accounts/export`）：上游
+   1.10.2 起 HTTP 导出默认拒发明文；这里只对同时持有网关 API Key 的调用方
+   放开 `secrets=1`，浏览器面板仍然只能读到元数据。
 
 升级方式见 `README.md`。
 """
 
-VERSION = '1.10.1'
+VERSION = '1.10.3'
 UPSTREAM = 'https://github.com/shuishuipingan/qoder2api-hub'
-UPSTREAM_COMMIT = '3cc8617e88efd57c76a20a9ca20fb6f224daa913'
+UPSTREAM_COMMIT = '36fa929592684c0676e3167b812a158edbf036f2'
 
 __all__ = ['VERSION', 'UPSTREAM', 'UPSTREAM_COMMIT']

@@ -54,15 +54,16 @@ cp -a /path/to/qoder2api-hub/accounts/. /path/to/token-farm/data/platforms/qoder
 
 ## 2. 配置
 
-只有三个可选环境变量，都有合理默认值：
+只有四个可选环境变量，都有合理默认值：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `QODER_TIMEOUT` | `300` | 推理读超时（秒）。长回答 / 推理模型需要更久 |
 | `QODER_MANAGE_TIMEOUT` | `30` | 账号管理接口超时（秒）。刷新凭据、设备登录轮询仍要打上游 |
 | `QD_CN_VPC_ENDPOINT` | 空 | 国内版企业 VPC 专属域：填实例名（如 `acme`）或 `acme.vpc.qoder.com.cn` / `acme-openapi.vpc.qoder.com.cn` / `acme-gateway.vpc.qoder.com.cn`；留空走公网 `qoder.com.cn`。配置无效时内置网关启动即报错（不会带着错域名打上游） |
+| `QD_IDENTITY_GUARD` | 空（关闭，跟随上游） | 出站身份句守卫：上游对第三方 Agent 品牌身份句（`You are Claude Code,` / `powered by X.`）做字面检测，命中直接 10605 硬拒。设 `1` 后只在命中句子里插一个空格，无命中零改动；默认不替用户改写提示词 |
 
-`docker-compose.yml` 已透传这三个变量；不写就用默认值。企业 VPC 的**按账号**
+`docker-compose.yml` 已透传这四个变量；不写就用默认值。企业 VPC 的**按账号**
 覆盖（同一网关混用多个实例与公网账号）在账号 JSON 的 `vpcEndpoint` 字段里，
 token-farm 的账号页暂不提供编辑入口，需要时按上游文档改账号文件。
 
@@ -238,9 +239,16 @@ token-farm 的账号页暂不提供编辑入口，需要时按上游文档改账
 ## 6. 升级内置的协议层
 
 `_vendor/` 里的文件与上游**只差导入语句**（绝对导入 → 包内相对导入），外加
-一处本地补丁：**账号权重**（`qoder_accounts.py` 的 `normalize_weight` /
-`selection_weight` / `Account.weight` / `AccountPool.set_weight` 与
-`qoder_proxy.py` 的 `POST /accounts/weight`）。升级：
+两处本地补丁：
+
+- **账号权重**（`qoder_accounts.py` 的 `normalize_weight` /
+  `selection_weight` / `Account.weight` / `AccountPool.set_weight` 与
+  `qoder_proxy.py` 的 `POST /accounts/weight`）；
+- **明文导出**（`qoder_proxy.py` 的 `/accounts/export`）：上游 1.10.2 起
+  HTTP 导出默认拒发明文，这里只对持有网关 API Key 的调用方放开 `secrets=1`，
+  浏览器面板仍然只能读到元数据。
+
+升级：
 
 ```bash
 python server/platforms/qoder/tools/vendor_qoder.py --source /path/to/qoder2api-hub
@@ -253,10 +261,11 @@ python server/platforms/qoder/tools/vendor_qoder.py --check   # 无残留绝对�
 内置网关直接 ImportError、整个 Qoder 平台起不来。`server/tests/test_qoder_vendor.py`
 正向校验这一点，也校验三种联网后端各自的模块都在清单里。
 
-**重新 vendor 会覆盖账号权重补丁**，落点见 `_vendor/README.md` 的「与上游的
-差异」；同一份测试会直接守住这条补丁（离线断言，不联网）。升级后请一起核对
-`server/platforms/qoder/embedded.py`：上游 `main()` 里如果新增了必要的初始化
-步骤（例如 VPC 配置校验、usage 目录迁移、保温线程），这里也要补上（脚本会提醒）。
+**重新 vendor 会覆盖账号权重与明文导出补丁**，落点见 `_vendor/README.md` 的
+「与上游的差异」；同一份测试会直接守住这两条补丁（离线断言，不联网）。升级后
+请一起核对 `server/platforms/qoder/embedded.py`：上游 `main()` 里如果新增了
+必要的初始化步骤（例如 VPC 配置校验、usage 目录迁移、保温线程），这里也要补上
+（脚本会提醒）。
 
 来源、版本与收录清单见 `server/platforms/qoder/_vendor/README.md`。
 

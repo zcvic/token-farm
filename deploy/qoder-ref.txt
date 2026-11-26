@@ -225,3 +225,63 @@
 #          SYSTEM_PROMPT 默认仍是 None，embedded.py 显式赋值与之等价。
 #      锚点提交：3cc8617e88efd57c76a20a9ca20fb6f224daa913（v1.10.1）
 #      上一次基线：88753423e41c25b82afea22f271f265f06da2ad8（v1.9.14）
+
+# ---- 2026-11 第六批：1.10.1 (3cc8617e88) → 1.10.3 (36fa929592)，5 个非 merge 提交
+#      （另有 c3bb164d 是 PR #168 的 merge 提交；5 个里的 36fa9295 是版本发布本身）。
+#      整目录重新 vendor（变动的协议文件：qoder_accounts.py、qoder_proxy.py、
+#      qoder_settings.py、qoder_updater.py，新增 qoder_identity_guard.py；
+#      qoder_anthropic.py / qoder_anthropic_web.py / qoder_catalog.py /
+#      qoder_external_web.py / qoder_webtools.py 只有行尾差异，内容与 1.10.1 一致）。
+#      MODULES 新增 qoder_identity_guard.py；_vendor/README.md 与 __init__.py
+#      的版本戳已由脚本更新。
+#      已取：
+#        · 5c51a547 + 3c2e507c + 9308852c 出站身份句守卫（PR #168）：上游对
+#          第三方 Agent 品牌身份句（"You are Claude Code," /
+#          "powered by DeepSeek Harness."）做大小写敏感的字面检测，命中返回
+#          HTTP 200 + SSE 内嵌 403/10605/RESOURCE_LIMIT（硬拒，不是真实排队）。
+#          新增 qoder_identity_guard.py：通用品牌正则、只在逗号/句号前插一个
+#          空格做最小中和、自家品牌 Qoder 豁免（避免普通请求缓存前缀漂移）、
+#          无命中返回原对象（零复制）。处理 system + 全部历史消息的文本 part
+#          与 reasoning_content；build_qoder_body 在 flatten 之后接入，最新
+#          用户提示词从处理后的 messages 取，避免 chat_context 副本漏出。
+#          开关 QD_IDENTITY_GUARD / settings.json 的 identity_guard。
+#          本仓**跟随上游默认（关闭）**：它会在命中句里改写提示词，属于产品
+#          策略，不在同步时替用户打开；docker-compose / .env.example /
+#          docs/qoder.md 只提供透传与说明（设 1 开启）。embedded.py 不注入该
+#          变量。
+#        · 9ffe4f69 网关默认值加固（v1.10.2）：
+#          - 推理凭据只认 Authorization / x-api-key，不再接受 ?key=；
+#          - /accounts/export 默认只导出元数据（字段白名单），可恢复备份改走
+#            本地命令 --backup-accounts；
+#          - 面板口令至少 12 位、非默认值，会话 token 绑定当前口令版本；默认
+#            口令不再是 "admin" 而是「未设置 → 面板锁定」，需
+#            --set-panel-password 在服务器本地设置；
+#          - settings.json 原子写（mkstemp + utf-8-sig 读）、所有写入先
+#            _load_for_update（读失败不覆盖），改密码 / 模型上下文等补锁；
+#          - API Key 比较改字节（surrogate 安全）；_is_loopback 用 ipaddress；
+#            请求行日志去掉 query（避免凭据进日志）；/realm 与设置类路由补
+#            面板鉴权；敏感响应加 Cache-Control: no-store；
+#          - 桌面凭据导入只接受服务端扫描结果；网络盘 / UNC / 符号链接一律
+#            拒绝；新增仅终端可用的 --import-local-credential。
+#          - 新增 --set-panel-password / --backup-accounts /
+#            --import-local-credential 三个离线入口（token-farm 不调用，
+#            副本随文件一起保留）。
+#      本地适配：
+#        · 明文导出：上游 1.10.2 起 /accounts/export?secrets=1 一律 403，而本仓
+#          管理端「导出明文凭据」经内置网关 HTTP 导出。改为只对同时持有网关
+#          API Key 的调用方放开 secrets（内置网关的 Key 每进程随机、只在内存），
+#          只有 X-Panel-Token 的浏览器面板仍只能读元数据；落点在该分支，另增
+#          一行 import hmac。
+#        · 账号权重补丁重新应用（WEIGHT_MIN/WEIGHT_MAX、normalize_weight、
+#          selection_weight、Account.weight、_weighted_pick、_rotate_pick/
+#          _rotate_unweighted、set_weight；/accounts/weight 路由锚点仍在
+#          /accounts/set 之后）。--check 通过，test_qoder_vendor 19 项通过；
+#          qoder 相关测试 98 项通过。
+#        · embedded.py：无逻辑改动（身份守卫默认关闭，跟随上游；面板口令仍由
+#          embedded 首次随机设置，满足新口令策略的 12 位下限）。
+#      未取：
+#        · dashboard.html / i18n / docs / tests / Dockerfile / docker-compose /
+#          SECURITY.md：面板与发布链是自己的；
+#        · qoder_updater 的自更新改动只是随文件保留，token-farm 不调用。
+#      锚点提交：36fa929592684c0676e3167b812a158edbf036f2（v1.10.3）
+#      上一次基线：3cc8617e88efd57c76a20a9ca20fb6f224daa913（v1.10.1）
