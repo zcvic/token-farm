@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -703,6 +704,33 @@ class EmbeddedGatewayTests(unittest.TestCase):
         token = client.ensure_panel_token()
         self.assertTrue(token)
         self.assertEqual(client.ensure_panel_token(), token)
+
+    def test_identity_guard_stays_off_by_default(self) -> None:
+        """身份句守卫默认必须是**关**。
+
+        它会在命中「You are Claude Code,」这类第三方品牌身份句时改写提示词，
+        属于产品策略，文档 / .env.example 都写着「默认关闭、不替用户改写」。
+        内置网关启动时**不能**替用户打开它：环境变量留空时上游的默认（关）
+        生效，运维显式写 QD_IDENTITY_GUARD=1 才是「我要开」。
+        """
+        from server.platforms.qoder._vendor import qoder_identity_guard
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('QD_IDENTITY_GUARD', None)
+            embedded.runtime()
+            self.assertNotIn('QD_IDENTITY_GUARD', os.environ,
+                             '内置网关不该替用户决定这个开关的默认值')
+            self.assertFalse(qoder_identity_guard.guard_enabled(),
+                             '未配置时身份句守卫必须是关的')
+
+    def test_identity_guard_env_override_is_respected(self) -> None:
+        """运维显式写 QD_IDENTITY_GUARD=1 时，守卫应当打开。"""
+        from server.platforms.qoder._vendor import qoder_identity_guard
+
+        with mock.patch.dict(os.environ, {'QD_IDENTITY_GUARD': '1'}):
+            embedded.runtime()
+            self.assertEqual(os.environ.get('QD_IDENTITY_GUARD'), '1')
+            self.assertTrue(qoder_identity_guard.guard_enabled())
 
     def test_client_recovers_after_gateway_restart(self) -> None:
         client = QoderClient()

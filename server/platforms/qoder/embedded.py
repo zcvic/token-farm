@@ -197,7 +197,12 @@ def _boot() -> Runtime:
     # 「You are Claude Code,」这类第三方品牌身份句时改写提示词，属于产品策略，
     # 不在同步时替用户打开。需要时设 QD_IDENTITY_GUARD=1（或 settings.json 的
     # identity_guard），本进程不做额外干预。
-    os.environ.setdefault('QD_IDENTITY_GUARD', '1')
+    #
+    # 这里**刻意不设**这个环境变量：上游的默认就是关，而 setdefault 只在
+    # 「变量不存在」时才写入——运维没配它时照样会被塞成 1，守卫对所有部署
+    # **默认开启**，与文档 / .env.example 写的「默认关闭」相反，也把「不替用户
+    # 改写提示词」的承诺悄悄推翻了。留空时上游自己的默认（关）生效，运维显式
+    # 写 1 / on / true 才是「我要开」，面板的开关也仍可单独控制。
     # 协议兼容开关（工具残片 / thinking / 结构化历史 / 图片 / Web 工具）：
     # 网关每次请求现读环境变量，这里先按库里的设置灌一遍；保存时由适配器的
     # `apply_runtime_settings()` 再刷一次，所以改完不用重启内置网关。
