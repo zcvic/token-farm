@@ -29,6 +29,25 @@ func TestIdentityRewritten(t *testing.T) {
 	}
 }
 
+// TraeCode 自述句（hub 2026-11-24 本机 CN 号池实测）：上游按
+// 「interactive agent in TraeCode」连续短语判非官方渠道（400 11-128）。
+// 只删 in TraeCode 这一段，句子其余部分与行为指令原样保留；单独出现的
+// TraeCode / Trae IDE / Cursor 等词不在指纹内，不得误伤。
+func TestTraeCodeIntroRewritten(t *testing.T) {
+	in := "You are an interactive agent in TraeCode that helps the USER with coding tasks."
+	out := sanitizeText(in)
+	if strings.Contains(out, "in TraeCode") {
+		t.Errorf("TraeCode intro not rewritten: %q", out)
+	}
+	if !strings.Contains(out, "You are an interactive agent that helps the USER with coding tasks.") {
+		t.Errorf("sentence tail should survive: %q", out)
+	}
+	// 散词不在指纹内：单独出现不动。
+	if out := sanitizeText("TraeCode is a code editor."); strings.Contains(out, "\u200b") || out != "TraeCode is a code editor." {
+		t.Errorf("standalone mention should be untouched: %q", out)
+	}
+}
+
 // 桌面版（claude-desktop-3p / Agent SDK）的身份句以逗号接后继内容，结尾不是句号。
 // 回归用例：匹配串曾带结尾句号，导致该形态漏网、指纹原样发上游 → 400 code=11128。
 func TestIdentityDesktopVariantRewritten(t *testing.T) {
@@ -417,8 +436,8 @@ func TestReasoningContentSanitized(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 9 项 +
-// sanitizeRewrites 7 对 + 6 个正则的当前字节值硬编码断言。
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 10 项 +
+// sanitizeRewrites 8 对 + 6 个正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
 // 统一常量/抽配置）都会先红在本测试——必须走 analysis 报告 #6 的逐字节验证
@@ -430,6 +449,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
 		"You are Claude Code",        // 身份句（截断前缀即可命中）
 		"Main branch (",              // 注入指令句（截断前缀即可命中）
+		"You are an interactive agent in TraeCode", // Trae 自述句（同上，前缀即可命中）
 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		"11128",                                           // 上游反探测：裸数字错误码
@@ -446,6 +466,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 	}
 
 	rewrites := [][2]string{
+		{
+			"You are an interactive agent in TraeCode",
+			"You are an interactive agent",
+		},
 		{
 			"You are Claude Code, Anthropic's official CLI for Claude",
 			"You are Claude Code, Anthropic's official CLI tool for Claude",
