@@ -30,6 +30,10 @@
   · Cline —— 原生实现（cline.bot），单区域平台，模型名以 `cline/` 为前缀。
     凭证是 WorkOS 设备码换来的 refresh token（**一次性轮换**），对话要带
     Cline 客户端伪装头；免费档只认流式，适配器内部聚合。
+  · 豆包（doubao）—— 原生实现（www.doubao.com），单区域平台，模型名以
+    `doubao/` 为前缀。凭证是**网页 Cookie**（抓包导入，没有扫码登录）；
+    对话端点固定返回 SSE，适配器内部翻译成 OpenAI chunk；上游不返回 usage，
+    统计按「字符 ÷ 1.7」估算。
   · 组合（combo）—— **虚拟平台**：没有账号，只把 `combo/<name>` 按权重
     分发给上面这些真实平台。因此不在界面里露出（`ui_visible=False`）。
 """
@@ -49,6 +53,7 @@ from .minimax import adapter as minimax_adapter
 from .discovery import adapter as discovery_adapter
 from .kilo import adapter as kilo_adapter
 from .cline import adapter as cline_adapter
+from .doubao import adapter as doubao_adapter
 from .combo import adapter as combo_adapter
 
 # 注册内置平台。放在 import 之后而不是模块顶层逐个 register，是为了让
@@ -62,6 +67,7 @@ register(minimax_adapter)
 register(discovery_adapter)
 register(kilo_adapter)
 register(cline_adapter)
+register(doubao_adapter)
 register(combo_adapter)
 
 __all__ = [

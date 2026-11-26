@@ -2,8 +2,8 @@
 
 **多平台 token 农场**：一套面板同时管理 **WorkBuddy（腾讯 CodeBuddy）**、
 **Trae**、**Qoder**、**Loomy（讯飞星火）**、**DuMate（百度搭子）**、
-**MiniMax Code**、**Discovery（Intern TokenPlan）**、**Kilo** 与 **Cline**
-九类账号，统一对外提供 OpenAI 兼容接口。
+**MiniMax Code**、**Discovery（Intern TokenPlan）**、**Kilo**、**Cline** 与
+**豆包（Doubao）** 十类账号，统一对外提供 OpenAI 兼容接口。
 
 本项目派生自 [`workbuddy-manager`](https://github.com/ithtelab/workbuddy-manager)
 （MIT）。上游的全部能力都保留且行为不变 —— 账号池、扫码纳管、签到保活、密钥分发、
@@ -11,7 +11,7 @@ IP / 模型白名单、用量与日志。在此之上新增：
 
 | 新增 | 位置 | 说明 |
 |---|---|---|
-| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline 为原生实现，Qoder 用内置网关 |
+| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline / 豆包 为原生实现，Qoder 用内置网关 |
 | Trae 适配器 | `server/platforms/trae/` | 账号存储 / 令牌刷新 / 签到 / 额度 / 模型 / 对话（SSE → OpenAI chunk） |
 | Qoder 适配器 | `server/platforms/qoder/` | 账号 / 签到 / 额度 / 模型 / 对话；协议层内置在 `_vendor/`，无需额外部署 |
 | Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录（含手机号补绑）/ 手机验证码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
@@ -20,7 +20,8 @@ IP / 模型白名单、用量与日志。在此之上新增：
 | Discovery 适配器 | `server/platforms/discovery/` | 账号（Intern TokenPlan API Key）/ `/v1/models` 额度探针（耗尽 → 402 冻 1 小时）/ 模型（在线目录 → 内置 8 条）/ 对话；单区域前缀 `discovery/`，无签到、无网页登录 |
 | Kilo 适配器 | `server/platforms/kilo/` | 账号（官方设备授权码 → 一年期 token）/ 资料与余额（**美元**）/ 模型（免鉴权 OpenRouter schema → 自动路由兜底）/ 对话；单区域前缀 `kilo/`，无签到、无 refresh |
 | Cline 适配器 | `server/platforms/cline/` | 账号（WorkOS 设备码 → 一次性 refresh token）/ token 轮换（先落盘再使用）/ 模型（免费档 + 全量合并）/ 对话；免费档强制流式并聚合，伪装限流判成 429；单区域前缀 `cline/` |
-| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
+| 豆包适配器 | `server/platforms/doubao/` | 账号（网页 Cookie，抓包导入）/ 设备指纹 / 签到 / 额度（`window_limits` 汇总）/ 模型（内置快照）/ 对话（固定 SSE → OpenAI chunk）；上游无 usage，按字符 ÷1.7 估算；单区域前缀 `doubao/`，无扫码登录 |
+| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` / `doubao/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
 | 多平台接口 | `server/routers/platforms.py` | `/api/platforms/*`：账号、导入、刷新、签到、额度、模型 |
 | 多平台页面 | `web/app/(main)/accounts/page.tsx`、`models/page.tsx` | 顶部平台下拉切换；账号 / 模型页随平台更换数据源，分版本的平台（Trae / Qoder / MiniMax Code）再按国内版 / 国际版过滤，统计与日志按平台过滤 |
 | 设计文档 | [`docs/multi-platform.md`](docs/multi-platform.md) | 契约、路由、凭据安全、已知限制 |
@@ -55,6 +56,7 @@ token-farm/
 │  ├─ discovery-ref.txt # Discovery 参考源的 Key 池 / 额度探针 / 「有意不跟」
 │  ├─ kilo-ref.txt      # Kilo 官方客户端的设备码 / 余额 / 目录事实
 │  ├─ cline-ref.txt     # Cline 参考源的 WorkOS 设备码 / 强制流式 / 伪装限流
+│  ├─ doubao-ref.txt    # 豆包参考源的 Cookie / SSE 事件 / 签到 / 额度事实
 │  ├─ install.sh        # 上游原版：装依赖 + systemd（Linux 服务器）
 │  └─ windows-native/   # 上游原版：原生 Windows（无需 Docker）
 ├─ docs/                # 用户文档与维护者手册
@@ -339,6 +341,7 @@ MANAGER_REPO = os.environ.get('WB_MANAGER_REPO') or 'zcvic/token-farm'
 | `discovery-ref` | [discovery2api](https://github.com/ZFXing-lite/discovery2api)（MIT） | Discovery 协议事实来源，**原生重写**、无副本 | 对照 Key 池 / 额度探针 / 目录，改 `server/platforms/discovery/` |
 | `kilo-ref` | [kilocode](https://github.com/Kilo-Org/kilocode)（Apache-2.0） | Kilo **官方客户端**的协议事实来源，**原生重写**、无副本 | 对照 `packages/kilo-gateway` 的设备码 / 余额 / 目录，改 `server/platforms/kilo/` |
 | `cline-ref` | [cline2api](https://github.com/luawei1/cline2api)（MIT） | Cline 协议事实来源，**原生重写**、无副本 | 对照 `worker.js` 的设备码 / 伪装头 / 强制流式，改 `server/platforms/cline/` |
+| `doubao-ref` | [doubao2api](https://github.com/yyydsz/doubao2api)（MIT） | 豆包协议事实来源，**原生重写**、无副本 | 对照 Cookie 鉴权 / SSE 事件 / 签到 / 额度，改 `server/platforms/doubao/` |
 
 上游 Go 源码（workbuddy2api）已经并入本仓库的 `upstream/`，日常直接在这里改，
 不再从外部仓库 fetch / merge。面板侧新能力的参考来源是
@@ -399,6 +402,14 @@ Discovery、Kilo、Cline 三个平台都是「OpenAI 兼容直连 + 账号池」
   与 KV 存储一律不引入。已核对范围见 `deploy/cline-ref.txt`。
 
 三者都**没有**桌面端导入：不读也不回写本机客户端，`import_from_desktop` 不存在。
+
+豆包（[`yyydsz/doubao2api`](https://github.com/yyydsz/doubao2api)，MIT）也是
+**原生重写**：凭证是网页 Cookie（`sessionid` / `sid_tt` / `ttwid` 等），对话走
+`POST www.doubao.com/chat/completion`（固定 SSE），签到与额度走两个 `alice/*`
+网页接口。上游不校验 `a_bogus`，所以纯 HTTP 即可；扫码登录需要 Passport 三层
+签名、参考实现自己也不稳，因此**只支持抓包导入 Cookie**。上游不返回 usage，
+统计按「输出字符 ÷ 1.7」估算——这是估算值，不能拿去对账。已核对范围见
+`deploy/doubao-ref.txt`。
 
 所有参考源都没有共享提交历史，`git merge` / `git pull` 不成立 ——
 只能挑单个提交，导出成补丁再应用。流程与注意事项见

@@ -724,9 +724,9 @@ export function PlatformAccountsPanel({
     try {
       body = JSON.parse(raw);
     } catch {
-      // DuMate 的凭证本身就是一长行 Cookie，要求用户先包成 JSON 太反人类：
+      // DuMate / 豆包的凭证本身就是一长行 Cookie，要求用户先包成 JSON 太反人类：
       // 粘不进去的整段 Cookie 直接按 `{cookie: "..."}` 提交（后端认这个形状）。
-      if (platform === 'dumate' && raw.includes('=')) {
+      if ((platform === 'dumate' || platform === 'doubao') && raw.includes('=')) {
         body = {cookie: raw};
       } else {
         notify.err(t('platforms.importInvalid'));
@@ -734,7 +734,7 @@ export function PlatformAccountsPanel({
       }
     }
     // 同理：粘贴的是 JSON 字符串（带引号的整行 Cookie）时也包一层。
-    if (platform === 'dumate' && typeof body === 'string') {
+    if ((platform === 'dumate' || platform === 'doubao') && typeof body === 'string') {
       body = {cookie: body};
     }
     setImportBusy(true);
@@ -1346,7 +1346,9 @@ export function PlatformAccountsPanel({
             title={t('platforms.noAccounts')}
             description={platform === 'dumate'
               ? t('platforms.noAccountsDescDumate')
-              : t('platforms.noAccountsDesc')}
+              : platform === 'doubao'
+                ? t('platforms.noAccountsDescDoubao')
+                : t('platforms.noAccountsDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
             {/* 空态里给的是**这个平台真正能用**的入口：没有本机客户端可导入的
@@ -2297,7 +2299,9 @@ export function PlatformAccountsPanel({
                 ? t('platforms.importDescLoomy')
                 : platform === 'dumate'
                   ? t('platforms.importDescDumate')
-                  : t('platforms.importDesc')}
+                  : platform === 'doubao'
+                    ? t('platforms.importDescDoubao')
+                    : t('platforms.importDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
@@ -2309,7 +2313,9 @@ export function PlatformAccountsPanel({
                   ? t('platforms.importPlaceholderLoomy')
                   : platform === 'dumate'
                     ? t('platforms.importPlaceholderDumate')
-                    : t('platforms.importPlaceholder')}
+                    : platform === 'doubao'
+                      ? t('platforms.importPlaceholderDoubao')
+                      : t('platforms.importPlaceholder')}
                 className="min-h-40 font-mono text-[11px]"
                 spellCheck={false}
                 autoFocus

@@ -1332,7 +1332,9 @@ export default function DashboardPage() {
               title={t('platforms.noAccounts')}
               description={platform === 'dumate'
                 ? t('platforms.noAccountsDescDumate')
-                : t('platforms.noAccountsDesc')}
+                : platform === 'doubao'
+                  ? t('platforms.noAccountsDescDoubao')
+                  : t('platforms.noAccountsDesc')}
               className="flex flex-col items-center justify-center py-12 text-center"
             />
           )}

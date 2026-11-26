@@ -25,6 +25,10 @@
 三者都是单区域（`realm_aware=False`），共用一套「权重 SWRR + LRU + 会话亲和」
 选号策略。
 
+再往后是 **豆包（Doubao）**（`doubao/` 前缀，详见 §14）：凭证是网页 Cookie
+（抓包导入，没有扫码登录），对话端点固定返回 SSE，模型表是内置快照而不是
+在线目录，上游不返回 usage（按字符 ÷ 1.7 估算）。
+
 ---
 
 ## 1. 目标与非目标
@@ -88,9 +92,12 @@ client ──/v1/chat/completions──> token-farm
                                     ├── model = "kilo/xxx" ─> KiloAdapter
                                     │                           ├── 账号池（设备码换来的 token）
                                     │                           └── ai-gateway.kilo.ai（OpenAI 兼容 SSE）
-                                    └── model = "cline/xxx" ─> ClineAdapter
-                                                                ├── 账号池（一次性 refresh token）
-                                                                └── api.cline.bot（免费档强制流式 + 聚合）
+                                    ├── model = "cline/xxx" ─> ClineAdapter
+                                    │                           ├── 账号池（一次性 refresh token）
+                                    │                           └── api.cline.bot（免费档强制流式 + 聚合）
+                                    └── model = "doubao/xxx" ─> DoubaoAdapter
+                                                                ├── 账号池（网页 Cookie）
+                                                                └── www.doubao.com（固定 SSE + 签到 / 额度）
 ```
 
 平台路由**只由模型名决定**，不由密钥决定。原因：一把密钥可能既想调
@@ -185,6 +192,14 @@ server/platforms/
     client.py            # WorkOS 设备码 / register / token 轮换 / SSE 聚合
     login.py             # WorkOS 设备码登录后台线程
     adapter.py           # 实现 PlatformAdapter：选号 / 轮换 / 强制流式 / 对话
+  doubao/
+    __init__.py
+    constants.py         # 上游地址 / 查询参数 / 客户端版本 / 模型表与别名
+    store.py             # Cookie 账号文件（原子写 + 文件锁 + 脱敏 + 设备指纹）
+    chat.py              # 请求体构造 + SSE → OpenAI chunk / chat.completion
+    catalog.py           # 内置目录归一（豆包无在线目录接口）
+    client.py            # 对话 / 签到 / 额度（Cookie 鉴权 + 设备查询参数）
+    adapter.py           # 实现 PlatformAdapter：选号 / 冷却 / 探活 / 签到 / 对话
 server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
 ```
 
@@ -633,6 +648,9 @@ DuMate 的每日签到奖励由服务端 00:00 自动发放，手动签到时 `h
   仍然只剥一层：`kilo/kilo-auto/free` → 上游 `kilo-auto/free`）。
 - `cline/<model>` 走 Cline（单区域，模型名含 `cline-free/…`、`openai/…` 这类
   厂商前缀，同样只剥一层）。
+- `doubao/<model>` 走豆包（单区域，Cookie 账号池）。目录里是友好的短名
+  （`deepseek-v4-flash` / `kimi-k3` / `doubao-2.1-pro` …），转发前翻成上游的
+  `model_item_key`；未收录的名字原样透传，方便上游上架新模型时先试。
 - 其他模型名 → 原样走 WorkBuddy（与今天完全一致）。
 - `/v1/models` 会把 Trae 的模型**按区域**并入列表（`traecn/` / `traecom/`），
   `owned_by` 标成 `trae`、`realm` 标出所属区域，客户端据此区分来源。
@@ -717,6 +735,20 @@ Cline 的合并规则是「免费档优先」：`recommended` 的 `free` 分组�
 `pricing` 是按 token 的字符串价，只用来判断「是不是免费」，不做金额换算。
 Discovery 的目录是 OpenAI schema，`/v1/models` 同时承担**额度探针**的角色
 （见 §6.3），所以拉目录本身就要用一把真 Key。
+
+#### 豆包的目录
+
+豆包**没有**公开的模型列表接口：可调用模型由客户端版本与账号权益决定，名字是
+内部的 `model_item_key`（`person-deepseek-v4-1-flash-261017` 这类）。所以目录
+只能是**内置快照**（`server/platforms/doubao/constants.py`），没有「在线拉取 →
+缓存 → 降级」三级，平台设置里也刻意**不给** `catalog_ttl` / `catalog_retry_ttl`
+/ `catalog_timeout`——露出来就是「保存成功但不生效」的假开关。
+
+内置 8 条：`auto`、`doubao-2.1-lite` / `pro`、`deepseek-v4-flash` / `pro`、
+`kimi-k3`、`kimi-k3.1-pro`、`kimi-k3.1-pro-fast`。上游实测报错的两个 GLM 模型
+不列进目录；需要直连时仍可显式发 `doubao/glm-5.3`，`upstream_model()` 对未收录
+的名字原样透传（与 Discovery 的 `force-model` 相反：**不改写**客户端要的模型，
+否则报错指不回适配器）。
 
 **推理档位（`efforts`）**：平台模型条目可以带 `efforts`（如
 `['low','high','max']`），测试台的模型下拉据此显示档位选择器；空数组 = 不显示。
@@ -820,9 +852,10 @@ data/platforms/trae/accounts/<uid>.json
 | Discovery | `platforms/discovery/` | `dc_` | `apiKey` |
 | Kilo | `platforms/kilo/` | `kl_` | `token`（一年期，无 refresh） |
 | Cline | `platforms/cline/` | `cl_` | `refreshToken`（+ 缓存的 `token`） |
+| 豆包 | `platforms/doubao/` | `db_` | `cookie`（`sessionid` 为稳定标识） |
 
-三个新平台（Discovery / Kilo / Cline）都**没有** `desktopPath`：它们不读也不
-回写本机客户端，`import_from_desktop` 不存在，管理端的「从本机导入」入口不会
+三个新平台（Discovery / Kilo / Cline）与豆包都**没有** `desktopPath`：它们不读也
+不回写本机客户端，`import_from_desktop` 不存在，管理端的「从本机导入」入口不会
 出现。
 
 单账号文件字段：
@@ -907,7 +940,7 @@ access token、不能刷新，也没有 userId，导入时按 token 摘要生成
 - **解不出到期时间就不刷**，交给「刷新」按钮与计划任务，不按小时去猜。
 - **停用的号跳过**；「仅签到」的号照常续期（它只是不参与对话，凭证要活着）。
 
-以下四个平台**有意不在巡检里**：
+以下五个平台**有意不在巡检里**：
 
 - **Loomy**：没有 refresh token，只能密码重登。按小时对一批账号重复登录既没有
   意义，也容易触发风控；闲置号在下次请求 401 时自动重登即可（见
@@ -921,6 +954,9 @@ access token、不能刷新，也没有 userId，导入时按 token 摘要生成
   只能是探活，而探活就是一次 `/v1/models`——它同时还是**额度探针**，按小时
   对整池 Key 打一轮会让已经耗尽的账号反复被计入限流。失效与耗尽都由对话的
   401 / 402 触发，不需要定时任务。
+- **豆包**：凭证是网页 Cookie，没有 refresh token，也拿不到可靠的过期时间
+  （失效只能从上游 401 得知）。巡检只能探活，而探活要打额度接口；失效同样由
+  401 触发重新抓取 Cookie，不需要定时任务。
 
 「令牌刷新计划」默认开启（每 5 天凌晨 3 点全量刷一遍），对 MiniMax 与 Cline
 尤其重要：设备码登录拿不到 refresh token 的寿命，`refreshExpiredAt` 为空的账号
@@ -951,6 +987,7 @@ Cline 是同一个问题、同一个做法：access token 约 10 分钟且由适
 | Discovery | 无 | 无 | 无 | 额度只能用 `/v1/models` 探针：200 有额度、429 `quota_exceeded` 耗尽 |
 | Kilo | 无 | 有（**美元**） | 无 | token 一年期、不可刷新；余额走 `/api/profile/balance` |
 | Cline | 无 | 无 | 有（refresh token） | 余额不足由 402 `insufficient_credits` 表达 |
+| 豆包 | 有 | 有（额度汇总） | 无 | Cookie 无 refresh；额度来自 `window_limits` 汇总，401 换号、429/5xx 按设置冷却 |
 
 Discovery 的「额度」在界面上是**三态**，不是数字：`ok` / `rate_limited` /
 `quota_exhausted`。把 `429 quota_exceeded` 当成普通限流（几十秒冷却）会让已经
@@ -1559,3 +1596,113 @@ Qoder 的协议包含 COSY 签名、设备指纹、OAuth 设备授权、模型�
 模型名对外是 `qodercn/<官方模型名>`（国内版）与 `qodercom/<官方模型名>`
 （国际版）；旧式 `qoder/<官方模型名>` 继续兼容，`qoder/cn:` / `qoder/intl:`
 仍可显式指定区域。未指定区域时交给内置网关按账号与模型自动选区。
+
+---
+
+## 14. 豆包（Doubao）
+
+原生实现，包在 `server/platforms/doubao/`，不引入第三方运行时，也没有浏览器 /
+签名依赖。协议事实来自 [`yyydsz/doubao2api`](https://github.com/yyydsz/doubao2api)
+（MIT），核对范围见 `deploy/doubao-ref.txt`。
+
+### 14.1 凭据与导入
+
+凭证是**网页 Cookie**：`sessionid` / `sid_tt` / `session` / `ttwid` /
+`s_v_web_id` / `odin_tt` / `passport_csrf_token` 至少有一个（导入时校验，避免
+等第一次对话才 401）。没有 OAuth、没有 refresh token，Cookie 失效只能重新登录
+网页版再抓一次。
+
+- uid 由 `sessionid` 派生（缺失时退到 `sid_tt`，再退到整串 Cookie 的哈希），
+  前缀 `db_`；同一份登录态重复导入覆盖同一条账号。
+- 面板的「手工导入」支持直接粘贴整段 Cookie（后端认 `{cookie: ...}`），也能粘
+  JSON。**没有**扫码登录：Passport 三层签名在参考实现里自己也不稳，提供一个
+  必然失败的入口只会误导用户。
+- Cookie 明文只落盘（`data/platforms/doubao/accounts/<uid>.json`，文件锁 + 原子
+  替换 + 0600），接口只回摘要（有哪些字段、`sessionid` 尾部 6 位、长度）。
+
+可选的设备字段随账号落盘：`deviceId` / `webId` / `localAppId`（默认 `582478`）。
+缺 `deviceId` 时由 Cookie 哈希派生稳定值（`store.device_of`）——上游用
+`device_id` / `fp=verify_<dev>` / `tea_uuid` 做风控，同一个账号每次随机换设备
+指纹等于自己制造风险特征。
+
+### 14.2 对话协议
+
+`POST https://www.doubao.com/chat/completion`，查询参数是 `constants.QUERY`
+（`aid=582478`、`pc_version=2.32.6`、`runtime_version=3.42.0`、`language=zh` 等）
+加上逐请求的 `device_id` / `fp` / `tea_uuid` / `web_tab_id`；缺这些参数上游会按
+匿名网页会话处理，表现为「200 但没有正文」。
+
+请求体是豆包自己的「客户端消息 + option」结构，三条硬约束：
+
+1. `messages[]` 只有一条 `block_type=10000` 的文本块；历史由
+   `chat.flatten_messages` 压成「系统 / 用户 / 助手」的一段文本，最后一条 user
+   放在末尾（豆包没有 OpenAI 那种多轮数组语义）。
+2. `option.model_config.model_item_key`、`option.conversation_init_ext.model_item_key`、
+   `option.aggregate_params.model_item_key` **三处必须一致**；只改一处，上游会
+   按默认模型回答且不报错。
+3. 工作模式（`agent_mode=1` / `conversation_mode=2` / `mode_id="3"`）要带
+   `general_task_param` 与 `ext`，headless 场景必须 `enable_sandbox=false`，
+   否则上游要求本地沙箱。
+
+响应**固定是 SSE**（没有 `stream` 开关），翻译在 `chat.StreamTranslator`：
+
+| 上游事件 | 处理 |
+| --- | --- |
+| `CHUNK_DELTA.text` | 正文增量（首选） |
+| `STREAM_CHUNK` + `block_type=10000` | `text_block.text` 快照；用公共前缀算增量，`CHUNK_DELTA` 出现后不再使用 |
+| `STREAM_CHUNK` + `block_type=10040` | `thinking_block.streaming_title`（或 `finish_title`）→ `reasoning_content` |
+| `SSE_REPLY_END` | `end_type` 结束；**没有正文时**才用 `msg_finish_attr.brief` 兜底 |
+| `SSE_ACK` | 只解析不保存（本轮不做上游会话复用） |
+
+流式出口是 `PlatformChat.stream`（OpenAI chunk dict），由 `platforms/sse.py` 拼帧；
+非流式则把整条 SSE 读完聚合成 `chat.completion`。上游错误帧（`error` /
+`SSE_ERROR`）翻成 `StreamError`，收尾后继续抛出，让 `openai_sse` 补一帧错误并让
+网关记 502——只设 `chat.error` 不抛，客户端会看到一条「正常结束的空流」。
+
+### 14.3 usage 是估算值
+
+豆包 SSE 里没有 token 计数。`chat.StreamTranslator` 按「字符 ÷ 1.7」估算
+（`constants.CHARS_PER_TOKEN`），`usage.prompt_tokens` 用请求体里最终发给上游的
+提示文本长度、`completion_tokens` 用已产出正文字符数。这是**估算**，不是上游
+账单；统计页的数字只用于趋势与配额参考，不能拿去对账。
+
+### 14.4 签到与额度
+
+- 签到：`POST /alice/ug/campaign/landing/checkin`，body
+  `{"scene": "pc_incentive_task_mvp_v3"}`。判定顺序：`code=710010702` → 无活动；
+  `data.idempotent` 或文案含「已签到 / already」→ 已签到；`code=0` →
+  `data.checked_in` 成功；其余算失败。上游按自然日幂等，重复调用不会多发。
+  `earned_credit` 用 `reward_amount`（幂等命中时为 0），同时把
+  `continuous_days` / `reward` 写入账号快照。
+- 额度：`POST /alice/commerce/sale/subscription/quota/summary/`，body `{}`。
+  递归找所有 `window_limits[]` 累加 `total_amount` / `used_amount`，
+  `total_amount` 可能是带千分位 / `¥` / `$` 的字符串，统一清洗；每个窗口的
+  `end_time` 作为到期明细。`credits()` 返回剩余额度（`unit='credits'`），并写
+  `quota` 快照供账号页展示。
+- 探活：豆包没有「查我是不是登录了」的只读接口，`client.probe` 借额度接口，
+  200 且不是登录类文案 → `ok`。只在「刷新」按钮 / `refresh_account` 里调用，
+  **不**进巡检（见 §6.2）。
+
+### 14.5 账号调度
+
+与 Discovery / Kilo / Cline 同一套 `_NATIVE_POOL`：权重 SWRR + LRU、会话亲和
+（`session_affinity`）、单账号并发闸门、`max_accounts_try` 换号、`cooldown_429` /
+`cooldown_5xx` 冷却。差别：
+
+- **401 只换号、不冷却**：Cookie 失效不会自己好，冻一段时间没有意义。
+- **429 默认冷却 60 秒**（`cooldown_429=0` 时也按 60 秒处理，与 Discovery 一致），
+  额度耗尽的文案走 429，冻 1 小时由 `_cool_down` 的 402 分支承担（当前
+  `client` 把明确的额度错误映射成 402 时才会触发）。
+- 「仅签到」与「停用」互斥：开「仅签到」会清掉停用位，停用会清掉「仅签到」。
+
+### 14.6 有意不跟
+
+- **上游会话复用**：参考实现会保存 `SSE_ACK` 的 `conversation_id`，下一轮带回去。
+  这里每轮都重发「压平后的历史 + 最后一条 user」：复用上游会话会让客户端重发
+  的全文与上游已有历史叠在一起（上下文翻倍），而且上游会话被外部删除 / 过期时
+  会静默失败，排查成本很高。
+- **扫码登录 / 批量注册**：见 §14.1。
+- **附件 / 图片**：本轮只做文本；模型条目 `attachment=False`，界面据此隐藏上传
+  入口。
+- **GLM 模型进目录**：上游实测报错，不列；需要时显式发 `doubao/glm-5.3`，
+  `upstream_model()` 原样透传。

@@ -206,6 +206,10 @@ _MINIMAX = _LOOMY - {'min_credits'}
 # 仍保留：Kilo 用它缓存余额与给查询定超时，Cline 的 `credits()` 走基类「不支持」，
 # token 轮换用的是 `request_timeout`（见 `_session_timeout`）。
 _NATIVE_POOL = _LOOMY - {'min_credits'}
+# 豆包也是原生选号 / 冷却，但**没有在线模型目录**（模型表是内置快照），所以
+# 不能给 `catalog_*`：那会是「保存成功但行为不变」的假开关。它有签到与额度
+# 查询，`credits_ttl` / `credits_timeout` 照常保留。
+_DOUBAO = _NATIVE_POOL - {'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout'}
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -219,6 +223,7 @@ _BY_PLATFORM: dict[str, frozenset[str]] = {
     'discovery': _NATIVE_POOL,
     'kilo': _NATIVE_POOL,
     'cline': _NATIVE_POOL,
+    'doubao': _DOUBAO,
     'combo': _COMBO,
 }
 

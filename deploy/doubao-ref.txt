@@ -1,0 +1,115 @@
+# 已人工核对过的豆包（Doubao）协议事实 —— 本仓库豆包适配层的参考
+#
+# 仓库：https://github.com/yyydsz/doubao2api （MIT）
+#       参考范围：`internal/doubao/doubao.go`（请求体构造 + SSE 事件解析）、
+#       `internal/server/handler.go`（buildURL / 头 / 转发）、`internal/server/
+#       checkin.go`（每日签到）、`internal/server/quota.go`（额度汇总）、
+#       `config.example.json` 与 README（模型表、参数、已知限制）。
+# 形态：不是 fork，也没有共享历史；**不是源码副本**，仓库里没有 vendor 目录。
+#       对话 / 签到 / 额度 / 账号池都在 server/platforms/doubao/ 里按协议事实
+#       重写（httpx + 标准库，不新增依赖）；参考仓的 HTTP 服务、面板与号池
+#       一律不引入。
+#
+# 记录方式：一次同步写一段；未核对的提交号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/qoder-ref.txt、deploy/loomy-ref.txt 同一约定）。
+#
+# 升级流程：clone 参考仓 → 看 internal/doubao 与 internal/server 的协议段
+# diff → 在本仓库对应文件里重写 → 跑
+# server/tests/test_platform_doubao_adapter.py → 更新本文件的锚点与差异说明。
+#
+# ---- 2026-11 首次接入
+#      基线：首次接入时参考仓 HEAD（具体提交号待补）。
+#
+#      已取（按能力，不是逐行移植）：
+#        · 凭证：**网页 Cookie**（`sessionid` / `sid_tt` / `session` / `ttwid` /
+#          `s_v_web_id` / `odin_tt` / `passport_csrf_token`）。没有 OAuth、
+#          没有 refresh token，失效只能重新登录网页版再抓一次。
+#          → server/platforms/doubao/store.py（uid 由 `sessionid` 派生）
+#        · 对话：POST https://www.doubao.com/chat/completion，响应**固定是
+#          SSE**（没有 `stream` 开关）。工作模式字段 `agent_mode=1` /
+#          `conversation_mode=2` / `mode_id="3"`（bot_id 见 config）。
+#          → server/platforms/doubao/chat.py:build_body
+#        · `model_item_key` 必须**同时**出现在三处：
+#          `option.conversation_init_ext.model_item_key` /
+#          `option.model_config.model_item_key` /
+#          `option.aggregate_params.model_item_key`。只改其中一处，上游会按
+#          默认模型回答且不报错——这是最难查的一类故障。
+#          → chat.build_body（三处同时写）
+#        · 请求头（缺了会被当网页匿名会话处理，表现为 200 但没有正文）：
+#          `agw-js-conv: str, str`、`last-event-id: undefined`、
+#          `x-flow-trace: 04-<32位>-<16位>-01`、`Referer: https://www.doubao.com/`、
+#          `User-Agent`（桌面端 UA，带 `SamanthaDoubao/<pc_version>`）。
+#          → client._chat_headers
+#        · 查询参数：`aid=582478` / `pc_version=2.32.6` / `runtime_version=3.42.0`
+#          等一批固定值（config.example.json 里的 2.30.1 / 3.37.4 是旧值），
+#          外加逐请求的 `device_id` / `fp=verify_<dev>` / `tea_uuid=<dev>` /
+#          `web_tab_id=<uuid>`，账号有 `web_id` 时再带 `web_id`。
+#          `device_id` 缺省由 Cookie 哈希派生（参考实现 `shortHash`），
+#          同一个账号每次换设备指纹等于自己制造风控特征。
+#          → client._query、store.device_of
+#        · **不校验 `a_bogus`**：参考仓的签名是可选的（`sign_command` /
+#          `a_bogus` 两个配置项都留空即可），纯 HTTP 直连可用。
+#          → client.open_chat（URL 里不追加签名参数）
+#        · 响应事件（顺序：`SSE_HEARTBEAT` → `SSE_ACK` → `FULL_MSG_NOTIFY` →
+#          `STREAM_MSG_NOTIFY` → `STREAM_CHUNK` → `CHUNK_DELTA` →
+#          `SSE_REPLY_END`）：
+#            - `CHUNK_DELTA.text`          正文增量（首选）
+#            - `STREAM_CHUNK` block_type=10000 的 `text_block.text`
+#                                       正文快照（无 CHUNK_DELTA 时兜底）
+#            - `STREAM_CHUNK` block_type=10040 的 `thinking_block`
+#                                       思考过程（`streaming_title` /
+#                                       `finish_title`）
+#            - `SSE_REPLY_END.end_type=1`  正常结束；`msg_finish_attr.brief`
+#                                       是完整答案（**只在没有正文时**兜底）
+#            - `SSE_ACK.ack_client_meta`   会话 id（本轮只解析不保存）
+#          → chat.StreamTranslator.feed
+#        · 历史压平：豆包没有多轮消息数组，历史按「用户：/ 助手：/ 系统：」
+#          拼成一段放在最后一条 user 之前（参考实现 `flatten_history`）。
+#          → chat.flatten_messages
+#        · 签到：POST https://www.doubao.com/alice/ug/campaign/landing/checkin
+#          body `{"scene": "pc_incentive_task_mvp_v3"}` →
+#          `{data: {checked_in, continuous_days, idempotent, reward_amount}}`。
+#          判定顺序：幂等命中（`data.idempotent`）→ 已签到；`data.checked_in`
+#          → 成功；文案含「已签到 / already」→ 已签到；
+#          `code=710010702` → 当前无可用活动；其余算失败。
+#          ⚠️ `biz_params` 若要带必须是**对象**，传字符串会 400（本仓不发）。
+#          → client.checkin
+#        · 额度：POST https://www.doubao.com/alice/commerce/sale/subscription/
+#          quota/summary/，body `{}` → 递归找 `window_limits[]`，累加
+#          `total_amount` / `used_amount`。`total_amount` 是**带千分位的
+#          字符串**（如 `"1,000"`），还要能清掉 `¥` / `$` / 空格。
+#          → client.quota / _collect_quota
+#        · 上游**不返回 usage**：参考实现按「输出字符 ÷ 1.7」估算。本仓沿用
+#          同一口径（`constants.CHARS_PER_TOKEN`），并在代码 / 文档里标明
+#          这是估算值、不能拿去对账。
+#          → chat.StreamTranslator.usage_dict
+#        · 模型表：豆包**没有公开的模型列表接口**，可调用模型由客户端版本与
+#          账号权益决定，名字是内部的 `model_item_key`。所以本仓的目录是
+#          **内置快照**（8 条），平台设置里不给 `catalog_*`（那会是假开关）。
+#          参考实现实测报错的两个 GLM 模型（`glm-5.3` / `glm-5.3-flash`）**不列
+#          进目录**；需要直连时显式发 `doubao/glm-5.3`，`upstream_model()` 对
+#          未收录的名字原样透传。
+#          → constants.DEFAULT_MODELS、catalog.default_models
+#
+#      有意不跟：
+#        · **上游会话复用**：参考实现保存 `SSE_ACK` 的 `conversation_id` 并在
+#          下一轮带回去。本仓每轮都重发「压平后的历史 + 最后一条 user」：
+#          客户端重发的全文与上游已有历史叠在一起会让上下文翻倍，而上游会话
+#          被外部删除 / 过期时带旧 id 会静默失败，排查成本很高。
+#        · **扫码登录**：Passport `get_qrcode` 在客户端侧带 `sign` / `a_bogus` /
+#          `x-tt-passport-aid-sign` 三层签名；参考仓 README 明说内置参数能出码
+#          但 App 确认环节仍可能失败，**推荐抓包导入 Cookie**。本仓因此
+#          `supports_web_login=False`，只提供抓包导入——提供一个必然失败的入口
+#          只会误导用户。
+#        · **SSE 心跳**：参考实现按 `heartbeat_seconds` 补 `: ping` 防中间层
+#          判超时。本仓的流式出口由网关统一管理，豆包上游本身有心跳事件，
+#          暂不额外补帧。
+#        · 不引入参考仓的 HTTP 服务、面板、密钥分发与按密钥用量统计（本仓的
+#          密钥 / 白名单 / 统计是同一套）。
+#        · 不做批量注册、验证码绕过、风控规避；仅限本人及亲属授权账号。
+#
+# ---- 同类实现（阅读用，不引入代码）----
+#   · 豆包桌面端客户端缓存 `_DesktopActionBarBriefListRequestCacheDataV1`
+#     （`modeSelectData.menuConfV2.mode_list`）才是模型清单的真正来源——
+#     不是接口下发。参考仓据此维护 `model_aliases`，本仓把它固化成
+#     `constants.DEFAULT_MODELS`。
