@@ -113,6 +113,11 @@ def list_platforms(user: dict = Depends(security.current_user)) -> dict:
             # 能否在网页里直接登录（Trae 本机回环回调 + refreshToken 兑换；
             # Qoder 设备授权轮询）
             'supports_web_login': bool(getattr(adapter, 'supports_web_login', False)),
+            # 凭证是整段网页 Cookie：前端「手工导入」允许直接粘贴，按
+            # `{cookie: '...'}` 提交（豆包 / DuMate / 灵犀）。旧后端没有这个
+            # 字段，前端会退回自己的兼容名单。
+            'supports_cookie_import': bool(
+                getattr(adapter, 'supports_cookie_import', False)),
             # 账号是否分国内版 / 国际版（Trae / Qoder）：前端据此显示版本切换并按版本过滤
             'supports_realm': bool(getattr(adapter, 'realm_aware', False)),
             # 能否维护「积分消耗倍率」表（Trae：面板导入 / 导出 JSON）

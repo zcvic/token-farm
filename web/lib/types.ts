@@ -2160,6 +2160,12 @@ export interface PlatformInfo {
    */
   supports_web_login: boolean;
   /**
+   * 凭证是整段网页 Cookie（豆包 / DuMate / 灵犀）：为 true 时「手工导入」
+   * 允许直接把整段 Cookie 粘进来，前端按 `{cookie: '...'}` 提交。
+   * 缺省时前端退回自己的兼容名单（旧后端没有这个字段）。
+   */
+  supports_cookie_import?: boolean;
+  /**
    * 账号是否分国内版 / 国际版（Trae）。
    *
    * 为 true 时前端显示右上角的版本切换，并按账号 / 模型的 `realm` 过滤；

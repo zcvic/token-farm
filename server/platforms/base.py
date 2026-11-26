@@ -178,6 +178,11 @@ class PlatformAdapter(ABC):
     supports_checkin: bool = False
     # 能否在网页里直接发起登录（需要平台提供 login_start / login_poll）。
     supports_web_login: bool = False
+    # 凭证是不是「一整段网页 Cookie」：为 True 时面板「手工导入」允许直接把
+    # 整段 Cookie 粘进来（前端按 `{cookie: '...'}` 提交），不必先包成 JSON。
+    # 由后端声明而不是前端按平台名硬编码：新增 Cookie 类平台时只改适配器，
+    # 前端（尤其是已经打包出去的静态产物）不用跟着改。
+    supports_cookie_import: bool = False
     # 账号是否分「国内版 / 国际版」（Trae）。为 True 时前端会露出右上角的版本
     # 切换，并按账号的 realm 过滤列表、把当前版本传给导入 / 登录接口。
     realm_aware: bool = False

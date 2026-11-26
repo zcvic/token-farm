@@ -112,6 +112,8 @@ class DoubaoAdapter(PlatformAdapter):
     # 扫码登录需要 Passport 三层签名，社区实现也不稳（参考仓 README 明说）。
     # 这里只支持抓包导入 Cookie，不提供一个必然失败的登录入口。
     supports_web_login = False
+    # 凭证就是已登录 www.doubao.com 的整段网页 Cookie，面板允许直接粘贴。
+    supports_cookie_import = True
     # 单区域平台。
     realm_aware = False
 

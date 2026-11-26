@@ -194,6 +194,15 @@ export function PlatformAccountsPanel({
    * （`cn` / `intl`），翻译只在 `platform-realm` 那一处。
    */
   const realmAware = Boolean(info?.supports_realm);
+  /**
+   * 凭证是不是整段网页 Cookie（豆包 / DuMate / 灵犀）。
+   *
+   * 由后端能力位下发，前端不再按平台名硬编码：新增 Cookie 类平台只改适配器，
+   * 已打包出去的静态前端也能正确识别。旧后端没有这个字段时退回兼容名单，
+   * 升级过渡期不会把整段 Cookie 判成「不是合法 JSON」。
+   */
+  const supportsCookieImport = info?.supports_cookie_import
+    ?? (platform === 'dumate' || platform === 'doubao' || platform === 'lingxi');
   const realmScope = platformRealmOf(realm);
   const scopedAccounts = useMemo(
     () => (realmAware ? filterByPlatformRealm(accounts, realm) : accounts),
@@ -724,10 +733,10 @@ export function PlatformAccountsPanel({
     try {
       body = JSON.parse(raw);
     } catch {
-      // DuMate / 豆包的凭证本身就是一长行 Cookie，要求用户先包成 JSON 太反人类：
-      // 粘不进去的整段 Cookie 直接按 `{cookie: "..."}` 提交（后端认这个形状）。
-      if ((platform === 'dumate' || platform === 'doubao'
-        || platform === 'lingxi') && raw.includes('=')) {
+      // 凭证是整段网页 Cookie 的平台（豆包 / DuMate / 灵犀）：要求用户先包成
+      // JSON 太反人类，直接把整段 Cookie 按 `{cookie: "..."}` 提交（后端认
+      // 这个形状）。能力位来自后端，新增同类平台不用改这里。
+      if (supportsCookieImport && raw.includes('=')) {
         body = {cookie: raw};
       } else {
         notify.err(t('platforms.importInvalid'));
@@ -735,8 +744,7 @@ export function PlatformAccountsPanel({
       }
     }
     // 同理：粘贴的是 JSON 字符串（带引号的整行 Cookie）时也包一层。
-    if ((platform === 'dumate' || platform === 'doubao'
-      || platform === 'lingxi') && typeof body === 'string') {
+    if (supportsCookieImport && typeof body === 'string') {
       body = {cookie: body};
     }
     setImportBusy(true);

@@ -97,6 +97,8 @@ class LingxiAdapter(PlatformAdapter):
     supports_checkin = True
     # 没有开放平台、也没有稳定的网页登录流程：只支持抓包导入 Cookie。
     supports_web_login = False
+    # 凭证是整段网页 Cookie（`wps_sid` 等），面板允许直接粘贴。
+    supports_cookie_import = True
     # 单区域平台。
     realm_aware = False
 

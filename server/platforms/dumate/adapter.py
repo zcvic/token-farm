@@ -217,6 +217,8 @@ class DumateAdapter(PlatformAdapter):
     # 网页登录 = 百度 Passport 扫码：服务端取二维码，手机确认后换 cookie。
     # 手工粘贴 Cookie 仍然保留（扫码不可用时的兜底）。
     supports_web_login = True
+    # 凭证就是整段网页 Cookie（`BDUSS` 等），面板允许直接粘贴。
+    supports_cookie_import = True
     # 单区域平台（百度搭子国内站）。
     realm_aware = False
 
