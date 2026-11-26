@@ -113,6 +113,55 @@ class SseTest(unittest.TestCase):
         for item in frames:
             self.assertNotIn(b'"error"', item)
 
+    def test_idle_timeout_stops_stream_and_reports_error(self) -> None:
+        """内容空闲看门狗（issue #485）：保活/空帧不续命，超时就中止。"""
+        calls: list[tuple] = []
+        closed: list[bool] = []
+
+        async def slower():
+            yield _chunk(delta={'content': 'x'})
+            await asyncio.sleep(0.05)
+            yield _chunk(delta={})              # 空帧：不续命
+            yield _chunk(delta={'content': 'never'})
+
+        async def closer() -> None:
+            closed.append(True)
+
+        outcome = PlatformChat(stream=slower(), closer=closer)
+        frames = _collect(outcome, started=0.0, idle_timeout=0.01,
+                          on_finish=lambda *a: calls.append(a))
+        self.assertNotIn(DONE, frames)
+        error = json.loads(frames[-1][6:].decode('utf-8'))['error']
+        self.assertIn('idle', error['message'])
+        self.assertEqual(closed, [True])
+        self.assertEqual(calls[0][0], 502)
+
+    def test_disconnected_stops_stream(self) -> None:
+        """客户端已断开：停止读取上游，且不伪造 [DONE]。"""
+        calls: list[tuple] = []
+        probes: list[bool] = []
+
+        async def walk():
+            yield _chunk(delta={'content': 'a'})
+            yield _chunk(delta={'content': 'b'})
+            yield _chunk(delta={'content': 'c'})
+
+        async def is_disconnected() -> bool:
+            probes.append(True)
+            return len(probes) > 1   # 第一块之后客户端走人
+
+        async def closer() -> None:
+            return None
+
+        outcome = PlatformChat(stream=walk(), closer=closer)
+        frames = _collect(outcome, started=0.0, disconnected=is_disconnected,
+                          on_finish=lambda *a: calls.append(a))
+        self.assertNotIn(DONE, frames)
+        bodies = [f for f in frames if b'"content"' in f]
+        self.assertEqual(len(bodies), 1, '断开后不应继续转发 chunk')
+        self.assertEqual(calls[0][0], 502)
+        self.assertIn('disconnected', calls[0][2])
+
     def test_on_finish_failure_is_swallowed(self) -> None:
         def broken(*_a) -> None:
             raise ValueError('记账炸了')

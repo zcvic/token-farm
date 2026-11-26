@@ -1962,7 +1962,8 @@ MAX_SSE_BUFFER = 1 << 20
 
 async def _stream_events(*, chunks, model: str, resp_id: str,
                          custom_tool_names: set[str], bridge, started: float,
-                         state: dict) -> AsyncIterator[bytes]:
+                         state: dict,
+                         request: Request | None = None) -> AsyncIterator[bytes]:
     """把上游 OpenAI SSE 字节流翻译成 Responses 事件流。
 
     `state` 由调用方在结束后读取：`usage` / `error` / `first_token`。抽成独立
@@ -1976,9 +1977,20 @@ async def _stream_events(*, chunks, model: str, resp_id: str,
         defer_finish=True)
     error_text: str | None = None
     first_token_ms: int | None = None
+    # 内容空闲看门狗（issue #485）。只按正文续命：保活帧会不断重置 httpx
+    # 的 read timeout，于是「连接还活着、正文早就不产出」的流可以挂十几分钟，
+    # 一直占着上游并发名额。断开时走下面既有的 response.failed 收尾。
+    idle_limit = config.STREAM_IDLE_TIMEOUT
+    last_content_at = time.monotonic()
 
     try:
         async for chunk in chunks:
+            if request is not None and await request.is_disconnected():
+                error_text = 'client disconnected'
+                break
+            if idle_limit > 0 and time.monotonic() - last_content_at > idle_limit:
+                error_text = 'upstream idle for %ds without content' % idle_limit
+                break
             pending += chunk.decode('utf-8', errors='ignore')
 
             if len(pending) > MAX_SSE_BUFFER:
@@ -2017,6 +2029,8 @@ async def _stream_events(*, chunks, model: str, resp_id: str,
                 for event in translator.feed(obj):
                     yield event
 
+                if gateway._sse_frame_has_content(obj):
+                    last_content_at = time.monotonic()
                 if translator.saw_content and first_token_ms is None:
                     first_token_ms = int((time.time() - started) * 1000)
 
@@ -2051,7 +2065,8 @@ async def _platform_response(*, body: dict, stream: bool, key: dict, ip: str,
                              model: str, platform_route: tuple[str, str, str | None],
                              ua: str | None, effort: str | None, resp_id: str,
                              custom_tool_names: set[str],
-                             bridge) -> JSONResponse | StreamingResponse:
+                             bridge,
+                             request: Request) -> JSONResponse | StreamingResponse:
     """平台 / 组合模型 → Responses 协议。
 
     与直连分支的唯一区别是「谁去出网」：适配器已经保证输出是 OpenAI 形状，
@@ -2130,7 +2145,7 @@ async def _platform_response(*, body: dict, stream: bool, key: dict, ip: str,
         events = _stream_events(
             chunks=call.stream, model=model, resp_id=resp_id,
             custom_tool_names=custom_tool_names, bridge=bridge,
-            started=started, state=state)
+            started=started, state=state, request=request)
         try:
             # 适配器的 dict chunk 已被 `platformcall` 编码成 SSE 字节，WorkBuddy
             # 的原始字节流原样返回——两条来源在这里汇成同一个解析器。
@@ -2223,7 +2238,8 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
         return await _platform_response(
             body=payload, stream=stream, key=key, ip=ip, model=model,
             platform_route=platform_route, ua=ua, effort=effort,
-            resp_id=resp_id, custom_tool_names=custom_tool_names, bridge=bridge)
+            resp_id=resp_id, custom_tool_names=custom_tool_names, bridge=bridge,
+            request=request)
 
     # 上游按密钥解析（多上游 / 分组隔离）；绑定缺失或停用时明确报错，不回落。
     try:
@@ -2328,7 +2344,7 @@ async def _handle(request: Request) -> JSONResponse | StreamingResponse:
         events = _stream_events(
             chunks=resp.aiter_bytes(), model=model, resp_id=resp_id,
             custom_tool_names=custom_tool_names, bridge=bridge,
-            started=started, state=state)
+            started=started, state=state, request=request)
         try:
             async for event in events:
                 yield event

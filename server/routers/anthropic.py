@@ -1196,7 +1196,8 @@ MAX_SSE_BUFFER = 1 << 20
 
 async def _translate_stream(*, chunks, model: str, thinking: bool,
                             status_code: int, started: float,
-                            state: dict):
+                            state: dict,
+                            request: Request | None = None):
     """把上游 OpenAI SSE 字节流翻译成 Anthropic 事件流。
 
     `state` 由调用方在结束后读取：`usage` / `error` / `first_token`。抽出原因与
@@ -1209,9 +1210,22 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
     error_text: str | None = None
     first_token_ms: int | None = None
     abort = False   # 中途出错需中止转发（缓冲超限 / 上游回 error 帧）
+    # 内容空闲看门狗（issue #485）。只按正文续命：保活帧会不断重置 httpx
+    # 的 read timeout，于是「连接还活着、正文早就不产出」的流可以挂十几分钟。
+    # 断开后走下面既有的 error 事件收尾（发在 message_stop 之前）。
+    idle_limit = config.STREAM_IDLE_TIMEOUT
+    last_content_at = time.monotonic()
 
     try:
         async for chunk in chunks:
+            if request is not None and await request.is_disconnected():
+                error_text = 'client disconnected'
+                abort = True
+                break
+            if idle_limit > 0 and time.monotonic() - last_content_at > idle_limit:
+                error_text = 'upstream idle for %ds without content' % idle_limit
+                abort = True
+                break
             pending += chunk.decode('utf-8', errors='ignore')
 
             if status_code >= 400:
@@ -1274,6 +1288,8 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
                 for event in translator.feed(obj):
                     yield event
 
+                if gateway._sse_frame_has_content(obj):
+                    last_content_at = time.monotonic()
                 if translator.saw_content and first_token_ms is None:
                     first_token_ms = int((time.time() - started) * 1000)
 
@@ -1311,7 +1327,8 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
 async def _platform_messages(*, body: dict, stream: bool, key: dict, ip: str,
                              model: str, platform_route: tuple[str, str, str | None],
                              ua: str | None, effort: str | None,
-                             thinking: bool) -> JSONResponse | StreamingResponse:
+                             thinking: bool,
+                             request: Request) -> JSONResponse | StreamingResponse:
     """平台 / 组合模型 → Anthropic Messages 协议。
 
     适配器已经保证输出是 OpenAI 形状，翻译层（`to_anthropic_response` /
@@ -1371,7 +1388,8 @@ async def _platform_messages(*, body: dict, stream: bool, key: dict, ip: str,
         state: dict = {}
         events = _translate_stream(
             chunks=call.stream, model=model, thinking=thinking,
-            status_code=call.status, started=started, state=state)
+            status_code=call.status, started=started, state=state,
+            request=request)
         try:
             async for event in events:
                 yield event
@@ -1465,7 +1483,7 @@ async def messages(request: Request):
         return await _platform_messages(
             body=payload, stream=stream, key=key, ip=ip, model=model,
             platform_route=platform_route, ua=ua, effort=effort,
-            thinking=want_thinking)
+            thinking=want_thinking, request=request)
 
     # 上游按密钥解析（多上游 / 分组隔离）；绑定缺失或停用时明确报错，不回落。
     try:
@@ -1535,7 +1553,7 @@ async def messages(request: Request):
         events = _translate_stream(
             chunks=resp.aiter_bytes(), model=model,
             thinking=want_thinking, status_code=status_code,
-            started=started, state=state)
+            started=started, state=state, request=request)
         try:
             async for event in events:
                 yield event

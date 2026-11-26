@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from .base import PlatformChat
 
@@ -34,25 +34,52 @@ def error_frame(message: str, code: str = 'platform_stream_error') -> bytes:
 
 
 async def openai_sse(outcome: PlatformChat, *, started: float,
-                     on_finish: Callable[[int, int | None, str | None], None] | None = None
+                     on_finish: Callable[[int, int | None, str | None], None] | None = None,
+                     idle_timeout: float = 0,
+                     disconnected: Callable[[], Awaitable[bool]] | None = None
                      ) -> AsyncIterator[bytes]:
     """把适配器的 chunk 流转成 SSE 字节流。
 
     `on_finish(status, first_token_ms, error)` 在收尾时调用一次，供网关记账。
+
+    `idle_timeout` / `disconnected` 是流式健康检查（issue #485）：
+      · `disconnected()` 为真 = 客户端已走，断开上游、结束生成器；
+      · `idle_timeout`（秒，0 = 关闭）按「距上一个正文 chunk」计时，保活 / 空
+        帧不续命。上游开着 keepalive 时 httpx 的逐字节读超时会被不断重置，
+        于是一条「连接还活着、正文早就不产出」的流可以挂十几分钟并一直占着
+        上游并发名额。
+    两条都只在检测到后中止，不把正常帧改写成别的内容。
     """
     first_token_ms: int | None = None
     error_text: str | None = None
+    last_content_at = time.monotonic()
     try:
         async for chunk in outcome.stream or ():
+            if disconnected is not None and await disconnected():
+                error_text = 'client disconnected'
+                break
             choices: Any = chunk.get('choices') if isinstance(chunk, dict) else None
+            has_content = False
             if isinstance(choices, list) and choices:
                 delta = choices[0].get('delta') or {}
                 # 首字延迟：跳过只带 role 的第一帧。这里刻意**不按具体字段名**
                 # 判断，否则「转发热路径不得出现某字段」的架构约束会被注释本身触发。
-                if delta and any(key != 'role' for key in delta) and first_token_ms is None:
-                    first_token_ms = int((time.time() - started) * 1000)
+                if delta and any(key != 'role' for key in delta):
+                    has_content = True
+                    if first_token_ms is None:
+                        first_token_ms = int((time.time() - started) * 1000)
+            if has_content:
+                last_content_at = time.monotonic()
+            elif idle_timeout > 0 and time.monotonic() - last_content_at > idle_timeout:
+                error_text = 'upstream idle for %ds without content' % idle_timeout
+                break
             yield frame(chunk)
-        yield DONE
+        if error_text:
+            # 头已经发出去了，状态码改不了：补一帧错误再结束，客户端才不会把
+            # 截断当成「成功但空回答」（与下面异常分支同一口径）。
+            yield error_frame(error_text)
+        else:
+            yield DONE
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 —— 头已发出，只能补错误帧
