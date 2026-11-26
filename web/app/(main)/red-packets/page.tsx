@@ -9,7 +9,7 @@ import {redPacketApi, errText} from '@/lib/api';
 import type {
   CreatedRedPacket, RedPacket, RedPacketDetail, RedPacketKind, RedPacketMode,
 } from '@/lib/types';
-import {fmtDateTime, fmtNumber} from '@/lib/format';
+import {copyText, fmtDateTime, fmtNumber} from '@/lib/format';
 import {withBasePath} from '@/lib/base-path';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {PageSectionTabs} from '@/components/common/layout/PageSectionTabs';
@@ -158,21 +158,18 @@ export default function RedPacketsPage() {
   }
 
   async function copyLink(code: string) {
-    try {
-      await navigator.clipboard.writeText(claimUrl(code));
+    if (await copyText(claimUrl(code))) {
       notify.ok(t('redPacket.linkCopied'));
-    } catch {
+    } else {
       // 如实说失败：谎报成功会让用户去粘贴一个空剪贴板（项目里踩过这个坑）
       notify.err(t('redPacket.copyFailed'), t('redPacket.copyFailedDetail'));
     }
   }
 
   async function copyAll(pack: CreatedRedPacket) {
-    const text = plainText(pack);
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyText(plainText(pack))) {
       notify.ok(t('redPacket.copiedAll'), t('redPacket.copiedAllDetail', {n: pack.keys.length}));
-    } catch {
+    } else {
       // 浏览器拒绝写剪贴板（非 HTTPS / 权限）时**如实说失败** ——
       // 谎报成功会让用户贴出来是空的（这个坑项目里踩过）。
       notify.err(t('redPacket.copyFailed'), t('redPacket.copyFailedDetail'));

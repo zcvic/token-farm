@@ -19,6 +19,7 @@ import {useAuth} from '@/lib/auth-context';
 import {RichText} from '@/lib/i18n/rich-text';
 import {useI18n} from '@/lib/i18n/provider';
 import {notify} from '@/lib/toast';
+import {copyText} from '@/lib/format';
 import type {ProxyProbe, ProxyRoute, ProxySettings, ProxyPool, RouteAccount} from '@/lib/types';
 import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {EmptyState} from '@/components/common/layout/EmptyState';
@@ -162,11 +163,10 @@ export function ProxyPanel() {
 
   async function copyRoute(route: ProxyRoute) {
     // 复制的是脱敏串：密码不进剪贴板（要完整地址得自己回上游 config.json 看）
-    try {
-      await navigator.clipboard.writeText(route.masked);
+    if (await copyText(route.masked)) {
       notify.ok(t('settings.proxyCopied'));
-    } catch (e) {
-      notify.err(errText(e));
+    } else {
+      notify.err(t('common.copyFailed'), t('common.manualCopy'));
     }
   }
 

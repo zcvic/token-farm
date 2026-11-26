@@ -215,6 +215,14 @@ export function fmtAgo(ts: number | null | undefined): string {
  *      普通 HTTP 访问时 `navigator.clipboard` 是 undefined；
  *   2. 回退到 `execCommand('copy')`，并**检查它的布尔返回值**。
  * 都失败返回 `false`，由调用方如实提示（文案引导手动选择复制）。
+ *
+ * iOS 的例外：iOS Safari **只允许从「可编辑」区域复制**。用只读 textarea 走
+ * execCommand 时它会返回 true，却什么都没写——这正是「提示已复制、粘贴是空的」
+ * 在 iPhone 上的来源。所以 Apple 触屏设备上把 textarea 临时改成可编辑，并用
+ * Range + setSelectionRange 选中；其余浏览器仍用只读 textarea（不会弹键盘）。
+ *
+ * 注意**不要**在 `copy` 事件里 preventDefault：WebKit 下那样会把要写入的内容
+ * 变成空串（实测），反而复制不上。
  */
 export async function copyText(text: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
@@ -226,34 +234,74 @@ export async function copyText(text: string): Promise<boolean> {
     }
   }
 
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  // 只读：避免移动端弹键盘；移出可视区且透明：不闪、不占位
-  ta.setAttribute('readonly', '');
-  ta.style.position = 'fixed';
-  ta.style.top = '0';
-  ta.style.left = '-9999px';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
+  return copyViaTextarea(text, isAppleTouchDevice());
+}
 
+/** iPhone / iPad（含 iPadOS 13+ 伪装成 Mac 的触屏设备）。 */
+function isAppleTouchDevice(): boolean {
+  const ua = navigator.userAgent || '';
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  return /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+}
+
+/** 执行复制并恢复用户原来的选区：复制是旁路动作，不该弄丢界面上已有的选择。 */
+function withSavedSelection(fn: () => boolean): boolean {
   const sel = document.getSelection();
   const saved = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
-  let ok = false;
   try {
-    ta.select();
-    ta.setSelectionRange(0, text.length);
-    ok = document.execCommand('copy') === true;
-  } catch {
-    ok = false;
+    return fn();
   } finally {
-    document.body.removeChild(ta);
-    // 恢复用户原来的选区：复制是旁路动作，不该把界面上已有的选择弄丢
     if (saved && sel) {
       sel.removeAllRanges();
       sel.addRange(saved);
     }
   }
-  return ok;
+}
+
+/**
+ * execCommand 回退：只读 textarea（不弹键盘），选中后复制。
+ *
+ * `ios` 为真时临时打开 contentEditable / readOnly，这是 iOS Safari 认可的唯一
+ * 复制姿势（只读 textarea 的选区会被忽略，命令照样返回 true）。
+ */
+function copyViaTextarea(text: string, ios: boolean): boolean {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  if (ios) {
+    ta.contentEditable = 'true';
+    ta.readOnly = false;
+  } else {
+    ta.setAttribute('readonly', '');
+  }
+  // 透明且不占位：不闪、不挡界面。iOS 上不能放到视口外（选区会被忽略）
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = ios ? '0' : '-9999px';
+  ta.style.width = ios ? '1px' : '';
+  ta.style.height = ios ? '1px' : '';
+  ta.style.overflow = 'hidden';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  try {
+    return withSavedSelection(() => {
+      if (ios) {
+        const sel = document.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(ta);
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      try {
+        return document.execCommand('copy') === true;
+      } catch {
+        return false;
+      }
+    });
+  } finally {
+    document.body.removeChild(ta);
+  }
 }
 
 /**

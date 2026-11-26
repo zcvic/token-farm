@@ -21,7 +21,7 @@ import {notify} from '@/lib/toast';
 import {claimApi, errText} from '@/lib/api';
 import {BASE_PATH} from '@/lib/base-path';
 import type {ClaimInfo, DrawResult} from '@/lib/types';
-import {fmtDateTime, fmtNumber} from '@/lib/format';
+import {copyText, fmtDateTime, fmtNumber} from '@/lib/format';
 import {Button} from '@/components/ui/button';
 import {CopyButton} from '@/components/ui/copy-button';
 import {useT} from '@/lib/i18n/provider';
@@ -129,35 +129,28 @@ export default function ClaimPage() {
   }, [code]);
 
   const closeAndCopy = useCallback(async () => {
-    if (got && navigator.clipboard) {
-      await navigator.clipboard.writeText(got.key).then(
-        () => notify.ok(t('claim.autoCopied'), t('claim.autoCopiedDetail')),
-        () => notify.err(t('claim.autoCopyFailed')),
-      );
+    if (!got) return;
+    if (await copyText(got.key)) {
+      notify.ok(t('claim.autoCopied'), t('claim.autoCopiedDetail'));
+      setGot(null);
+    } else {
+      // 复制失败就**别关弹窗**：关掉之后用户没有可长按/选中的密钥可复制
+      notify.err(t('claim.autoCopyFailed'), t('claim.copyFailed'));
     }
-    setGot(null);
   }, [got, t]);
 
   /** 复制「上次领到的那份」（第二次打开时用）。 */
   async function copyMine() {
     const k = info?.my_key;
     if (!k) return;
-    try {
-      await navigator.clipboard.writeText(k);
-      notify.ok(t('claim.copied'));
-    } catch {
-      notify.err(t('claim.copyFailed'));
-    }
+    if (await copyText(k)) notify.ok(t('claim.copied'));
+    else notify.err(t('claim.copyFailed'));
   }
 
   async function copyKey() {
     if (!got) return;
-    try {
-      await navigator.clipboard.writeText(got.key);
-      notify.ok(t('claim.copied'));
-    } catch {
-      notify.err(t('claim.copyFailed'));
-    }
+    if (await copyText(got.key)) notify.ok(t('claim.copied'));
+    else notify.err(t('claim.copyFailed'));
   }
 
   function amountText(v: number, kind: string): string {
