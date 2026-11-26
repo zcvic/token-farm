@@ -2679,8 +2679,29 @@ export interface PlatformCheckinResult {
   message: string;
   uid: string;
   realm: string;
+  /** 豆包：本次实际拿到的奖励文案（没有奖励时为空串） */
+  reward?: string;
+  /** 豆包：连签天数（上游没给时为 null） */
+  continuous_days?: number | null;
+  /** 豆包：上游原始错误码（只在被拒时出现，例如 710010702） */
+  upstream_code?: number | string | null;
+  /** 豆包：被拒时回查到的只读签到面板（今日是否已签 / 连签 / 待领额度） */
+  status?: PlatformCheckinStatus | null;
   /** Loomy：签到响应里下发的「自己名下的邀请码」 */
   invite_codes?: PlatformInviteCode[];
+}
+
+/** 豆包：`/alice/ug/campaign/v3/detail/` 的只读签到状态（被拒时用于回查）。 */
+export interface PlatformCheckinStatus {
+  /** 是否真的读到了活动面板（false = 网络 / 上游结构变化，不能当成「没有活动」） */
+  known: boolean;
+  /** 当前账号是否投放了每日签到活动 */
+  available: boolean;
+  checked_in_today: boolean | null;
+  continuous_days: number | null;
+  reward_amount: number | null;
+  total_days: number | null;
+  message: string;
 }
 
 /** 邀请码（Loomy `points/first-login` 的 `invitationCodes` 条目）。 */

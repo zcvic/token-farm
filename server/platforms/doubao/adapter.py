@@ -259,12 +259,23 @@ class DoubaoAdapter(PlatformAdapter):
         already = bool(out.get('already'))
         reward = int(out.get('reward_amount') or 0)
         message = str(out.get('message') or '')
+        # 记账口径：上游系统错误（710010702）与「没有活动」要分开，别都写成
+        # error——前者是「活动在、这次没放行」，后者是账号本来就没这个任务。
+        result_code = str(out.get('code') or '')
+        if already:
+            last_result = 'already'
+        elif ok:
+            last_result = 'ok'
+        elif result_code in ('upstream_error', 'no_campaign'):
+            last_result = result_code
+        else:
+            last_result = 'error'
 
         try:
             store.patch_account(uid, {
                 'checkin': {
                     'last_at': int(time.time()),
-                    'last_result': 'already' if already else ('ok' if ok else 'error'),
+                    'last_result': last_result,
                     'continuous_days': out.get('days'),
                     'reward': out.get('reward'),
                 },
@@ -288,6 +299,10 @@ class DoubaoAdapter(PlatformAdapter):
             'realm': store.REALM,
             'reward': out.get('reward') or '',
             'continuous_days': out.get('days'),
+            # 上游拒绝时带回的只读面板状态（今日是否已签 / 连签 / 待领额度），
+            # 排查时不用再去抓一次包。
+            'upstream_code': out.get('upstream_code'),
+            'status': out.get('status') or None,
         }
 
     async def usage(self, account_id: str) -> dict:

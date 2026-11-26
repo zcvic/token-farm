@@ -313,7 +313,7 @@ class DoubaoClientTest(unittest.TestCase):
         self.assertIn('web_tab_id', query)
         self.assertEqual(seen['headers']['cookie'], _COOKIE)
 
-    def test_checkin_parses_ok_already_and_no_campaign(self) -> None:
+    def test_checkin_parses_ok_and_already(self) -> None:
         def make(payload):
             def reply(request):
                 return httpx.Response(200, json=payload)
@@ -335,9 +335,72 @@ class DoubaoClientTest(unittest.TestCase):
         self.assertTrue(already['already'])
         self.assertEqual(already['reward_amount'], 0)
 
-        none = asyncio.run(run({'code': 710010702, 'message': '无活动'}))
-        self.assertFalse(none['ok'])
-        self.assertEqual(none['code'], 'no_campaign')
+    def test_checkin_campaign_not_found_is_no_campaign(self) -> None:
+        def reply(request):
+            return httpx.Response(200, json={'code': 2,
+                                             'message': 'campaign not found'})
+
+        async def run():
+            with mock.patch.object(config, 'http_client',
+                                   lambda *a, **k: _client(reply)):
+                return await client.checkin(self._account())
+
+        out = asyncio.run(run())
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['code'], 'no_campaign')
+        self.assertIn('没有每日签到活动', out['message'])
+
+    def test_checkin_710010702_reconciles_already_checked_in(self) -> None:
+        # 写接口回了系统错误，但回查面板发现今天其实已经签上了。
+        detail = {'code': 0, 'data': {'tasks': [{
+            'campaign_code': 'daily_signin', 'task_status': 1,
+            'daily_checkin': {'checked_in_today': True, 'continuous_days': 5,
+                              'reward': {'reward_amount': 200}},
+        }]}}
+
+        def reply(request):
+            if 'v3/detail' in str(request.url):
+                return httpx.Response(200, json=detail)
+            return httpx.Response(200, json={'code': 710010702,
+                                             'message': 'system error'})
+
+        async def run():
+            with mock.patch.object(config, 'http_client',
+                                   lambda *a, **k: _client(reply)):
+                return await client.checkin(self._account())
+
+        out = asyncio.run(run())
+        self.assertTrue(out['ok'])
+        self.assertTrue(out['already'])
+        self.assertEqual(out['days'], 5)
+        self.assertTrue(out['status']['checked_in_today'])
+
+    def test_checkin_710010702_is_not_reported_as_no_campaign(self) -> None:
+        # 活动还在、今天还没签：如实报「上游系统错误」，而不是「没有活动」。
+        detail = {'code': 0, 'data': {'tasks': [{
+            'campaign_code': 'daily_signin', 'task_status': 1,
+            'daily_checkin': {'checked_in_today': False, 'continuous_days': 0,
+                              'reward': {'reward_amount': 200}},
+        }]}}
+
+        def reply(request):
+            if 'v3/detail' in str(request.url):
+                return httpx.Response(200, json=detail)
+            return httpx.Response(200, json={'code': 710010702,
+                                             'message': 'system error'})
+
+        async def run():
+            with mock.patch.object(config, 'http_client',
+                                   lambda *a, **k: _client(reply)):
+                return await client.checkin(self._account())
+
+        out = asyncio.run(run())
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['code'], 'upstream_error')
+        self.assertEqual(out['upstream_code'], 710010702)
+        self.assertIn('710010702', out['message'])
+        self.assertFalse(out['status']['checked_in_today'])
+        self.assertTrue(out['status']['available'])
 
     def test_quota_sums_window_limits_and_cleans_amounts(self) -> None:
         payload = {'code': 0, 'data': {
@@ -696,6 +759,35 @@ class DoubaoAdapterTest(unittest.TestCase):
             out = asyncio.run(self.adapter.checkin('db_1'))
         self.assertTrue(out['already'])
         self.assertEqual(out['earned_credit'], 0)
+
+    def test_checkin_ledger_keeps_upstream_error_and_no_campaign_apart(self) -> None:
+        # 记账口径要能区分「活动在、上游这次没放行」（可重试）与「账号本来就
+        # 没这个任务」；都写成 error 的话排查时看不出该不该重试。
+        self._seed()
+        cases = (
+            ({'ok': False, 'already': False, 'code': 'upstream_error',
+              'upstream_code': 710010702, 'message': '上游拒绝',
+              'reward': '', 'reward_amount': 0, 'days': None},
+             'upstream_error'),
+            ({'ok': False, 'already': False, 'code': 'no_campaign',
+              'message': '当前账号没有每日签到活动',
+              'reward': '', 'reward_amount': 0, 'days': None},
+             'no_campaign'),
+        )
+        for payload, expected in cases:
+            with self.subTest(result=expected):
+                calls = []
+
+                async def fake_checkin(account, **kwargs):
+                    calls.append(account)
+                    return payload
+
+                with mock.patch.object(client, 'checkin', new=fake_checkin):
+                    out = asyncio.run(self.adapter.checkin('db_1'))
+                self.assertFalse(out['ok'])
+                self.assertEqual(out['earned_credit'], 0)
+                raw = store.read_account('db_1')
+                self.assertEqual(raw['checkin']['last_result'], expected)
 
     def test_credits_exposes_remaining_and_expiries(self) -> None:
         self._seed()

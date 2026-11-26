@@ -31,8 +31,8 @@ from ..base import PlatformError
 from . import constants as C
 from . import store
 
-__all__ = ['iter_events', 'open_chat', 'checkin', 'quota', 'probe',
-           'parse_error', 'sse_event']
+__all__ = ['iter_events', 'open_chat', 'checkin', 'checkin_status', 'quota',
+           'probe', 'parse_error', 'sse_event']
 
 # 上游错误体里表示「登录态失效」的文案片段。豆包不返回稳定的错误码枚举，
 # 只能按文案归类；认不出的一律当上游错误（不冻号、不换号）。
@@ -282,15 +282,89 @@ async def open_chat(account: dict, body: dict, *, proxy: str | None = None,
 
 # ── 签到 ────────────────────────────────────────────────────
 _ALREADY_HINTS = ('已签到', 'already', 'idempotent')
-_NO_CAMPAIGN_CODE = 710010702
+# 上游「系统错误」：活动其实存在，但这一次领奖没有被放行。2026-11 起多个账号
+# 实测都是这个码（官方活动页点按钮也一样），**不能**当成「没有活动」。
+_UPSTREAM_SYSTEM_ERROR_CODE = 710010702
+# 「没有投放这个活动组」才是真的没有活动（文案 `campaign not found`）。
+_NO_CAMPAIGN_CODE = 2
+_SIGNIN_TASK = 'daily_signin'
+
+
+async def checkin_status(account: dict, *, proxy: str | None = None,
+                         timeout: float = C.CHECKIN_TIMEOUT) -> dict:
+    """只读签到状态：`/alice/ug/campaign/v3/detail/` 里的 `daily_signin` 任务。
+
+    返回 `{known, available, checked_in_today, continuous_days, reward_amount,
+    total_days, message}`。`known=False` 表示没查到（网络 / 上游结构变化），
+    调用方不能把未知当成「没有活动」。
+    """
+    out: dict[str, Any] = {
+        'known': False, 'available': False, 'checked_in_today': None,
+        'continuous_days': None, 'reward_amount': None,
+        'total_days': None, 'message': '',
+    }
+    cookie = str(account.get('cookie') or '')
+    if not cookie:
+        out['message'] = '缺少 Cookie'
+        return out
+    try:
+        async with config.http_client(
+                httpx.Timeout(timeout, connect=10),
+                proxy=_selected_proxy(proxy), lane='doubao') as client:
+            response = await client.post(
+                C.BASE_URL + C.CHECKIN_DETAIL_PATH, params=_query(account),
+                headers=_web_headers(cookie),
+                content=json.dumps(
+                    {'campaign_group_code': C.CHECKIN_SCENE}).encode('utf-8'))
+    except httpx.HTTPError as exc:
+        out['message'] = f'连接失败：{exc}'
+        return out
+
+    payload = _json(response)
+    if response.status_code >= 400 or not isinstance(payload, dict):
+        out['message'] = _error_text(payload, f'HTTP {response.status_code}')
+        return out
+    code = payload.get('code')
+    if code not in (None, '', 0, '0'):
+        out['message'] = _error_text(payload, f'上游 code={code}')
+        return out
+
+    data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+    task: dict | None = None
+    for item in data.get('tasks') or []:
+        if not isinstance(item, dict):
+            continue
+        if (str(item.get('campaign_code') or '') == _SIGNIN_TASK
+                or str(item.get('task_kind') or '') == _SIGNIN_TASK
+                or isinstance(item.get('daily_checkin'), dict)):
+            task = item
+            break
+    if task is None:
+        out['known'] = True
+        out['message'] = '当前账号没有每日签到活动'
+        return out
+
+    detail = task.get('daily_checkin') \
+        if isinstance(task.get('daily_checkin'), dict) else {}
+    reward = detail.get('reward') if isinstance(detail.get('reward'), dict) else {}
+    out.update({
+        'known': True,
+        'available': task.get('task_status') not in (0, '0'),
+        'checked_in_today': bool(detail.get('checked_in_today')),
+        'continuous_days': _int_or_none(detail.get('continuous_days')),
+        'reward_amount': _int_or_none(reward.get('reward_amount')),
+        'total_days': _int_or_none(detail.get('total_days')),
+    })
+    return out
 
 
 async def checkin(account: dict, *, proxy: str | None = None,
                   timeout: float = C.CHECKIN_TIMEOUT) -> dict:
-    """每日签到。返回 `{ok, already, code, message, reward, days}`。
+    """每日签到。返回 `{ok, already, code, message, reward, days, status?}`。
 
     判定顺序与参考实现一致：幂等命中 → 已签到；`checked_in` → 成功；
-    文案含「已签到」→ 已签到；`710010702` → 当前无活动；其余算失败。
+    文案含「已签到」→ 已签到；`campaign not found` → 当前无活动；
+    `710010702` → 上游系统错误，回查活动面板后区分「其实已签上 / 仍然没签上」。
     """
     cookie = str(account.get('cookie') or '')
     if not cookie:
@@ -322,10 +396,30 @@ async def checkin(account: dict, *, proxy: str | None = None,
     already = bool(data.get('idempotent')) or any(
         hint in message.lower() for hint in _ALREADY_HINTS)
     checked = bool(data.get('checked_in')) or code == 0 and not already
-    if code == _NO_CAMPAIGN_CODE:
+    if code == _NO_CAMPAIGN_CODE or 'campaign not found' in message.lower():
         return {'ok': False, 'already': False, 'code': 'no_campaign',
-                'message': message or '当前无可用签到活动',
+                'message': '当前账号没有每日签到活动',
                 'reward': '', 'reward_amount': 0, 'days': None}
+    if code == _UPSTREAM_SYSTEM_ERROR_CODE:
+        # 活动存在、上游这次没放行：先回查面板再下结论（写请求可能已经生效，
+        # 只是回执是错误）。回查不到时如实说明「上游错误」，不要编成「无活动」。
+        status = await checkin_status(account, proxy=proxy, timeout=timeout)
+        if status.get('checked_in_today'):
+            return {'ok': True, 'already': True, 'code': 0,
+                    'message': '今日已签到', 'reward': '', 'reward_amount': 0,
+                    'days': status.get('continuous_days'), 'status': status}
+        if status.get('known') and not status.get('available'):
+            return {'ok': False, 'already': False, 'code': 'no_campaign',
+                    'message': '当前账号没有每日签到活动',
+                    'reward': '', 'reward_amount': 0, 'days': None,
+                    'status': status}
+        hint = ('；活动仍在、今日尚未签到，请稍后重试'
+                if status.get('known') else '，请稍后重试')
+        return {'ok': False, 'already': False, 'code': 'upstream_error',
+                'upstream_code': code,
+                'message': f'上游拒绝本次签到（{code} 系统错误）{hint}',
+                'reward': '', 'reward_amount': 0,
+                'days': status.get('continuous_days'), 'status': status}
     if code != 0:
         return {'ok': False, 'already': False, 'code': code,
                 'message': message or f'上游返回 code={code}',

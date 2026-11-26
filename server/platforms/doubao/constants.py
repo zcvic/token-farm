@@ -23,6 +23,10 @@ from __future__ import annotations
 BASE_URL = 'https://www.doubao.com'
 CHAT_PATH = '/chat/completion'
 CHECKIN_PATH = '/alice/ug/campaign/landing/checkin'
+# 只读的签到活动面板（`daily_signin` 任务、今日是否已签、连签天数、待领额度）。
+# 写接口被拒（710010702）时用它回查真实状态，避免把「上游系统错误」误报成
+# 「没有活动」。
+CHECKIN_DETAIL_PATH = '/alice/ug/campaign/v3/detail/'
 QUOTA_PATH = '/alice/commerce/sale/subscription/quota/summary/'
 
 # 上游不认 OpenAI 的 `model`，只认豆包内部的 `model_item_key`。空模型名补
