@@ -35,6 +35,10 @@ PLANS_PATH = '/api/aioffice/v1/sessions/plans'
 BALANCE_PATH = '/api/public/v1/credits/balance'
 PROFILE_PATH = '/api/public/v1/account/profile'
 TASKS_PATH = '/api/public/v1/tasks'
+# run 生命周期上报（running → completed 是上游结算 / 扣费的唯一触发点）。
+EXECUTION_STATUS_PATH = '/api/public/v1/sessions/{session_id}/execution_status'
+# 单会话消耗明细（`session_id` → 这一轮实际扣了多少智点）。
+EXPENSE_PATH = '/api/public/v1/credits/transaction/expense'
 
 # ── 客户端指纹 ──────────────────────────────────────────────
 CLIENT_TYPE = 'lingxi_claw'

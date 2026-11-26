@@ -88,11 +88,14 @@ class DefaultsTest(_DbCase):
         """未保存过时，面板回显的就是 TF_TRAE_* 的现值（不是抄死的常量）。"""
         with mock.patch.object(config, 'TRAE_SOLO_MAX_TOKENS', 123456), \
              mock.patch.object(config, 'TRAE_NATIVE_TOOLS', False), \
-             mock.patch.object(config, 'TRAE_CREDIT_METER', 'detail'):
+             mock.patch.object(config, 'TRAE_CREDIT_METER', 'detail'), \
+             mock.patch.object(config, 'LINGXI_CREDIT_METER', 'delta'):
             values = runtime_settings.load('trae')
             self.assertEqual(values['solo_max_tokens'], 123456)
             self.assertFalse(values['native_tools'])
             self.assertEqual(values['credit_meter'], 'detail')
+            # 同名开关在不同平台跟随各自的环境变量：灵犀是 TF_LINGXI_*。
+            self.assertEqual(runtime_settings.credit_meter('lingxi'), 'delta')
 
     def test_capabilities_are_per_platform(self) -> None:
         trae = runtime_settings.capabilities('trae')
@@ -103,6 +106,7 @@ class DefaultsTest(_DbCase):
         self.assertFalse(qoder['max_accounts_try'])
         self.assertFalse(qoder['session_affinity'])
         self.assertTrue(qoder['request_timeout'])
+        self.assertTrue(runtime_settings.capabilities('lingxi')['credit_meter'])
         # 保底积分只属于 Loomy：同构的 DuMate / MiniMax 没有实现选号时的阈值。
         self.assertTrue(loomy['min_credits'])
         self.assertFalse(runtime_settings.capabilities('dumate')['min_credits'])

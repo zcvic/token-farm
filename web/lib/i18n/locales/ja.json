@@ -2685,6 +2685,7 @@
     "configSoloMaxTokensHint": "SOLO 経路でクライアントが max_tokens を送らない場合の出力予算（トークン、思考込み）。",
     "configCreditMeter": "実消費クレジットの計測",
     "configCreditMeterHint": "リクエストごとの実消費を記録します。累計差分はアカウントロックが必要、セッション明細は並行安全。「計測しない」は環境変数を上書きして停止します。既定は TF_TRAE_CREDIT_METER に従います。",
+    "configCreditMeterHintLingxi": "霊犀は run のライフサイクルを送信して初めて上流が課金するため、どのモードでも実際に課金されます（「計測しない」= 現状維持で、送信も課金もなし）。セッション明細はリクエストごとにセッションを作り、その session の明細を読むので並行安全です。明細の反映は数分遅れるためリクエストを待たせず、バックグラウンドで後から補記し、見つからなければ空欄のままにします。累計差分はアカウントロックが必要で遅延反映の影響も受けるため通常は値が取れません。セッション明細を推奨します。既定は TF_LINGXI_CREDIT_METER に従います。",
     "creditMeter_default": "計測しない",
     "creditMeter_delta": "累計差分",
     "creditMeter_detail": "セッション明細",

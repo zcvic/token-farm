@@ -2440,6 +2440,7 @@
     "configSoloMaxTokensHint": "SOLO 通道客户端未传 max_tokens 时的输出预算（token，含思考）。",
     "configCreditMeter": "实扣积分模式",
     "configCreditMeterHint": "按请求记录实际扣了多少积分：累计差值要抢账号锁，会话明细并发安全。「不计量」会覆盖环境变量并关闭；默认跟随 TF_TRAE_CREDIT_METER。",
+    "configCreditMeterHintLingxi": "灵犀只有上报 run 生命周期才会被上游结算，所以任一档都会产生真实扣费（「不计量」= 维持现状，不上报也不扣费）。会话明细每轮独立会话、按 session 查上游流水，并发安全；流水延迟归账（几分钟）不会阻塞请求，后台查到后补记，补不到则该次留空。累计差值要抢账号锁且同样受延迟归账影响，通常拿不到值，优先用会话明细。默认跟随 TF_LINGXI_CREDIT_METER。",
     "creditMeter_default": "不计量",
     "creditMeter_delta": "累计差值",
     "creditMeter_detail": "会话明细",

@@ -49,6 +49,27 @@
 #          （404 且文案含 run / 会话 / 过期 / not found / 不存在）时丢缓存
 #          重建一次再试；401 不重试。
 #          → client._runs / forget_run / _ensure_run
+#        · 实扣积分（可选，面板 credit_meter / TF_LINGXI_CREDIT_METER）：
+#            - 不上报 execution_status 的 run **永远不结算**；上报
+#              running（lease_seconds=90）→ completed 才会扣积分，
+#              completed 是唯一结算触发点。body:
+#              {group_id, status, run_token, [lease_seconds|terminal_reason]}
+#              → client.report_status / adapter._meter_*
+#            - 每轮新建 run（run 是计费单元）；detail 每轮还新建 session，
+#              收尾按 session_id 查
+#              GET /api/public/v1/credits/transaction/expense
+#                  ?session_id&cursor&limit
+#              → data.{list,cursor,has_more}，amount 负数为消耗；数字 id /
+#              获得类无 id 都要容错。delta 用 credits/balance 的累计
+#              consumed 前后相减（账号级锁 + 窗口序号，并发宁少勿重）。
+#            - completed 的上报必须**独立于请求作用域**：客户端断开会取消
+#              请求，丢了这条上报这次对话就不结算（与参考实现「独立
+#              context」同口径）→ adapter._report_completed
+#            - 上游是延迟归账（对话结束后过几分钟流水才出现），所以不在
+#              请求收尾里等：后台探针 20s/40s/60s/120s/180s/300s 重试，
+#              查到后补齐 request_logs.credit、usage_daily、usage_hourly、
+#              api_keys.used_credit；查不到保持 NULL，绝不估算。
+#              → server/platforms/lingxi/settle.py / db.apply_deferred_credit
 #        · 请求头：基础头 Cookie / User-Agent / Referer:<base>/ /
 #          Accept:application/json；Cookie = 用户 cookie +
 #          `x-kso-app-name=win-lingxi-desktop`、
@@ -116,8 +137,8 @@
 #      有意不跟：
 #        · 群聊任务（try_group_chat）：需要 WebSocket（completions/ws）+
 #          建群 / 解散，本轮只做普通对话与每日签到。
-#        · 一次性任务（专家模式 / 客户端任务）：依赖 execution_status 上报
-#          与固定话术，接口已预留 group_id，但尚未接进后台任务。
+#        · 一次性任务（专家模式 / 客户端任务）：依赖单独的任务流程与固定
+#          话术；execution_status 上报本身已用于实扣积分，但任务流程尚未接入。
 #        · 图片输入：content 只接受字符串，分段里的图片会被丢弃（日志记
 #          数量），模型条目仍如实标 attachment 供界面展示。
 #        · 扫码登录：没有登录接口可用，只支持抓包导入 Cookie。

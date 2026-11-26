@@ -1872,6 +1872,113 @@ def add_request_log(**fields: object) -> None:
         _prune_request_logs()
 
 
+def apply_deferred_credit(request_id: str, credit: float) -> bool | None:
+    """后补一次请求的真实扣费（灵犀延迟归账用）。
+
+    上游的流水是延迟出现的：请求结束时 `credit` 只能先存 NULL，等后台查到
+    真实扣费再补回来。补记必须**和首次记账走同一套口径**，否则日志里有一笔、
+    统计和密钥额度里没有，三处永远对不上：
+
+      · `request_logs.credit` —— 日志页那一格；
+      · `usage_daily` / `usage_hourly` —— 统计页与趋势图（与 `bump_usage` 的
+        主键、归一化规则一致）；
+      · `api_keys.used_credit` —— 密钥的积分额度（与 `keysvc.touch` 一致）。
+
+    返回值刻意分三种：
+      · True  补记成功；
+      · False 这一行已经有值（重复补记必须直接放弃，否则会记两遍）；
+      · None  还没找到这一行（日志在流式响应结束后才写，后台可能先跑到）。
+    """
+    rid = str(request_id or '').strip()
+    try:
+        value = float(credit)
+    except (TypeError, ValueError):
+        return False
+    if not rid or value <= 0:
+        return False
+
+    with _lock:
+        conn = connect()
+        try:
+            # `X-Request-Id` 是客户端给的，理论上可能被复用。只在「恰好一条
+            # 待补记」时才写：同时有两条 NULL 说明无法判断这笔钱属于谁，
+            # 宁可让它空着，也不能补到错的请求上（删日志/清库后的历史记录
+            # 不存在时同样返回 None）。
+            counts = conn.execute(
+                'SELECT COUNT(*) AS total, '
+                '  SUM(CASE WHEN credit IS NULL THEN 1 ELSE 0 END) AS pending '
+                'FROM request_logs WHERE request_id = ?', (rid,)).fetchone()
+            total = int(counts['total'] or 0)
+            pending = int(counts['pending'] or 0)
+            if not total:
+                return None
+            if not pending:
+                return False
+            if pending > 1:
+                return None
+            row = conn.execute(
+                'SELECT id, ts, key_id, model, realm, platform '
+                'FROM request_logs WHERE request_id = ? AND credit IS NULL '
+                'ORDER BY id DESC LIMIT 1', (rid,)).fetchone()
+            if row is None:  # 理论上不会（pending==1），防御性兜底
+                return None
+            # 条件里再判一次 NULL：并发补记只有一条能把 NULL 改成实际值。
+            changed = conn.execute(
+                'UPDATE request_logs SET credit = ? WHERE id = ? AND credit IS NULL',
+                (value, row['id'])).rowcount
+            if not changed:
+                conn.rollback()
+                return False
+            key_id = row['key_id']
+            if key_id is not None:
+                # 与 bump_usage 相同的归一化：空 model 记 ''，空 realm 记 cn，
+                # 空 platform 记 ''。只 UPDATE 已有行：这次请求本来就没计入
+                # 统计（如失败请求）时，不能凭空给它造一行。
+                model = row['model'] or ''
+                realm = row['realm'] or 'cn'
+                platform = row['platform'] or ''
+                ts = row['ts']
+                conn.execute(
+                    'UPDATE usage_daily SET credit = credit + ? '
+                    'WHERE day = ? AND key_id = ? AND model = ? AND realm = ? '
+                    'AND platform = ?',
+                    (value, day_of(ts), key_id, model, realm, platform))
+                conn.execute(
+                    'UPDATE usage_hourly SET credit = credit + ? '
+                    'WHERE day = ? AND hour = ? AND key_id = ? AND model = ? '
+                    'AND realm = ? AND platform = ?',
+                    (value, day_of(ts), hour_of(ts), key_id, model, realm,
+                     platform))
+                # 密钥的积分额度：`used_credit` 是总额，一直累加。
+                # `daily_used_credit` 是**当天**计数器，配 `daily_credit_day`
+                # 标记它属于哪一天——所以只有请求发生在**今天**时才动它：
+                # 跨午夜补记若按请求那天去写，会把今天的计数改写成昨天，
+                # 等于把今天的额度凭空清零。跨天的量只进总额。
+                day = day_of(ts)
+                today = day_of()
+                if day == today:
+                    conn.execute(
+                        'UPDATE api_keys SET '
+                        '  used_credit = used_credit + ?, '
+                        '  daily_used_credit = CASE WHEN daily_credit_day = ? '
+                        '    THEN daily_used_credit + ? ELSE ? END, '
+                        '  daily_credit_day = ? '
+                        'WHERE id = ?',
+                        (value, today, value, value, today, key_id))
+                else:
+                    conn.execute(
+                        'UPDATE api_keys SET used_credit = used_credit + ? '
+                        'WHERE id = ?', (value, key_id))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+    return True
+
+
 # 账号回填的匹配窗口（秒）。
 #
 # 上游日志的时间戳是「请求结束」时刻，与本端 `request_logs.ts` 同义（也在

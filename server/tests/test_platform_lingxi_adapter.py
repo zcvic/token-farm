@@ -27,9 +27,10 @@ from server import config, db
 from server.platforms import settings as runtime_settings
 from server.platforms.base import PlatformError
 from server.platforms.lingxi import (catalog, chat, client, constants as C,
-                                     store)
+                                     settle, store)
 from server.platforms.lingxi.adapter import LingxiAdapter
 from server.platforms.sse import DONE, openai_sse
+from server.services import requestctx
 
 _COOKIE = 'wps_sid=abc123def456; csrf=xyz789; other=1'
 
@@ -370,7 +371,9 @@ class LingxiTranslatorTest(unittest.TestCase):
 class LingxiClientTest(unittest.TestCase):
     def setUp(self) -> None:
         client._runs.clear()
+        client._sessions.clear()
         self.addCleanup(client._runs.clear)
+        self.addCleanup(client._sessions.clear)
 
     def _account(self) -> dict:
         return {'uid': 'lx_1', 'cookie': _COOKIE, 'deviceId': 'dev-1'}
@@ -500,6 +503,121 @@ class LingxiClientTest(unittest.TestCase):
         asyncio.run(second())
         self.assertEqual(calls, {'session': 2, 'run': 2, 'chat': 3},
                          'TTL 内第二次对话必须复用缓存')
+
+    # ── 每请求计费：生命周期上报 ─────────────────────────
+    def _meter_reply(self, seen: dict):
+        def reply(request):
+            path = request.url.path
+            if path == C.SESSIONS_PATH:
+                seen['session'] += 1
+                return httpx.Response(200, json={'data': {
+                    'session_id': f's{seen["session"]}'}})
+            if path == C.RUNS_PATH:
+                seen['run'] += 1
+                return httpx.Response(200, json={'data': {
+                    'run_id': f'r{seen["run"]}', 'group_id': f'g{seen["run"]}'}})
+            if '/execution_status' in path:
+                seen['status'].append(
+                    (request.method, json.loads(request.content), path))
+                return httpx.Response(200, json={'code': 0})
+            if path == C.CHAT_PATH:
+                return httpx.Response(
+                    200, headers={'content-type': 'text/event-stream'},
+                    content=_sse({'code': 'Success',
+                                  'choices': [{'finish_reason': 'stop'}]}))
+            return httpx.Response(404, json={'message': 'not found'})
+        return reply
+
+    def test_open_chat_meter_creates_session_and_reports_running(self) -> None:
+        seen = {'session': 0, 'run': 0, 'status': []}
+        self._patch_http(self._meter_reply(seen))
+
+        async def twice():
+            ids = []
+            for _ in range(2):
+                meter = {'mode': 'detail'}
+                response = await client.open_chat(
+                    self._account(), {'messages': []}, 'm', meter=meter)
+                ids.append((meter['session_id'], meter['run_id'],
+                            meter['group_id']))
+                await response.aclose()
+            return ids
+
+        ids = asyncio.run(twice())
+        self.assertEqual(ids, [('s1', 'r1', 'g1'), ('s2', 'r2', 'g2')])
+        self.assertEqual((seen['session'], seen['run']), (2, 2),
+                         'detail 每轮都要新会话 + 新 run（会话是归属凭据）')
+        self.assertEqual([s[1]['status'] for s in seen['status']],
+                         ['running', 'running'])
+        self.assertEqual([s[1]['group_id'] for s in seen['status']],
+                         ['g1', 'g2'])
+        self.assertEqual(seen['status'][0][1]['lease_seconds'], 90)
+        self.assertEqual(seen['status'][0][0], 'PUT')
+
+    def test_open_chat_meter_delta_reuses_session_but_new_run(self) -> None:
+        seen = {'session': 0, 'run': 0, 'status': []}
+        self._patch_http(self._meter_reply(seen))
+
+        async def twice():
+            for _ in range(2):
+                response = await client.open_chat(
+                    self._account(), {'messages': []}, 'm',
+                    meter={'mode': 'delta'})
+                await response.aclose()
+
+        asyncio.run(twice())
+        self.assertEqual((seen['session'], seen['run']), (1, 2),
+                         'delta 复用会话，但 run 是计费单元、必须每轮新建')
+
+    def test_open_chat_without_meter_never_reports_lifecycle(self) -> None:
+        seen = {'session': 0, 'run': 0, 'status': []}
+        self._patch_http(self._meter_reply(seen))
+
+        async def once():
+            response = await client.open_chat(
+                self._account(), {'messages': []}, 'm')
+            await response.aclose()
+
+        asyncio.run(once())
+        self.assertEqual(seen['status'], [],
+                         '没开计量就不上报，维持「不扣费」的旧行为')
+
+    def test_report_status_completed_carries_terminal_reason(self) -> None:
+        seen: list[tuple[str, dict]] = []
+
+        def reply(request):
+            seen.append((request.method, json.loads(request.content)))
+            return httpx.Response(200, json={'code': 0})
+
+        self._patch_http(reply)
+        run = {'session_id': 'sess-1', 'group_id': 'grp-1'}
+
+        async def go():
+            await client.report_status(self._account(), run, 'running')
+            await client.report_status(self._account(), run, 'completed',
+                                       reason='failed')
+
+        asyncio.run(go())
+        self.assertEqual([s[0] for s in seen], ['PUT', 'PUT'])
+        self.assertEqual(seen[1][1], {'group_id': 'grp-1',
+                                      'status': 'completed',
+                                      'run_token': 'grp-1',
+                                      'terminal_reason': 'failed'})
+
+    def test_parse_expenses_tolerates_numeric_id_and_income_rows(self) -> None:
+        rows = client.parse_expenses({'data': {'list': [
+            {'id': 28376339, 'type': 'expense', 'amount': -2,
+             'group_id': 'g1', 'session_id': 's1', 'task_name': '对话'},
+            {'type': 'topup', 'amount': 100, 'remark': '签到'},
+            {'amount': 'bad'},
+            'junk',
+        ]}})
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['id'], '28376339')
+        self.assertEqual(rows[0]['amount'], -2.0)
+        self.assertEqual(rows[0]['title'], '对话')
+        self.assertEqual(rows[1]['type'], 'income',
+                         '获得类没有 id、type=topup，按金额符号归一')
 
     def test_open_chat_raises_401_for_login_error_and_never_retries(self) -> None:
         calls = {'session': 0}
@@ -906,6 +1024,228 @@ class LingxiAdapterTest(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 502)
         self.assertEqual(ctx.exception.code, 'network_error')
 
+    # ── 实扣积分：延迟补记 ───────────────────────────────
+    def test_detail_meter_schedules_deferred_credit(self) -> None:
+        self._seed()
+        db.set_setting('platforms.lingxi.credit_meter', 'detail')
+        captured: dict = {}
+
+        async def fake_open(account, body, model, **kwargs):
+            kwargs['meter'].update({'session_id': 'sess-9',
+                                    'run_id': 'run-9', 'group_id': 'grp-9'})
+            return _FakeResponse(_sse(
+                {'code': 'Success', 'choices': [{'text': 'hi'}]},
+                {'code': 'Success', 'choices': [{'finish_reason': 'stop'}]}))
+
+        def fake_schedule(key, request_id, probe):
+            captured.update(key=key, request_id=request_id, probe=probe)
+            return True
+
+        async def fake_expenses(account, session_id, **kwargs):
+            captured['session'] = session_id
+            return [{'amount': -3.0, 'group_id': 'grp-9'},
+                    {'amount': -1.0, 'group_id': 'other'},
+                    {'amount': 5.0}]
+
+        report = mock.AsyncMock(return_value=True)
+        with mock.patch.object(client, 'open_chat', new=fake_open), \
+             mock.patch.object(client, 'report_status', new=report), \
+             mock.patch.object(client, 'session_expenses', new=fake_expenses), \
+             mock.patch.object(settle, 'schedule', new=fake_schedule), \
+             mock.patch.object(requestctx, 'current', return_value='req-1'):
+            result = asyncio.run(self.adapter.chat('default', {
+                'messages': [{'role': 'user', 'content': 'hi'}]}))
+            # 探针在上游打桩仍生效时调用：真实实现会去查上游流水。
+            credit = asyncio.run(captured['probe']())
+        self.assertEqual(result.payload['choices'][0]['message']['content'],
+                         'hi')
+        self.assertEqual(captured['key'], 'req-1|d|sess-9')
+        self.assertEqual(captured['request_id'], 'req-1')
+        # 收尾只上报 completed；查询交给后台探针（灵犀延迟归账，等不起）。
+        report.assert_awaited()
+        self.assertEqual(report.await_args.args[2], 'completed')
+        self.assertEqual(credit, 3.0,
+                         '只累计本会话、本 run 的负数流水')
+        self.assertEqual(captured['session'], 'sess-9')
+
+    def test_meter_off_does_not_schedule(self) -> None:
+        self._seed()
+
+        async def fake_open(account, body, model, **kwargs):
+            return _FakeResponse(_sse(
+                {'code': 'Success', 'choices': [{'text': 'hi'}]},
+                {'code': 'Success', 'choices': [{'finish_reason': 'stop'}]}))
+
+        with mock.patch.object(client, 'open_chat', new=fake_open), \
+             mock.patch.object(settle, 'schedule') as scheduled:
+            asyncio.run(self.adapter.chat('default', {
+                'messages': [{'role': 'user', 'content': 'hi'}]}))
+        scheduled.assert_not_called()
+
+    def test_delta_probe_abandons_after_a_newer_window(self) -> None:
+        self._seed()
+
+        async def fake_consumed(account, **kwargs):
+            raise AssertionError('被覆盖的窗口不该再查余额')
+
+        meter = mock.Mock(session_id='sess-1', group_id='', before=10.0,
+                          uid='lx_1', seq=1)
+        self.adapter._meter_seq['lx_1'] = 2
+        probe = self.adapter._delta_probe({'uid': 'lx_1'}, meter)
+        with mock.patch.object(client, 'account_consumed', new=fake_consumed):
+            self.assertIs(asyncio.run(probe()), False)
+
+    def test_delta_second_request_invalidates_the_first_window(self) -> None:
+        """同账号并发时后来的请求顶掉世代：在途窗口必须主动放弃。"""
+        self._seed()
+        db.set_setting('platforms.lingxi.credit_meter', 'delta')
+        account = {'uid': 'lx_1', 'cookie': 'wps_sid=abc'}
+
+        async def fake_consumed(account, **kwargs):
+            return 10.0
+
+        with mock.patch.object(client, 'account_consumed', new=fake_consumed):
+            first = asyncio.run(self.adapter._meter_start(account))
+            self.assertIsNotNone(first)
+            self.assertEqual(first.seq, 1)
+            self.assertIsNotNone(first.token, '第一个请求占住账号锁')
+
+            second = asyncio.run(self.adapter._meter_start(account))
+            self.assertIsNotNone(second)
+            self.assertEqual(second.seq, 2, '后来的请求把世代顶上去')
+            self.assertIsNone(second.token, '并发时后来的请求只计费不记账')
+
+            # 第一个窗口的探针发现世代被顶掉 → 放弃（宁少勿重）。
+            probe = self.adapter._delta_probe(account, first)
+            self.assertIs(asyncio.run(probe()), False)
+
+    def test_delta_window_is_released_when_the_request_finishes(self) -> None:
+        self._seed()
+        db.set_setting('platforms.lingxi.credit_meter', 'delta')
+        account = {'uid': 'lx_1', 'cookie': 'wps_sid=abc'}
+
+        async def fake_consumed(account, **kwargs):
+            return 10.0
+
+        with mock.patch.object(client, 'account_consumed', new=fake_consumed):
+            meter = asyncio.run(self.adapter._meter_start(account))
+        self.assertIsNotNone(meter)
+        self.assertIn('lx_1', self.adapter._metering)
+
+        async def fake_report(account, run, status, **kwargs):
+            return True
+
+        with mock.patch.object(client, 'report_status', new=fake_report), \
+             mock.patch.object(settle, 'schedule'):
+            asyncio.run(self.adapter._meter_finish(account, meter))
+        self.assertNotIn('lx_1', self.adapter._metering,
+                         '收尾要把账号锁还回去')
+
+    def test_completed_is_resent_when_the_request_is_cancelled(self) -> None:
+        """客户端断开时请求作用域会被取消；`completed` 丢了这次就不结算。"""
+        self._seed()
+        account = {'uid': 'lx_1', 'cookie': 'wps_sid=abc'}
+        meter = mock.Mock(mode='detail', token=None, before=None,
+                          session_id='sess-1', run_id='run-1', group_id='grp-1',
+                          uid='lx_1', request_id='req-1', seq=0)
+        seen: list[str] = []
+        scheduled: list[str] = []
+
+        async def fake_report(account, run, status, **kwargs):
+            seen.append(status)
+            if len(seen) == 1:
+                raise asyncio.CancelledError()
+            return True
+
+        def fake_schedule(key, request_id, probe):
+            scheduled.append(key)
+            return True
+
+        async def run():
+            with mock.patch.object(client, 'report_status', new=fake_report), \
+                 mock.patch.object(settle, 'schedule', new=fake_schedule):
+                try:
+                    await self.adapter._meter_finish(account, meter)
+                except asyncio.CancelledError:
+                    pass
+                # 让补发任务跑完。
+                await asyncio.sleep(0.05)
+
+        asyncio.run(run())
+        self.assertEqual(seen, ['completed', 'completed'],
+                         '取消之后必须补发一次 completed，否则这次对话不结算')
+        self.assertEqual(scheduled, ['req-1|d|sess-1'],
+                         '探针要独立于上报：补发期间也已经在跑了')
+
+    def test_deferred_credit_patches_log_usage_and_key_quota(self) -> None:
+        ts = int(time.time())
+        db.execute('INSERT INTO api_keys(name, key_hash, prefix, created_at) '
+                   'VALUES(?, ?, ?, ?)', ('k', 'h', 'p', ts))
+        key_id = db.query_one('SELECT id FROM api_keys')['id']
+        db.add_request_log(ts=ts, key_id=key_id, model='lingxi/x',
+                           mapped_model='lingxi/x', status=200,
+                           prompt_tokens=10, completion_tokens=2, credit=None,
+                           realm='cn', platform='lingxi', request_id='req-1')
+        db.bump_usage(key_id, 'lingxi/x', 10, 2, None, realm='cn',
+                      platform='lingxi', ts=ts)
+
+        self.assertTrue(db.apply_deferred_credit('req-1', 3.5))
+        log = db.query_one("SELECT credit FROM request_logs WHERE request_id='req-1'")
+        self.assertEqual(log['credit'], 3.5)
+        day = db.day_of(ts)
+        daily = db.query_one('SELECT credit FROM usage_daily WHERE day=? AND key_id=?',
+                             (day, key_id))
+        hourly = db.query_one('SELECT credit FROM usage_hourly WHERE day=? AND key_id=?',
+                              (day, key_id))
+        key = db.query_one('SELECT used_credit, daily_used_credit FROM api_keys WHERE id=?',
+                           (key_id,))
+        self.assertEqual((daily['credit'], hourly['credit']), (3.5, 3.5))
+        self.assertEqual((key['used_credit'], key['daily_used_credit']),
+                         (3.5, 3.5))
+
+        self.assertFalse(db.apply_deferred_credit('req-1', 3.5),
+                         '同一行不能再补第二遍')
+        self.assertEqual(
+            db.query_one("SELECT credit FROM request_logs WHERE request_id='req-1'")['credit'],
+            3.5)
+        self.assertIsNone(db.apply_deferred_credit('missing', 1.0),
+                          '日志还没写进来 → 让探针下一轮再试')
+
+    def test_deferred_credit_refuses_ambiguous_request_ids(self) -> None:
+        ts = int(time.time())
+        for _ in range(2):
+            db.add_request_log(ts=ts, model='lingxi/x', status=200,
+                               credit=None, realm='cn', platform='lingxi',
+                               request_id='dup')
+        self.assertIsNone(db.apply_deferred_credit('dup', 2.0),
+                          '一条 request_id 对应多行时不能猜给谁')
+        pending = db.query("SELECT credit FROM request_logs WHERE request_id='dup'")
+        self.assertEqual([r['credit'] for r in pending], [None, None])
+
+    def test_deferred_credit_keeps_todays_daily_quota_on_a_cross_day_row(self) -> None:
+        """跨午夜补记不能把**今天**的每日额度改写成昨天（等于清零）。"""
+        ts = int(time.time()) - 86400
+        db.execute('INSERT INTO api_keys(name, key_hash, prefix, created_at, '
+                   'used_credit, daily_used_credit, daily_credit_day) '
+                   'VALUES(?, ?, ?, ?, ?, ?, ?)',
+                   ('k', 'h', 'p', ts, 10.0, 4.0, db.day_of()))
+        key_id = db.query_one('SELECT id FROM api_keys')['id']
+        db.add_request_log(ts=ts, key_id=key_id, model='lingxi/x',
+                           mapped_model='lingxi/x', status=200,
+                           prompt_tokens=10, completion_tokens=2, credit=None,
+                           realm='cn', platform='lingxi', request_id='old')
+        db.bump_usage(key_id, 'lingxi/x', 10, 2, None, realm='cn',
+                      platform='lingxi', ts=ts)
+
+        self.assertTrue(db.apply_deferred_credit('old', 2.0))
+        key = db.query_one('SELECT used_credit, daily_used_credit, '
+                           'daily_credit_day FROM api_keys WHERE id=?',
+                           (key_id,))
+        self.assertEqual(key['used_credit'], 12.0, '总额照加')
+        self.assertEqual(key['daily_used_credit'], 4.0,
+                         '今天的每日额度不能被昨天的补记改写')
+        self.assertEqual(key['daily_credit_day'], db.day_of())
+
     def test_no_account_raises_503(self) -> None:
         with self.assertRaises(PlatformError) as ctx:
             asyncio.run(self.adapter.chat('default', {
@@ -984,6 +1324,115 @@ class LingxiAdapterTest(unittest.TestCase):
         self.assertEqual(out['errors'][0]['code'], 'upstream_error')
 
 
+# ── 延迟补记：流水聚合 ──────────────────────────────────────
+class LingxiSettleTest(unittest.TestCase):
+    def test_credit_of_sums_only_expenses(self) -> None:
+        rows = [
+            {'amount': -2.0, 'group_id': ''},
+            {'amount': -1.5, 'group_id': ''},
+            {'amount': 100.0},             # 获得类
+            {'amount': 'bad'},             # 坏字段
+            {'amount': True},              # 布尔不是金额
+            'junk',
+        ]
+        self.assertEqual(settle.credit_of(rows), 3.5)
+        self.assertIsNone(settle.credit_of([{'amount': 1.0}]))
+        self.assertIsNone(settle.credit_of([]))
+
+    def test_credit_of_prefers_the_run_when_rows_carry_group(self) -> None:
+        rows = [
+            {'amount': -2.0, 'group_id': 'g1', 'session_id': 's1'},
+            {'amount': -9.0, 'group_id': 'g2', 'session_id': 's2'},
+        ]
+        self.assertEqual(settle.credit_of(rows, 'g1', 's1'), 2.0)
+        # 上游万一没按 session 过滤：字段对不上的一律不计。
+        self.assertEqual(settle.credit_of(rows, '', 's1'), 2.0)
+        # 行里没有这些字段时退化为按会话汇总（单轮单会话下仍正确）。
+        self.assertEqual(settle.credit_of(
+            [{'amount': -2.0}, {'amount': -9.0}], 'g1', 's1'), 11.0)
+
+    def test_probe_retries_until_the_upstream_ledger_shows_up(self) -> None:
+        """上游延迟归账：前几轮查不到就继续查，查到就补记一次。"""
+        rounds = {'n': 0}
+        written: list[tuple[str, float]] = []
+
+        async def probe():
+            rounds['n'] += 1
+            return None if rounds['n'] < 3 else 4.0
+
+        def fake_apply(request_id, credit):
+            written.append((request_id, credit))
+            return True
+
+        async def run():
+            with mock.patch.object(settle, '_DELAYS', (0, 0, 0)), \
+                 mock.patch.object(db, 'apply_deferred_credit',
+                                   new=fake_apply):
+                await settle._run('k1', 'req-1', probe)
+
+        asyncio.run(run())
+        self.assertEqual(rounds['n'], 3)
+        self.assertEqual(written, [('req-1', 4.0)])
+
+    def test_probe_keeps_the_amount_when_the_log_row_is_not_there_yet(self) -> None:
+        """日志行还没写进来时不必再查上游：留着金额，下一轮直接补写。"""
+        calls = {'probe': 0}
+        states = [None, True]
+        written: list[tuple[str, float]] = []
+
+        async def probe():
+            calls['probe'] += 1
+            return 2.5
+
+        def fake_apply(request_id, credit):
+            written.append((request_id, credit))
+            return states.pop(0)
+
+        async def run():
+            with mock.patch.object(settle, '_DELAYS', (0, 0)), \
+                 mock.patch.object(db, 'apply_deferred_credit',
+                                   new=fake_apply):
+                await settle._run('k2', 'req-2', probe)
+
+        asyncio.run(run())
+        self.assertEqual(calls['probe'], 1, '金额已经拿到，不该再打扰上游')
+        self.assertEqual(written, [('req-2', 2.5), ('req-2', 2.5)])
+
+    def test_probe_stops_when_the_row_already_has_a_value(self) -> None:
+        """这一行已经有值 → 立刻收工，不能记第二遍。"""
+        calls = {'probe': 0}
+
+        async def probe():
+            calls['probe'] += 1
+            return 2.0
+
+        async def run():
+            with mock.patch.object(settle, '_DELAYS', (0, 0, 0)), \
+                 mock.patch.object(db, 'apply_deferred_credit',
+                                   new=lambda *a: False):
+                await settle._run('k3', 'req-3', probe)
+
+        asyncio.run(run())
+        self.assertEqual(calls['probe'], 1)
+
+    def test_probe_abandons_when_the_probe_says_so(self) -> None:
+        """探针返回 False = 主动放弃（窗口被更新请求覆盖）。"""
+        calls = {'probe': 0}
+
+        async def probe():
+            calls['probe'] += 1
+            return False
+
+        async def run():
+            with mock.patch.object(settle, '_DELAYS', (0, 0, 0)), \
+                 mock.patch.object(db, 'apply_deferred_credit') as applied:
+                await settle._run('k4', 'req-4', probe)
+                applied.assert_not_called()
+
+        asyncio.run(run())
+        self.assertEqual(calls['probe'], 1)
+
+
 # ── 设置能力表 ──────────────────────────────────────────────
 class LingxiSettingsTest(unittest.TestCase):
     def test_capabilities_match_the_adapter(self) -> None:
@@ -996,9 +1445,21 @@ class LingxiSettingsTest(unittest.TestCase):
         self.assertTrue(caps['credits_timeout'])
         self.assertTrue(caps['cooldown_429'])
         self.assertTrue(caps['cooldown_5xx'])
+        self.assertTrue(caps['credit_meter'],
+                        '每请求实扣积分开关由适配器真正实现')
         # 灵犀没有保底积分选号，也没有桌面端回写：露出来就是假开关。
         self.assertFalse(caps['min_credits'])
         self.assertFalse(caps['desktop_sync'])
+
+    def test_credit_meter_choices_and_env_default(self) -> None:
+        with mock.patch.object(config, 'LINGXI_CREDIT_METER', 'detail'), \
+             mock.patch.object(db, 'get_setting',
+                               side_effect=lambda key, default=None: default):
+            values = runtime_settings.load('lingxi')
+        self.assertEqual(values['credit_meter'], 'detail',
+                         '灵犀的默认值跟随 TF_LINGXI_CREDIT_METER')
+        self.assertEqual(values['enum_choices']['credit_meter'],
+                         ['', 'delta', 'detail'])
 
 
 if __name__ == '__main__':

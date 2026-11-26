@@ -269,6 +269,27 @@ elif _CREDIT_METER_RAW in ('1', 'true', 'yes', 'on', 'delta'):
 else:
     TRAE_CREDIT_METER = False
 
+# 灵犀每请求实扣积分，取值与 Trae 同形（关 / delta / detail），但灵犀有一个
+# **关键差别**：上游只在网关上报 run 生命周期（running → completed）后才结算，
+# 不上报的 run 永远不扣费。所以对灵犀来说，任一档打开都意味着**会真实扣积分**，
+# `delta` / `detail` 只决定「怎么取回这一次扣了多少」。
+#   · `delta`：请求前后各查一次账户累计消耗求增量。要抢账号锁；并发在途时
+#     后来的请求只计费、不计账。**灵犀延迟归账，这一档通常拿不到值**，只作
+#     兼容保留，优先用 `detail`。
+#   · `detail`：每轮独立会话 + 独立 run，结算后按 `session_id` 查上游流水
+#     （`credits/transaction/expense`）取本次消耗，并发安全。
+# 灵犀的账要**过几分钟**才出现在流水里（不是「重试几秒」能等到的），所以
+# `detail` 不在请求收尾里等：先写一条 credit 为空的日志，再由后台探针在
+# 约 12 分钟内补齐（`platforms/lingxi/settle.py`）。仍查不到就空着，绝不拿
+# 估算值冒充实付。
+_LINGXI_METER_RAW = _env('TF_LINGXI_CREDIT_METER', '').lower()
+if _LINGXI_METER_RAW in ('detail', 'session', 'row', 'exact'):
+    LINGXI_CREDIT_METER: str | bool = 'detail'
+elif _LINGXI_METER_RAW in ('1', 'true', 'yes', 'on', 'delta'):
+    LINGXI_CREDIT_METER = 'delta'
+else:
+    LINGXI_CREDIT_METER = False
+
 # 本机一键导入：允许把新密钥直接写进**本机的** cc-switch / ZCode 配置。
 #
 # 默认关闭。理由：这是本面板唯一会写用户桌面应用数据的动作，写坏的代价是

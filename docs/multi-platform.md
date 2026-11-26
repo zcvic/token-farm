@@ -358,7 +358,8 @@ registry.register(FooAdapter())
   `max_tokens` 时的默认预算（思考与正文共享）；`credit_meter` 选实扣积分口径
   （不计量 / 累计差值 / 会话明细）。这两项的默认值仍实时跟随
   `TF_TRAE_SOLO_MAX_TOKENS` 与 `TF_TRAE_CREDIT_METER`——**环境变量照常生效**，
-  只有面板显式保存过才以库里的值为准。
+  只有面板显式保存过才以库里的值为准。灵犀也有同名的 `credit_meter`，但默认
+  跟随 `TF_LINGXI_CREDIT_METER`，语义与「打开即真实扣费」见 §15.6。
 - **Trae 协议开关**：原先只能用 `TF_TRAE_*` 环境变量改的十个兼容开关（原生
   工具透传、正文 / 标签调用还原、工具协议提示、退化调用判错、尾部规则、思考
   强度透传、思考内容兜底、空产出判错、严格结束判据）现在也在同一张表单里，
@@ -1774,9 +1775,10 @@ Qoder 的协议包含 COSY 签名、设备指纹、OAuth 设备授权、模型�
 部分账号的会话只在 `lingxi.kdocs.cn` 有效，建会话 / 领 run 按「主站 → 登录域」
 两个基址都试；**401 立即上抛**，不换基址也不重试。
 
-会话 + run 按「账号 + 设备 + 模型」缓存 1 小时（`constants.RUN_TTL_SECONDS`），
-与参考实现一致；run 失效（404 且文案含 run / 会话 / 过期 / not found / 不存在）
-时丢掉缓存重建一次再试。对话头另带 `X-Client-Type` / `X-Cc-Session-ID` /
+**没开实扣积分时**（默认）会话 + run 按「账号 + 设备 + 模型」缓存 1 小时
+（`constants.RUN_TTL_SECONDS`），与参考实现一致；run 失效（404 且文案含 run /
+会话 / 过期 / not found / 不存在）时丢掉缓存重建一次再试。开了实扣积分后 run
+必须每轮新建（见 §15.6）。对话头另带 `X-Client-Type` / `X-Cc-Session-ID` /
 `X-Cc-Run-ID` / `X-Request-Id`，Cookie 有 `copilot_server_branch` 时再带
 `X-Cc-Region`。
 
@@ -1837,19 +1839,60 @@ Qoder 的协议包含 COSY 签名、设备指纹、OAuth 设备授权、模型�
 - 探活 = `GET /api/public/v1/account/profile`：200 且 `result` 不是
   `UserUnauthorized` → `ok`，顺带取昵称。
 
-### 15.6 账号调度
+### 15.6 每请求实扣积分（`credit_meter`）
+
+设置页「实扣积分模式」与 Trae 同形（`''` / `delta` / `detail`），默认值跟随
+`TF_LINGXI_CREDIT_METER`。**灵犀与 Trae 有一个关键差别**：上游只在网关上报了
+run 生命周期（`running → completed`）后才结算，不上报的 run 永远不扣费。所以
+对灵犀来说，这个开关同时决定「是否计费」：
+
+| 取值 | 生命周期 | 实际扣费 | 取回本次金额的方式 |
+| --- | --- | --- | --- |
+| `''`（默认） | 不上报 | **不扣费**（旧行为） | 不取，日志 `credit` 为 NULL |
+| `detail` | 每轮新会话 + 新 run，上报 `running` / `completed` | **扣** | 按 `session_id` 查上游流水 |
+| `delta` | 同上，但会话复用 | **扣** | 账户累计消耗前后相减 |
+
+> 打开任一非空档位 = 与桌面客户端一样真实消耗智点。不想扣费就保持 `''`。
+
+实现要点（`adapter._meter_*`、`client.report_status`、`settle.py`）：
+
+- 发对话前 `PUT /api/public/v1/sessions/{session_id}/execution_status`，body
+  `{group_id, status:"running", run_token, lease_seconds:90}`；成功收尾再报
+  `completed`（`terminal_reason: completed`），失败收尾报 `failed`。`completed`
+  是上游结算的**唯一触发点**，缺了就不扣费。
+- `completed` 的上报**扛得住取消**：客户端断开会让请求作用域被取消，但这时
+  上报会改用独立任务补发一次——否则这次对话白跑（上游不扣费，本端也查不到
+  流水）。这与参考实现「必须用独立 context」的口径一致。
+- 灵犀的账是**延迟归账**：对话结束后立刻查余额 / 流水通常是 0，真实记录要过
+  几分钟才出现。所以收尾**不等待**（否则 SSE 会挂几分钟），而是注册一个后台
+  探针（20s / 40s / 60s / 120s / 180s / 300s，共约 12 分钟）：
+  - `detail`：`GET /api/public/v1/credits/transaction/expense?session_id=…`，
+    会话是本次请求专用的，负数 `amount` 即这次实付；并发安全。
+  - `delta`：先记账户累计消耗基线，结算后再查一次求增量。并发时新请求会让
+    旧窗口主动放弃（宁少勿重）；**因为延迟归账，这一档多数拿不到值**，只作
+    兼容保留，优先用 `detail`。
+- 查到后一次性补齐三处口径：`request_logs.credit`（日志页）、`usage_daily` /
+  `usage_hourly`（统计页）、`api_keys.used_credit`（密钥积分额度）。补记按**请求
+  发生那天**回填统计行（跨午夜的请求不会算到新的一天）；密钥的**每日**额度
+  只在请求发生在今天时才动 —— 跨午夜的补记只进总额，否则会把今天的额度改
+  写成昨天、等于凭空清零。窗口内始终查不到就保持 NULL（界面显示「—」），
+  **绝不写估算值**。
+- 未结算的探针只在内存里：进程重启会丢掉它们，那些请求的 `credit` 继续为空。
+  丢的只是展示值，上游自己的账不受影响。
+
+### 15.7 账号调度
 
 与 DuMate / Discovery 同一套 `_NATIVE_POOL`：权重 SWRR + LRU、会话亲和
 （`session_affinity`）、单账号并发闸门、`max_accounts_try` 换号、
 `cooldown_429` / `cooldown_5xx` 冷却。**401 只换号、不冷却**；`min_credits`
 不适用于灵犀（没有保底积分选号实现），设置页也不会露出该字段。
 
-### 15.7 有意不跟
+### 15.8 有意不跟
 
 - **群聊任务**：`try_group_chat` 需要 WebSocket（`completions/ws`）+ 建群 /
   解散，本轮只做普通对话与每日签到。
-- **一次性任务**：专家模式 / 客户端任务依赖 `execution_status` 上报与固定
-  话术，接口已按参考实现预留了 `group_id`，但尚未接进后台任务。
+- **一次性任务**：专家模式 / 客户端任务依赖固定话术与单独的任务流程；
+  `execution_status` 上报本身已用于 §15.6 的实扣积分，但尚未接进后台任务。
 - **图片输入**：`content` 只接受字符串，分段里的图片会被丢弃（日志记数量），
   模型条目仍如实标 `attachment` 供界面展示。
 - **扫码登录**：见 §15.1。

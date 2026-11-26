@@ -2685,6 +2685,7 @@
     "configSoloMaxTokensHint": "SOLO 채널에서 클라이언트가 max_tokens를 보내지 않을 때의 출력 예산(토큰, 사고 포함).",
     "configCreditMeter": "실사용 크레딧 측정",
     "configCreditMeterHint": "요청별 실제 크레딧 소모를 기록합니다. 누적 차이는 계정 잠금이 필요하고 세션 상세는 동시성 안전합니다. \"측정 안 함\"은 환경 변수를 덮어씁니다. 기본값은 TF_TRAE_CREDIT_METER를 따릅니다.",
+    "configCreditMeterHintLingxi": "링시는 run 라이프사이클을 보고해야 업스트림이 정산하므로 어느 모드든 실제 과금이 발생합니다(\"측정 안 함\" = 현행 유지, 보고도 과금도 없음). 세션 상세는 요청마다 세션을 새로 열어 그 session의 명세를 읽으므로 동시성 안전합니다. 명세 반영은 몇 분 지연되므로 요청을 기다리게 하지 않고 백그라운드에서 나중에 보정하며, 끝내 없으면 빈칸으로 둡니다. 누적 차이는 계정 잠금이 필요하고 지연 정산의 영향을 받아 보통 값을 얻지 못하므로 세션 상세를 권장합니다. 기본값은 TF_LINGXI_CREDIT_METER를 따릅니다.",
     "creditMeter_default": "측정 안 함",
     "creditMeter_delta": "누적 차이",
     "creditMeter_detail": "세션 상세",

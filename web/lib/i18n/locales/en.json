@@ -2712,6 +2712,7 @@
     "configSoloMaxTokensHint": "Output budget (tokens, thinking included) when the client sends no max_tokens on the SOLO channel.",
     "configCreditMeter": "Charged-credit mode",
     "configCreditMeterHint": "Record how many credits each request actually costs. Delta locks the account; session detail is concurrency-safe. \"Off\" overrides the env var; the default follows TF_TRAE_CREDIT_METER.",
+    "configCreditMeterHintLingxi": "Lingxi only settles a run when the gateway reports its lifecycle, so any mode here incurs real charges (\"Off\" keeps today's behaviour: nothing reported, nothing charged). Session detail opens a fresh session per request and reads that session's expense rows, which is concurrency-safe; the ledger settles minutes later, so the request is not blocked and the credit is backfilled by a background check, staying blank if it never appears. Delta locks the account and is also affected by delayed settlement, so it usually yields nothing; prefer session detail. The default follows TF_LINGXI_CREDIT_METER.",
     "creditMeter_default": "Off",
     "creditMeter_delta": "Cumulative delta",
     "creditMeter_detail": "Session detail",

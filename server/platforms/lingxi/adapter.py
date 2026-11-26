@@ -29,14 +29,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable
 
 from ... import config, db
+from ...services import requestctx
 from ...services.session_affinity import SessionAffinity, affinity_key
 from .. import settings as runtime_settings
 from ..base import ChatContext, PlatformAdapter, PlatformChat, PlatformError
 from ..limiter import AccountLimiter
-from . import catalog, chat as chatproto, client, constants as C, store
+from . import catalog, chat as chatproto, client, constants as C, settle, store
 
 logger = logging.getLogger('workbuddy.platforms.lingxi')
 
@@ -47,8 +49,38 @@ SETTING_MODELS_ATTEMPT = 'platforms.lingxi.models_attempt'
 # 「维持旧行为：直接上抛、不换号不冻结」，由设置项开启。
 QUOTA_COOLDOWN_SECONDS = 3600
 
+# 独立任务集合：取消之后补发的 `completed` 上报挂在这里，避免被 GC 提前回收
+# （fire-and-forget 的任务必须自己保活，见 asyncio 文档）。
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
 
 # ── 小工具 ──────────────────────────────────────────────────
+@dataclass
+class _CreditMeter:
+    """一次请求的计量凭据（`credit_meter` 为 '' 时不会创建）。
+
+    `mode` 决定收尾怎么取值：
+      · `delta`  —— 请求前记下账户累计消耗，结算后再查一次求增量；
+      · `detail` —— 每轮独立会话，结算后按 `session_id` 查上游流水取本次消耗。
+    两种模式都会让请求走「新建 run + 上报生命周期」的计费路径。
+
+    灵犀的账是**延迟归账**（几分钟后才出现在流水里），所以查询不在请求收尾
+    里做，而是交给 `settle` 的后台探测（见该模块说明）。
+    """
+
+    mode: str
+    token: object | None = None
+    before: float | None = None
+    session_id: str = ''
+    run_id: str = ''
+    group_id: str = ''
+    uid: str = ''
+    request_id: str = ''
+    # delta 的窗口序号：同一账号有更新的计量请求进来时，旧的探测主动放弃，
+    # 避免把后一笔消耗重复记到前一笔头上。
+    seq: int = 0
+
+
 def _pick(raw: dict, *keys: str) -> str:
     for key in keys:
         value = raw.get(key)
@@ -111,6 +143,12 @@ class LingxiAdapter(PlatformAdapter):
         self._swrr: dict[str, float] = {}
         self._affinity = SessionAffinity()
         self._model_meta: dict[str, dict] = {}
+        # 正在「前后夹一次累计消耗」的账号（uid -> token）。delta 口径并发在途
+        # 时无法归属，后来的请求照常计费、只是不记账。
+        self._metering: dict[str, object] = {}
+        # delta 的窗口序号（uid -> int）：新请求进来就递增，旧的延迟探测据此
+        # 判断「这段窗口已经被覆盖」，主动放弃而不是把别人的消耗算进来。
+        self._meter_seq: dict[str, int] = {}
 
     # ── 内部工具 ──────────────────────────────────────────
     def _require(self, account_id: object) -> dict:
@@ -676,6 +714,164 @@ class LingxiAdapter(PlatformAdapter):
         raise last_error or PlatformError('WPS 灵犀账号均不可用', status=503,
                                           code='no_account')
 
+    # ── 每请求实扣积分（面板 credit_meter / TF_LINGXI_CREDIT_METER）──
+    async def _meter_start(self, account: dict) -> _CreditMeter | None:
+        """请求前准备计量凭据；`credit_meter` 为空时返回 None（旧行为）。
+
+        `detail` 请求前零上游开销；`delta` 要查一次账户累计消耗当基线，并抢
+        一把账号级锁——并发在途时分不清归属，后来的请求只计费不记账。
+        基线拿不到就不占锁：这段窗口本来就记不了账，不必挡住别人。
+
+        每次计量请求都会把账号的 `seq` 世代顶上去：在途窗口的探针发现世代
+        变了就**主动放弃**（返回 False）。宁可两笔都不记，也不把两笔的消耗
+        混成一笔记到别人头上。
+        """
+        mode = runtime_settings.credit_meter(self.name)
+        if not mode:
+            return None
+        uid = str(account.get('uid') or '')
+        meter = _CreditMeter(mode=str(mode), uid=uid,
+                             request_id=requestctx.current())
+        if meter.mode != 'delta':
+            return meter
+        seq = self._meter_seq.get(uid, 0) + 1
+        self._meter_seq[uid] = seq
+        meter.seq = seq
+        if uid and uid in self._metering:
+            # 同一账号还有在途窗口：这次只计费、不计账（分不清归属）。
+            return meter
+        token = object()
+        if uid:
+            self._metering[uid] = token
+            meter.token = token
+        try:
+            meter.before = await client.account_consumed(
+                account, proxy=self._proxy_for(account),
+                timeout=runtime_settings.credits_timeout(self.name))
+        except PlatformError:
+            meter.before = None
+        if meter.before is None:
+            self._release_meter(uid, token)
+            meter.token = None
+        return meter
+
+    def _release_meter(self, uid: str, token: object | None) -> None:
+        """只释放自己那把锁（并发下 A 的收尾不能删掉 B 的锁）。"""
+        if uid and token is not None and self._metering.get(uid) is token:
+            self._metering.pop(uid, None)
+
+    def _proxy_or_none(self, account: dict) -> str | None:
+        try:
+            return self._proxy_for(account)
+        except PlatformError:
+            return None
+
+    def _detail_probe(self, account: dict, meter: _CreditMeter) -> settle.Probe:
+        """延迟探测：按本次专用会话查上游流水。"""
+        proxy = self._proxy_or_none(account)
+        timeout = runtime_settings.credits_timeout(self.name)
+
+        async def probe() -> float | None:
+            rows = await client.session_expenses(
+                account, meter.session_id, proxy=proxy, timeout=timeout)
+            return settle.credit_of(rows, meter.group_id, meter.session_id)
+
+        return probe
+
+    def _delta_probe(self, account: dict, meter: _CreditMeter) -> settle.Probe:
+        """延迟探测：账户累计消耗的前后差值。
+
+        只在「这段窗口没有被更新的计量请求覆盖」时才算：`seq` 变了说明同一
+        账号又发了新请求，继续相减会把别人的消耗记到这笔头上（宁少勿重）。
+        """
+        proxy = self._proxy_or_none(account)
+        timeout = runtime_settings.credits_timeout(self.name)
+
+        async def probe() -> float | None | bool:
+            if self._meter_seq.get(meter.uid) != meter.seq:
+                return False
+            after = await client.account_consumed(
+                account, proxy=proxy, timeout=timeout)
+            # 查询途中也可能有新请求进来：它已经把 seq 顶掉的话，这个 after
+            # 里就混进了别人的消耗，放弃比记错好。
+            if self._meter_seq.get(meter.uid) != meter.seq:
+                return False
+            if after is None or meter.before is None or after < meter.before:
+                return None
+            delta = round(after - meter.before, 6)
+            return delta if delta > 0 else None
+
+        return probe
+
+    async def _meter_finish(self, account: dict, meter: _CreditMeter | None, *,
+                            failed: bool = False) -> None:
+        """上报 completed（结算触发点），并注册本次实付积分的延迟补记。
+
+        **必须扛得住取消**：客户端断开 / 网关收流时，请求作用域会被取消，
+        而 `completed` 恰恰是上游结算扣费的唯一触发点——丢了它这次对话就
+        白跑（上游不扣费，本端也拿不到流水）。所以这里把上报丢进一个
+        **独立任务**：它挂在事件循环上，不受调用方取消的影响。
+        """
+        if meter is None:
+            return
+        try:
+            # 先登记探针：它是纯本地动作，不能被上报失败 / 取消带跑——
+            # 探针在，这次实付积分才有补记的机会。
+            self._schedule_probe(account, meter)
+            await self._report_completed(account, meter, failed=failed)
+        except Exception:  # noqa: BLE001 —— 记账失败不能影响已经完成的对话
+            logger.debug('lingxi: 实扣积分收尾失败', exc_info=True)
+        finally:
+            self._release_meter(str(account.get('uid') or ''), meter.token)
+
+    def _schedule_probe(self, account: dict, meter: _CreditMeter) -> None:
+        """注册本次实付积分的延迟探测（上游延迟归账，不在收尾里等）。"""
+        if meter.mode == 'detail' and meter.session_id:
+            key = f'{meter.request_id}|d|{meter.session_id}'
+            settle.schedule(key, meter.request_id,
+                            self._detail_probe(account, meter))
+        elif meter.mode == 'delta' and meter.before is not None:
+            key = f'{meter.request_id}|l|{meter.seq}'
+            settle.schedule(key, meter.request_id,
+                            self._delta_probe(account, meter))
+
+    async def _report_completed(self, account: dict, meter: _CreditMeter,
+                                *, failed: bool) -> None:
+        """上报 `completed`；被取消时改用独立任务补发一次。"""
+        try:
+            await client.report_status(account, {
+                'session_id': meter.session_id,
+                'run_id': meter.run_id,
+                'group_id': meter.group_id,
+            }, 'completed', reason='failed' if failed else 'completed',
+                proxy=self._proxy_or_none(account))
+        except asyncio.CancelledError:
+            # 客户端断开会取消这里：不补发就没有结算、这次对话白跑。
+            # 独立任务不继承调用方的取消信号，能把这条上报送出去。
+            task = asyncio.ensure_future(self._report_completed_late(
+                account, meter, failed=failed))
+            _BACKGROUND_TASKS.add(task)
+            task.add_done_callback(_BACKGROUND_TASKS.discard)
+            raise
+
+    async def _report_completed_late(self, account: dict, meter: _CreditMeter,
+                                     *, failed: bool) -> None:
+        """取消之后补发的 `completed`（独立任务，不受原请求取消影响）。"""
+        try:
+            await client.report_status(account, {
+                'session_id': meter.session_id,
+                'run_id': meter.run_id,
+                'group_id': meter.group_id,
+            }, 'completed', reason='failed' if failed else 'completed',
+                proxy=self._proxy_or_none(account))
+        except Exception:  # noqa: BLE001 —— 补发失败只影响这一次的结算
+            logger.debug('lingxi: 实扣积分补发 completed 失败', exc_info=True)
+
+    def _meter_abort(self, account: dict, meter: _CreditMeter | None) -> None:
+        """请求在拿到流之前就失败时，释放计量锁（run 由 open_chat 收尾）。"""
+        if meter is not None:
+            self._release_meter(str(account.get('uid') or ''), meter.token)
+
     async def _chat_once(self, account: dict, model: str, body: dict,
                          wrapper_model: str, *, proxy: str | None,
                          runtime: dict) -> PlatformChat:
@@ -695,9 +891,20 @@ class LingxiAdapter(PlatformAdapter):
             logger.info('lingxi: 丢弃 %s 段非文本 content（上游只接受字符串）',
                         dropped)
 
-        response = await client.open_chat(
-            account, payload, model, proxy=proxy,
-            idle_timeout=runtime['idle_timeout'])
+        meter = await self._meter_start(account)
+        meter_ids: dict | None = (
+            None if meter is None else {'mode': meter.mode})
+        try:
+            response = await client.open_chat(
+                account, payload, model, proxy=proxy,
+                idle_timeout=runtime['idle_timeout'], meter=meter_ids)
+        except BaseException:
+            self._meter_abort(account, meter)
+            raise
+        if meter is not None and meter_ids is not None:
+            meter.session_id = str(meter_ids.get('session_id') or '')
+            meter.run_id = str(meter_ids.get('run_id') or '')
+            meter.group_id = str(meter_ids.get('group_id') or '')
         translator = chatproto.StreamTranslator(wrapper_model)
         usage = translator.usage
         closed = False
@@ -714,27 +921,30 @@ class LingxiAdapter(PlatformAdapter):
 
         # ── 非流式：把整条 SSE 读完再聚合 ──
         if not (isinstance(body, dict) and body.get('stream')):
+            ok = False
             try:
                 async for frame in client.iter_frames(response):
                     translator.feed(frame)
+                if not translator.finished:
+                    raise PlatformError(
+                        '灵犀上游流在完成事件之前结束（响应被截断）', status=502,
+                        code='truncated_stream')
+                if not translator.text.strip() and not translator.reasoning \
+                        and not translator.has_tool_calls:
+                    raise PlatformError('灵犀没有返回内容', status=502,
+                                        code='empty_response')
+                completion = translator.completion()
+                ok = True
+                return PlatformChat(payload=completion, usage=usage,
+                                    model=wrapper_model, account_hint=uid,
+                                    realm=store.REALM)
             except chatproto.StreamError as exc:
                 raise PlatformError(exc.message, status=400
                                     if exc.code == 'audit_blocked' else 502,
                                     code=exc.code) from exc
             finally:
                 await _close()
-            if not translator.finished:
-                raise PlatformError(
-                    '灵犀上游流在完成事件之前结束（响应被截断）', status=502,
-                    code='truncated_stream')
-            if not translator.text.strip() and not translator.reasoning \
-                    and not translator.has_tool_calls:
-                raise PlatformError('灵犀没有返回内容', status=502,
-                                    code='empty_response')
-            completion = translator.completion()
-            return PlatformChat(payload=completion, usage=usage,
-                                model=wrapper_model, account_hint=uid,
-                                realm=store.REALM)
+                await self._meter_finish(account, meter, failed=not ok)
 
         # ── 流式：上游帧 → OpenAI chunk ──
         started = time.monotonic()
@@ -775,6 +985,8 @@ class LingxiAdapter(PlatformAdapter):
                 failure = exc
             finally:
                 await _close()
+                await self._meter_finish(account, meter,
+                                         failed=failure is not None)
             # 错误在收尾之后继续抛：`platforms/sse.openai_sse` 会补一帧 error
             # 并让网关记 502；只设 `chat.error` 不抛，客户端会看到一条正常结束
             # 的空流，日志里也还是 200。

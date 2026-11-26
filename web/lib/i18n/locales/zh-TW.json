@@ -2685,6 +2685,7 @@
     "configSoloMaxTokensHint": "SOLO 通道用戶端未傳 max_tokens 時的輸出預算（token，含思考）。",
     "configCreditMeter": "實扣積分模式",
     "configCreditMeterHint": "按請求記錄實際扣了多少積分：累計差值要搶帳號鎖，會話明細並行安全。「不計量」會覆蓋環境變數並關閉；預設跟隨 TF_TRAE_CREDIT_METER。",
+    "configCreditMeterHintLingxi": "靈犀只有上報 run 生命週期才會被上游結算，所以任一檔都會產生真實扣費（「不計量」= 維持現狀，不上報也不扣費）。會話明細每輪獨立會話、按 session 查上游流水，並行安全；流水延遲入帳（幾分鐘）不會阻塞請求，後台查到後補記，補不到則該次留空。累計差值要搶帳號鎖且同樣受延遲入帳影響，通常拿不到值，優先使用會話明細。預設跟隨 TF_LINGXI_CREDIT_METER。",
     "creditMeter_default": "不計量",
     "creditMeter_delta": "累計差值",
     "creditMeter_detail": "會話明細",

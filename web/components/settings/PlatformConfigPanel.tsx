@@ -637,7 +637,7 @@ export function PlatformConfigPanel({
         </section>
       )}
 
-      {/* ── Trae：SOLO 输出预算与实扣积分口径 ── */}
+      {/* ── Trae / 灵犀：SOLO 输出预算与实扣积分口径 ── */}
       {(caps?.solo_max_tokens || caps?.credit_meter) && (
         <section className="rounded-[20px] bg-muted p-4">
           <div className="mb-3 flex items-center gap-2">
@@ -650,7 +650,11 @@ export function PlatformConfigPanel({
             {caps?.credit_meter && enumSelect(
               'credit_meter',
               t('platforms.configCreditMeter'),
-              t('platforms.configCreditMeterHint'),
+              // 灵犀的任一档都会触发上游结算（见 config.LINGXI_CREDIT_METER），
+              // 说明必须点明「会产生真实扣费」，不能照抄 Trae 的文案。
+              platform === 'lingxi'
+                ? t('platforms.configCreditMeterHintLingxi')
+                : t('platforms.configCreditMeterHint'),
               (choice) => t(`platforms.creditMeter_${choice || 'default'}`))}
           </div>
         </section>

@@ -28,6 +28,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
+from urllib.parse import quote
 
 import httpx
 
@@ -37,8 +38,9 @@ from . import constants as C
 from . import store
 
 __all__ = [
-    'probe', 'list_plans', 'balance', 'tasks', 'claim', 'open_chat',
-    'iter_frames', 'parse_balance', 'parse_tasks', 'claim_outcome',
+    'probe', 'list_plans', 'balance', 'account_consumed', 'tasks', 'claim',
+    'open_chat', 'iter_frames', 'parse_balance', 'parse_expenses',
+    'session_expenses', 'report_status', 'parse_tasks', 'claim_outcome',
     'classify', 'is_audit', 'beijing_date', 'normalize_user_cookie',
     'forget_run',
 ]
@@ -352,6 +354,19 @@ def _finite(value: object) -> float | None:
     return number
 
 
+def _signed(value: object) -> float | None:
+    """带符号的有限数（流水金额用；`_finite` 会把消耗的负数当成坏值丢掉）。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float('inf'), float('-inf')):
+        return None
+    return number
+
+
 def _parse_upstream_time(value: object) -> int | None:
     """上游时间串 → epoch 毫秒。
 
@@ -473,6 +488,107 @@ async def balance(account: dict, *, proxy: str | None = None,
         raise PlatformError('取不到灵犀余额', status=502,
                             code='credits_unavailable', payload=payload)
     return summary
+
+
+async def account_consumed(account: dict, *, proxy: str | None = None,
+                           timeout: float = C.WEB_TIMEOUT) -> float | None:
+    """账户累计消耗（各批次 `consumed` 之和；读不到返回 None）。
+
+    `delta` 口径的基线：只累加「已消耗」，新的发放 / 签到不会让读数跳变。
+    """
+    payload, _ = await _request_on_bases(
+        account, 'GET', C.BALANCE_PATH, proxy=proxy, timeout=timeout)
+    summary = parse_balance(payload)
+    if summary is None:
+        return None
+    used = [float(batch['consumed']) for batch in summary.get('batches') or []
+            if isinstance(batch.get('consumed'), (int, float))
+            and not isinstance(batch.get('consumed'), bool)]
+    if used:
+        return sum(used)
+    value = summary.get('consumed')
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def parse_expenses(payload: object) -> list[dict]:
+    """`/credits/transaction/expense` → 归一流水；认不出返回空数组（永不抛）。"""
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get('data')
+    if not isinstance(data, dict):
+        return []
+    raw_rows = data.get('list')
+    if not isinstance(raw_rows, list):
+        return []
+    out: list[dict] = []
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        amount = _signed(raw.get('amount'))
+        if amount is None:
+            continue
+        # 上游的获得类 `type` 是 `topup`（不是 income），消耗类才是 expense；
+        # 统一按**金额符号**归一，调用方不必记这套约定。
+        kind = 'expense' if amount < 0 else 'income'
+        out.append({
+            'id': str(raw.get('id') or ''),
+            'type': kind,
+            'amount': amount,
+            'group_id': str(raw.get('group_id') or ''),
+            'session_id': str(raw.get('session_id') or ''),
+            'title': str(raw.get('task_name') or raw.get('remark') or ''),
+            'source': str(raw.get('source') or ''),
+            'time': str(raw.get('time') or raw.get('create_time') or ''),
+        })
+    return out
+
+
+async def session_expenses(account: dict, session_id: str, *,
+                           proxy: str | None = None,
+                           timeout: float = C.WEB_TIMEOUT) -> list[dict]:
+    """某个会话的消耗明细（`detail` 口径）。失败返回空数组，不打扰主链路。"""
+    sid = str(session_id or '').strip()
+    if not sid:
+        return []
+    query = f'session_id={quote(sid, safe="")}&cursor=0&limit=50'
+    try:
+        payload, _ = await _request_on_bases(
+            account, 'GET', f'{C.EXPENSE_PATH}?{query}', proxy=proxy,
+            timeout=timeout)
+    except PlatformError:
+        return []
+    return parse_expenses(payload)
+
+
+async def report_status(account: dict, run: dict, status: str, *,
+                        reason: str = '', proxy: str | None = None,
+                        timeout: float = 8) -> bool:
+    """上报 run 生命周期。`running → completed` 是上游结算 / 扣费的唯一触发点。
+
+    失败返回 False（调用方只记账，不该因为上报失败把一次正常对话判错）。
+    """
+    sid = str(run.get('session_id') or '').strip()
+    gid = str(run.get('group_id') or run.get('run_id') or '').strip()
+    if not sid or not gid:
+        return False
+    body: dict[str, Any] = {
+        'group_id': gid,
+        'status': status,
+        'run_token': gid,
+    }
+    if status == 'running':
+        body['lease_seconds'] = 90
+    elif reason:
+        body['terminal_reason'] = reason
+    path = C.EXECUTION_STATUS_PATH.format(session_id=quote(sid, safe=''))
+    try:
+        await _request_on_bases(account, 'PUT', path, body=body, proxy=proxy,
+                                timeout=timeout)
+    except PlatformError:
+        return False
+    return True
 
 
 _TASK_TITLES = {
@@ -673,10 +789,13 @@ async def _create_run(account: dict, base: str, session_id: str, model: str,
     }
 
 
-# run 缓存：同一账号 + 设备 + 模型在 TTL 内复用同一次「会话 + run」。
+# run 缓存（不计量模式）：同一账号 + 设备 + 模型在 TTL 内复用同一次「会话 + run」。
 # 每轮都重建会话会让上游不断新开 agent 会话（旧会话留在服务端），也丢掉
 # prompt cache 亲和；参考实现同样缓存 1 小时（`RUN_TTL_MS`）。
 _runs: dict[str, dict] = {}
+# 会话缓存（计量模式）：`delta` 复用会话、但仍每轮新建 run（run 才是计费单元）；
+# `detail` 每轮新建会话，保证 `transaction/expense` 只返回本次请求的流水。
+_sessions: dict[str, tuple[float, str]] = {}
 
 # run 失效的文案特征（只在 404 时参与判定）：重建一次再试。
 _STALE_RUN = re.compile(r'run|会话|session|过期|expired|not\s*found|不存在',
@@ -689,13 +808,29 @@ def _run_key(account: dict, model: str) -> str:
 
 
 def forget_run(account: dict, model: str | None = None) -> None:
-    """丢掉某个账号（某个模型）的 run 缓存；导入新 Cookie / 换设备时用。"""
+    """丢掉某个账号（某个模型）的 run / 会话缓存；导入新 Cookie / 换设备时用。"""
     if model is not None:
-        _runs.pop(_run_key(account, C.upstream_model_id(model)), None)
+        key = _run_key(account, C.upstream_model_id(model))
+        _runs.pop(key, None)
+        _sessions.pop(key, None)
         return
     prefix = f'{str(account.get("uid") or "")}|'
-    for key in [k for k in _runs if k.startswith(prefix)]:
-        _runs.pop(key, None)
+    for table in (_runs, _sessions):
+        for key in [k for k in table if k.startswith(prefix)]:
+            table.pop(key, None)
+
+
+def _cached_session(account: dict, model: str) -> str:
+    """TTL 内的会话号（先看旧 run 缓存，再看计量模式的会话缓存）。"""
+    key = _run_key(account, model)
+    hit = _runs.get(key)
+    if isinstance(hit, dict) and time.time() - float(hit.get('at') or 0) \
+            < C.RUN_TTL_SECONDS:
+        return str(hit.get('session_id') or '')
+    cached = _sessions.get(key)
+    if cached and time.time() - cached[0] < C.RUN_TTL_SECONDS:
+        return cached[1]
+    return ''
 
 
 async def _ensure_run(account: dict, model: str, title: str, *,
@@ -728,6 +863,44 @@ async def _ensure_run(account: dict, model: str, title: str, *,
             'at': time.time(),
         }
         _runs[key] = run
+        return run
+    raise last or PlatformError('无法建立灵犀会话', status=502,
+                                code='upstream_error')
+
+
+async def _meter_run(account: dict, model: str, title: str, *,
+                     proxy: str | None, timeout: float,
+                     reuse_session: bool) -> dict:
+    """计量模式：每轮新建 run（计费单元），会话按口径决定是否复用。
+
+    `reuse_session=True`（delta）复用 TTL 内的会话，只新建 run；
+    `False`（detail）连会话一起新建，`session_id` 即这次请求的归属凭据。
+    """
+    key = _run_key(account, model)
+    session_id = _cached_session(account, model) if reuse_session else ''
+    last: PlatformError | None = None
+    for base in _bases(account):
+        try:
+            if not session_id:
+                session_id = await _create_session(
+                    account, base, proxy=proxy, timeout=timeout)
+            created = await _create_run(
+                account, base, session_id, model, title,
+                proxy=proxy, timeout=timeout)
+        except PlatformError as exc:
+            last = exc
+            session_id = ''  # 换基址后不能拿上一个基址创建的会话
+            if exc.status == 401:
+                raise
+            continue
+        run = {
+            'session_id': session_id,
+            'run_id': created['run_id'],
+            'group_id': created['group_id'],
+            'base': base,
+            'at': time.time(),
+        }
+        _sessions[key] = (run['at'], session_id)
         return run
     raise last or PlatformError('无法建立灵犀会话', status=502,
                                 code='upstream_error')
@@ -770,12 +943,17 @@ async def _send_chat(account: dict, run: dict, body: dict, *,
 async def open_chat(account: dict, body: dict, model: str, *,
                     proxy: str | None = None,
                     idle_timeout: float = C.CHAT_IDLE_TIMEOUT,
-                    connect_timeout: float = 15.0) -> httpx.Response:
+                    connect_timeout: float = 15.0,
+                    meter: dict | None = None) -> httpx.Response:
     """三步握手后发起对话，返回**未读取**的上游响应（调用方负责关闭）。
 
     正常情况下上游回 `text/event-stream`；Cookie 失效 / 参数错误时可能回
     HTTP 200 + JSON（错误体）。非 SSE 响应在这里一次性读完并按错误归类，
     避免把一段 JSON 当 SSE 解析。
+
+    `meter` 非空时进入「每请求计费」：每轮新建 run（`detail` 还会新建会话），
+    并在发对话前上报 `running`；会话 / run 标识回填进 `meter`，供收尾查流水。
+    `meter` 为 None 时维持旧行为（run 缓存 1 小时、不上报生命周期、不扣费）。
 
     run 失效（404 且文案指向会话 / run 过期）时**丢缓存重试一次**：这是
     参考实现的行为，否则一次服务端回收会话就得等 TTL 到期才能再对话。
@@ -788,17 +966,31 @@ async def open_chat(account: dict, body: dict, model: str, *,
 
     last: PlatformError | None = None
     for attempt in range(2):
-        run = await _ensure_run(account, model, title, proxy=proxy,
-                                timeout=C.WEB_TIMEOUT)
+        if meter is None:
+            run = await _ensure_run(account, model, title, proxy=proxy,
+                                    timeout=C.WEB_TIMEOUT)
+        else:
+            run = await _meter_run(
+                account, model, title, proxy=proxy, timeout=C.WEB_TIMEOUT,
+                reuse_session=str(meter.get('mode') or '') == 'delta')
+            meter.update({key: run[key] for key in
+                          ('session_id', 'run_id', 'group_id', 'base')})
+            # running 必须在对话前上报：completed 是结算触发点，缺了 running
+            # 这条 run 在上游眼里不成立。
+            await report_status(account, run, 'running', proxy=proxy)
         try:
             return await _send_chat(
                 account, run, body, proxy=proxy,
                 idle_timeout=idle_timeout, connect_timeout=connect_timeout)
         except PlatformError as exc:
             last = exc
+            if meter is not None:
+                # 这一轮没跑起来也要收尾，否则 run 会一直挂在进行中。
+                await report_status(account, run, 'completed', reason='failed',
+                                    proxy=proxy)
             stale = exc.status == 404 and bool(_STALE_RUN.search(exc.message))
             if attempt == 0 and stale:
-                _runs.pop(_run_key(account, model), None)
+                forget_run(account, model)
                 continue
             raise
     raise last or PlatformError('灵犀对话失败', status=502,

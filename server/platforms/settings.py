@@ -158,6 +158,10 @@ _ENUM_FIELDS: dict[str, tuple[str, tuple[str, ...], str]] = {
 # 默认值跟随环境变量的枚举项：name -> config 属性。未设置过时用 config 的现值，
 # 用户保存过（包括保存空串「关闭」）之后以库里的值为准。
 _ENUM_CONFIG_DEFAULT: dict[str, str] = {'credit_meter': 'TRAE_CREDIT_METER'}
+# 同名开关在不同平台对应不同的环境变量（灵犀的默认值跟随 TF_LINGXI_CREDIT_METER）。
+_ENUM_CONFIG_DEFAULT_BY_PLATFORM: dict[tuple[str, str], str] = {
+    ('lingxi', 'credit_meter'): 'LINGXI_CREDIT_METER',
+}
 
 # 每个平台真正会用到的字段。不在表里的平台（含测试里的假平台）只拿到通用两项：
 # 任何适配器都有「发请求」这一步，超时对它们都有意义；换号 / 亲和 / 回写则依赖
@@ -223,7 +227,9 @@ _NATIVE_POOL = _LOOMY - {'min_credits'}
 _DOUBAO = _NATIVE_POOL - {'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout'}
 # WPS 灵犀是原生选号 / 在线目录（`/sessions/plans`）/ 签到 / 余额，与 Loomy
 # 同一组策略；但没有「保底积分」的选号实现，也没有桌面端回写。
-_LINGXI = _NATIVE_POOL
+# `credit_meter` 是每请求实扣积分口径（见 config.LINGXI_CREDIT_METER）：灵犀
+# 必须靠网关上报 run 生命周期才会扣费，所以这个开关同时决定「是否计费」。
+_LINGXI = _NATIVE_POOL | {'credit_meter'}
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -297,10 +303,11 @@ def _read_bool(platform: str, field: str) -> bool:
     return raw if isinstance(raw, bool) else default
 
 
-def _enum_default(field: str) -> str:
+def _enum_default(platform: str, field: str) -> str:
     """枚举默认值：优先跟随环境变量（config），读坏了退回表里的静态默认。"""
     static, choices, _ = _ENUM_FIELDS[field]
-    attr = _ENUM_CONFIG_DEFAULT.get(field)
+    attr = (_ENUM_CONFIG_DEFAULT_BY_PLATFORM.get((platform, field))
+            or _ENUM_CONFIG_DEFAULT.get(field))
     if not attr:
         return static
     raw = getattr(config, attr, '')
@@ -314,7 +321,7 @@ def _enum_default(field: str) -> str:
 
 
 def _read_enum(platform: str, field: str) -> str:
-    default = _enum_default(field)
+    default = _enum_default(platform, field)
     _, choices, _ = _ENUM_FIELDS[field]
     raw = db.get_setting(_key(platform, field), default)
     return raw if isinstance(raw, str) and raw in choices else default
