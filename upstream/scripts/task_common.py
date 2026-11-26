@@ -118,24 +118,81 @@ def _headers(auth: dict) -> dict:
     return hdr
 
 
+# 429 / 5xx 的有界重试。
+#
+# 为什么工具层要管这个：一次任务执行会对同一个任务列表接口打十几二十次
+# （每个任务都要回读一次进度），批量跑账号时很容易撞上上游频控。实测一轮
+# 下来第 5 个任务之后全是 429，而当时的实现是「一次失败就抛」，于是整批
+# 账号一起中断——前面已经点亮的任务也来不及领奖。
+#
+# 这里只做最保守的「同一个请求再试一次」，不做业务判定：
+#   · 429：按 Retry-After（只认秒数）等待，拿不到就指数退避；上游要求等待
+#     超过 RETRY_MAX_WAIT 时不再干等，把 429 原样交给调用方。
+#   · 5xx / 网络错误：只重试 GET。POST 可能已经在服务端落账，重发有副作用。
+RETRY_ATTEMPTS = 3
+RETRY_MAX_WAIT = 30.0
+
+
+def _retry_after_seconds(headers):
+    """Retry-After 的秒数形态；缺失或 HTTP-date 返回 None（改用指数退避）。"""
+    try:
+        raw = headers.get("Retry-After") if headers else None
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        v = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return v if v >= 0 else None
+
+
+def _should_retry(status, method):
+    if status == 429:
+        return True
+    if status >= 500 or status < 0:
+        return method == "GET"
+    return False
+
+
+def _request_once(url, method, hdr, data, timeout):
+    """发一次请求，返回 (status, dict, retry_after_seconds)。"""
+    req = urllib.request.Request(url, data=data, headers=hdr, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode("utf-8", "replace")), None
+    except urllib.error.HTTPError as e:
+        t = e.read().decode("utf-8", "replace")
+        wait = _retry_after_seconds(e.headers)
+        try:
+            return e.code, json.loads(t), wait
+        except Exception:
+            return e.code, {"raw": t[:300]}, wait
+    except Exception as e:
+        return -1, {"err": repr(e)}, None
+
+
 def _request(auth, method, base, path, body=None, headers=None, timeout=30):
     url = path if path.startswith("http") else base + path
     hdr = _headers(auth)
     if headers:
         hdr.update(headers)
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, headers=hdr, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as e:
-        t = e.read().decode("utf-8", "replace")
-        try:
-            return e.code, json.loads(t)
-        except Exception:
-            return e.code, {"raw": t[:300]}
-    except Exception as e:
-        return -1, {"err": repr(e)}
+    last = (-1, {"err": "not attempted"})
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        st, r, wait = _request_once(url, method, hdr, data, timeout)
+        last = (st, r)
+        if attempt >= RETRY_ATTEMPTS or not _should_retry(st, method):
+            return last
+        if wait is None:
+            wait = min(2.0 ** attempt, RETRY_MAX_WAIT)
+        if wait > RETRY_MAX_WAIT:
+            # 上游要求更长冷却：不在脚本里干等（面板会按空闲判卡死），
+            # 把 429 交回调用方，由它决定「本轮跳过、下次再来」。
+            return last
+        time.sleep(wait)
+    return last
 
 
 def do_get(auth, base, path, headers=None) -> tuple:

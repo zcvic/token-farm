@@ -168,3 +168,60 @@
 #      未取：`88753423` 是版本号与发布说明本身。
 #      锚点提交：88753423e41c25b82afea22f271f265f06da2ad8（v1.9.14）
 #      上一次基线：285d98be756e3f20a51a2a35b4ea7a575e107b1c（v1.9.13）
+
+# ---- 2026-11 第五批：1.9.14 (88753423) → 1.10.1 (3cc8617e88)，8 个代码提交
+#      （另有 16445268 只改 docs、ec822b3b / 3cc8617e 是版本发布）。
+#      整目录重新 vendor（变动的协议文件：qoder_anthropic.py、qoder_anthropic_web.py、
+#      qoder_catalog.py、qoder_catalog_intl.json、qoder_external_web.py、
+#      qoder_proxy.py、qoder_settings.py、qoder_webtools.py；无新增模块，MODULES 与
+#      DATA_FILES 不变）。_vendor/README.md 与 __init__.py 的版本戳已由脚本更新；
+#      副本与上游逐字节一致（compare 脚本核对），只有包内相对导入与账号权重补丁。
+#      已取：
+#        · cf7e2cdb1b 抓取（fetch）后端可独立配置：新增 settings 的
+#          web_fetch_backend（inherit|local|qoder|external，默认 inherit = 跟随搜索
+#          后端）与 web_fetch_external 档案；qoder_external_web 增加 FETCH_DEFAULTS /
+#          normalize_fetch / endpoint_origin；qoder_webtools 让搜索与抓取各自解析
+#          后端。endpoint 变化且未显式给 api_key 时清空旧 Key（避免把 A 站的 Key
+#          发到 B 站）；QD_WEB_TOOLS / QD_WEB_TOOLS_BACKEND 环境覆盖生效时不再
+#          把该值写进 settings.json。
+#        · f106a697d2 + 732fb0db31 Anthropic 入口按请求决定 thinking：客户端显式发
+#          thinking.enabled/adaptive、budget_tokens 或 output_config.effort 时输出
+#          空签名 thinking block（Key / 面板 / QD_ANTHROPIC_THINKING 的显式 off 仍
+#          优先）；流式与非流式共用同一决策。thinking block 固定在 text 之前；
+#          stream_anthropic_events 重写块生命周期（thinking 先开后关、并行工具块
+#          不重叠、工具参数缺名先缓冲、坏 JSON 不编造参数、SEPC 帧索引稳定）。
+#          同时 workload 会为托管工具段选择同一 thinking 决策。
+#        · 71b9f40f0c Anthropic usage 补 output_tokens_details.thinking_tokens
+#          （Claude Code 读这个键；原来只发 reasoning_tokens，客户端显示 0），
+#          两个名字都保留以兼容既有调用方。
+#        · d91956c340 显式模型解析拒绝不再重试/换号：上游返回
+#          provider_error + "Cannot find model"（400/404）时归请求级故障
+#          （_is_upstream_model_rejection），不冷却账号、不轮换、不自动重试；日志
+#          只记状态/区域/消息数/工具数/图片数，不写请求正文；SSE 内嵌同形态错误
+#          也识别并按同一路径收尾。
+#        · 631909c6e0 出站 web 设置与续轮快照守卫：settings.json 读失败/非对象时
+#          拒绝覆盖（_load_for_update），endpoint 变更清 Key（搜索与抓取各自）；
+#          续轮（pending hosted tools）只比较本次实际还会用到的工具配置
+#          （operational_config + relevant_names），不再因为无关后端变化而 400。
+#        · ef8e53e024 模型目录新增限时活动模型 HungerG（INTL 区、free、四档思考、
+#          1M/400K/200K 上下文），并加 CATALOG_SUPPLEMENTS 到期时间（epoch 秒）：
+#          活动期内即使官方动态目录没列出也保留可见，到期后自动回到动态口径；
+#          队列探针文案补充说明。qoder_catalog_intl.json 快照同步该条目。
+#      未取（副本里没有，也不需要）：
+#        · dashboard.html / i18n/en.json / docs/*.md / tests/_test_*：面板与发布链
+#          是自己的。上游这一批把 fetch 后端配置做进了 dashboard 表单，token-farm
+#          没有托管工具设置界面，配置入口仍是平台设置的环境变量或
+#          accounts/settings.json（与第三批一致）。
+#        · ec822b3b1e / 3cc8617e88：版本号与发布说明本身。
+#        · 16445268d4：只改 docs/clients.md 与 docs/models.md 的说明，无可落地代码。
+#      本地适配：
+#        · 账号权重补丁重新应用（qoder_accounts.py 的 WEIGHT_MIN/WEIGHT_MAX、
+#          normalize_weight/selection_weight、Account.weight、_weighted_pick、
+#          _rotate_pick/_rotate_unweighted、set_weight；qoder_proxy.py 的
+#          /accounts/weight，路由锚点从 1.9.14 的 /accounts/enable 段迁到 1.10.1 的
+#          /accounts/set 段之后）。--check 通过，test_qoder_vendor 13 项通过；
+#          qoder 相关测试 132 项通过。
+#        · embedded.py 无需改动：上游 main() 的初始化步骤没有新增模块级状态；
+#          SYSTEM_PROMPT 默认仍是 None，embedded.py 显式赋值与之等价。
+#      锚点提交：3cc8617e88efd57c76a20a9ca20fb6f224daa913（v1.10.1）
+#      上一次基线：88753423e41c25b82afea22f271f265f06da2ad8（v1.9.14）

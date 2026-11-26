@@ -63,6 +63,12 @@ class DefaultsTest(_DbCase):
         self.assertTrue(values['desktop_sync'])
         self.assertEqual(values['runtime_limits']['request_timeout'],
                          {'min': 10, 'max': 900})
+        # DuMate 的对话消耗入账默认关闭（旧行为：只在弹窗展示），回补窗口 7 天。
+        dumate = runtime_settings.load('dumate')
+        self.assertFalse(dumate['usage_ledger'])
+        self.assertEqual(dumate['usage_sync_days'], 7)
+        self.assertEqual(dumate['runtime_limits']['usage_sync_days'],
+                         {'min': 1, 'max': 90})
 
     def test_trae_cache_and_cooldown_defaults_match_the_old_constants(self) -> None:
         """缓存 TTL / 退避 / 积分查询的默认值就是原先 adapter.py 的常量。"""
@@ -107,6 +113,13 @@ class DefaultsTest(_DbCase):
         # 拉取超时」只会是保存成功但不生效的假开关。MiniMax 是真在线拉取。
         self.assertFalse(runtime_settings.capabilities('dumate')['catalog_timeout'])
         self.assertTrue(runtime_settings.capabilities('minimax')['catalog_timeout'])
+        # 对话消耗入账是 DuMate 专属：其他平台没有 `/points/records/usage` 口径。
+        dumate = runtime_settings.capabilities('dumate')
+        self.assertTrue(dumate['usage_ledger'])
+        self.assertTrue(dumate['usage_sync_days'])
+        for name in ('trae', 'qoder', 'loomy', 'minimax', 'discovery', 'kilo'):
+            self.assertFalse(runtime_settings.capabilities(name)['usage_ledger'])
+            self.assertFalse(runtime_settings.capabilities(name)['usage_sync_days'])
         # Discovery / Kilo / Cline 共用 `_NATIVE_POOL`：与 Loomy 同一组选号 /
         # 缓存 / 冷却，但都**没有**保底积分（余额口径不是积分），目录则都是
         # 真在线拉取（Discovery 的目录拉取同时是额度探针），所以留 timeout。
@@ -200,6 +213,18 @@ class SaveTest(_DbCase):
                          False)
         self.assertEqual(runtime_settings.credit_meter('trae'), 'detail')
         self.assertEqual(runtime_settings.cooldown_429('trae'), 120)
+
+    def test_dumate_usage_ledger_round_trips(self) -> None:
+        runtime_settings.save('dumate', {'usage_ledger': True,
+                                         'usage_sync_days': 30})
+        self.assertTrue(runtime_settings.usage_ledger('dumate'))
+        self.assertEqual(runtime_settings.usage_sync_days('dumate'), 30)
+        self.assertFalse(runtime_settings.usage_ledger('loomy'))
+        for bad in ({'usage_sync_days': 0}, {'usage_sync_days': 91},
+                    {'usage_ledger': 'yes'}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    runtime_settings.save('dumate', bad)
 
     def test_panel_override_wins_over_environment(self) -> None:
         """显式保存过的值优先；没保存的字段仍跟随 TF_TRAE_*。"""

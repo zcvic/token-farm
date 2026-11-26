@@ -33,6 +33,8 @@ class ClassifyTest(unittest.TestCase):
             ('query 1/5 -> 未 completed，only_claim 跳过', 'pending'),
             ('query locked（解锁 2026-09-25 00:00）-> 未到上线时间，跳过', 'pending'),
             ('query in_progress(3/5) -> 非夜猫窗口(23-08 CST)，skip pending', 'pending'),
+            # 任务列表这一轮取不到（限流）：没查清 ≠ 没有，仍是待办。
+            ('query 待确认（任务列表暂不可用，下次再查）', 'pending'),
             ('query 非映射任务，skip', 'skipped'),
             ('query 任务不存在', 'skipped'),
             ('query mp 口径任务不存在，skip', 'skipped'),
@@ -117,6 +119,7 @@ class SummarizeTest(unittest.TestCase):
         lines = [
             '[task_runner] u1 school 活动非进行期（in_period=false），school 段跳过',
             '[task_runner] u1 school/tasks 拉取失败: timeout',
+            '[task_runner] u1 mp/list_tasks: 列表不可用（mp list_tasks http=429），本轮不再逐条查询',
             'ERR: [task_runner] u1 query list_tasks 失败: 500',
             'WARN: 全量批量 + --yes 未限定 --only，注意 54 号批量——请确认 Hermes 决策后再跑',
             '[skip] u1 global realm 不适用 CN 任务',

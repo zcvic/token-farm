@@ -163,9 +163,11 @@ def request_retry(token, method, url, body=None, headers=None, retries=3, gap=1.
             if i < retries:
                 time.sleep(gap * i)
             continue
-        if 500 <= st < 600 and i < retries:
+        # 429 是频控：请求没被处理，重试安全（写端点也幂等）。同样按次数退避，
+        # 不在脚本里长时间干等——面板按空闲判卡死，等太久反而整轮被终止。
+        if (500 <= st < 600 or st == 429) and i < retries:
             last = TransientError(f"http {st}")
-            print(f"  [warn] 5xx={st} 重试 {i}/{retries}")
+            print(f"  [warn] http={st} 重试 {i}/{retries}")
             time.sleep(gap * i)
             continue
         return st, r

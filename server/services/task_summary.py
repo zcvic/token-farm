@@ -38,6 +38,7 @@ _RUNNER = re.compile(r'^\[task_runner\] (\S+) (\S+): (.*)$')
 _ACCOUNT_LEVEL_TAILS = (
     'school 活动非进行期',
     'school/tasks 拉取失败',
+    '列表不可用',        # `mp/list_tasks`：小程序口径任务列表整体取不到
 )
 
 # 顺序有意义：先排掉「看着像失败、其实是降级成功」的那条。
@@ -50,7 +51,9 @@ _RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # 任务在摘要素里仍显示「待处理」**（实测一轮 +1700 分，列表全标待处理）。
     # 必须排在 pending 之前：同一任务前面还有 query/accept/report 等 pending 行。
     (re.compile(r'已领|已完成|claimed|claim \d+ ok'), 'claimed'),
-    (re.compile(r'未达 target|未 completed|可点亮|可领|locked|dry-run|夜猫'
+    # `query 待确认（任务列表暂不可用…）`：任务列表这一轮没取到，既不能说「没有
+    # 此任务」（skipped）也不能说「做完了」——它仍是待办，下次再查。
+    (re.compile(r'未达 target|未 completed|可点亮|可领|locked|dry-run|夜猫|待确认'
                 r'|in_progress|无需上报|前置解锁|部分点亮|（点亮）|未变化'), 'pending'),
     # `query 任务不存在` 是「该账号没下发这条任务」，不是待办：标 skipped 才不会
     # 让人以为还能做。mp 口径那句自带 skip，本来就走这里。

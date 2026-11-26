@@ -979,3 +979,54 @@ a9063d79b6b95c482b9037b7ca2722354120fc9d
 d221c721fc0ace6cfab3f4562ebe2a6d7344d117
 f0c427d2ce5633b20ccd5db73b1c6532441475d5
 
+
+# ---- 2026-11 第二十一批：面板仓 d221c721fc → b1233f09（6 个非 merge 提交）----
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      本批取 1 项（392f8ac7 的降级告警限流）；其余 5 项因本仓没有对应的
+#      运行时段 / 面板形态不取。本批无 upstream/ 之外的改动。
+#      已取（按本仓结构重写）：
+#        · 392f8ac7 模型目录降级 WARN 每种只报一次（issue #283）：global 域的
+#          企业端点永续 500、而 /v3/config 每次都接住时，每轮 warm model rates
+#          都重打一行 WARN，4 天 49 次，把真故障淹掉。参考仓新增
+#          degradedWarnOnce(key, format, args...)（进程内 map + mutex，同 key
+#          只打一次），两处探测的四条降级路径各给一个 key。
+#          本仓的两处等价落点：
+#            - upstream/internal/upstream/global_models.go 的 probeGlobalModels
+#              （v3 失败降级企业端点 / 企业端点失败降级 v3，两个 key：
+#              global-models/v3、global-models/enterprise）；
+#            - upstream/internal/upstream/client.go 的 FetchModels（同两条路径：
+#              fetch-models/v3、fetch-models/enterprise）。
+#          degradedWarnOnce 与两个包级变量放在 global_models.go（与参考仓一致）；
+#          企业端点持续失败那条文案补上「degraded to v3/config, catalog served
+#          normally」，第一次看到的人知道功能没坏。反向代价与参考仓相同：恢复后
+#          再失败不会重新告警，得等重启；逐次可见性靠每轮都写的 warm model rates
+#          那行。新增 upstream/internal/upstream/degraded_warn_test.go（同 key 只
+#          报一次 / 不同 key 各报一次）。`go build ./...`、`go vet
+#          ./internal/upstream/`、`go test ./internal/upstream/ -count=1` 通过。
+#      未取：
+#        · 6dc02b30 / f60c68d5 / 2e2358ca 三连（browser-complete 控制标记救援、
+#          续写提示中性化、合成续写不带网关身份）：落点集中在
+#          internal/server/{browser_complete.go,continue.go,narration.go,
+#          toolonly.go,handler.go}。本仓 upstream/internal/server/ 有 60 个 go
+#          文件但**没有**这几个：narration / toolonly / continue 这套「推理续写
+#          状态机」在本仓不存在，browser-complete 的独立控制标记也没有入口。
+#          不是「实现不同」而是整段运行时不存在，照搬会凭空多出一套没人驱动的
+#          中间层。相关教训（合成续写不要冒充上游网关身份）只适用于有该状态机
+#          的实现。
+#        · 53fbd2ecf6 面板「错误汇总可标已读」+ 账号池批量导出：前者依赖参考仓
+#          内嵌 Go 面板的日志环聚合表（internal/panel/errors.go 的 ErrStat +
+#          last_unix），本仓的日志页是按请求行直出（web/app/(main)/logs），
+#          没有「按账号 × 错误类型聚合 + 本机已读标记」这一层；后者的能力本仓
+#          已有：server/routers/accounts.py 的 GET /accounts/export 与
+#          server/routers/platforms.py 的 /{name}/accounts/export（含明文凭据、
+#          批量、审计日志 user/count/ip）；Qoder 走内置网关的 /accounts/export。
+#          导出格式与本仓导入格式对齐已由 test_account_upload.py 覆盖，不需要
+#          再抄一份参考仓的 {accounts:[...]} 形状。
+#        · b1233f090d 「每日变化」柱状图 <title> 挪进柱子自身：参考仓是手写 SVG
+#          字符串，把 <title> 挂在 <svg> 根下导致所有柱子共用第一条提示；本仓
+#          仪表盘的柱子/折线是 React + recharts（dashboard/page.tsx 的 <Bar> +
+#          <Tooltip>），悬停提示由组件按每个数据点渲染，不存在「兄弟节点 <title>
+#          被浏览器当成整图说明」这个形态。不是同一个渲染路径，无处可改。
+#      锚点提交：b1233f090d953f4eaf6adcb7e329e244e2270c54
+#      上一次基线：d221c721fc0ace6cfab3f4562ebe2a6d7344d117
+392f8ac7c47b083797037901f2d1f5110e26a0bc

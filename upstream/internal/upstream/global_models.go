@@ -213,11 +213,11 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	}
 	if v3.err != nil {
 		// /v3 失败降级：不拖累企业端点结果（任务书实现要点：降级仅企业端点 + warn）。
-		log.Printf("WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
+		degradedWarnOnce("global-models/v3", "WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
 		return enterprise.names, enterprise.infos, enterprise.efforts, enterprise.defaults, nil
 	}
 	if enterprise.err != nil {
-		log.Printf("WARN: [upstream] global models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
+		degradedWarnOnce("global-models/enterprise", "WARN: [upstream] global models: enterprise endpoint failed (degraded to v3/config, catalog served normally): %v", enterprise.err)
 		return v3.names, v3.infos, v3.efforts, v3.defaults, nil
 	}
 	// 两路皆成功：v3 为主、企业端点补缺合并。
@@ -226,6 +226,28 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	defaults = mergeEffortDefaults(v3.defaults, enterprise.defaults)
 	return names, infos, efforts, defaults, nil
 }
+
+// degradedWarnOnce 只在一路模型目录探测**首次**降级时打一行 WARN。
+//
+// 为什么需要（issue #283）：企业端点是永续 500，而 /v3/config 每次都接住，功能正常；
+// 每轮 warm model rates 都重打一行 WARN，4 天 49 次，把真故障淹掉。同状态后续静默。
+//
+// shortcut: 不区分「恢复后再失败」，进程重启前每种降级只报一次；逐次可见性靠
+// warm model rates 那行（每轮都写，ok / failed 都能看出来）。
+func degradedWarnOnce(key, format string, args ...any) {
+	degradedWarnMu.Lock()
+	defer degradedWarnMu.Unlock()
+	if degradedWarnSeen[key] {
+		return
+	}
+	degradedWarnSeen[key] = true
+	log.Printf(format, args...)
+}
+
+var (
+	degradedWarnMu   sync.Mutex
+	degradedWarnSeen = map[string]bool{}
+)
 
 // mergeGlobalCatalog 两路合并（v3 主、企业补缺）：names 按 id 去重（v3 原序在前、
 // 企业端点补充项在其原序后追加——稳定输出）；infos 同步合并（v3 条目字段权威，

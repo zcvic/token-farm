@@ -179,10 +179,27 @@ def _response_error(response: httpx.Response, text: str,
     if status in (401, 403) or code == C.CODE_INVALID_KEY:
         return PlatformError(message, status=401, code='login_expired',
                              payload=payload)
+    if code == 'model_disabled':
+        # 上游下线模型时返回 404 + error.suggested_model。原样透传 404，但把
+        # 替代模型写进文案：客户端至少知道该改什么，网关不静默改写请求模型。
+        suggested = ''
+        if isinstance(payload, dict) and isinstance(payload.get('error'), dict):
+            suggested = str(payload['error'].get('suggested_model') or '').strip()
+        if suggested:
+            message = f'{message}（上游建议改用 {suggested}；不会自动改写请求）'
+        return PlatformError(message, status=404, code='model_disabled',
+                             payload=payload)
     if code == C.CODE_QUOTA:
         return PlatformError(message, status=402, code='quota_exceeded',
                              payload=payload)
     if status == 429 or code == C.CODE_RATE:
+        lowered = message.casefold()
+        if status == 429 and ('cluster tpm' in lowered
+                              or 'cluster rate limit' in lowered):
+            # 账户级（Cluster TPM）限流：所有 Key 共享同一个上限，换号逃不掉，
+            # 冷却单个账号只会把整池轮着冻一遍。标记出来让适配器等窗口。
+            return PlatformError(message, status=429, code='cluster_rate_limited',
+                                 retry_after=_retry_after(response), payload=payload)
         return PlatformError(message, status=429, code='rate_limited',
                              retry_after=_retry_after(response), payload=payload)
     if status >= 500:

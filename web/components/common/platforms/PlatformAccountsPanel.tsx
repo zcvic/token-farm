@@ -2038,6 +2038,17 @@ export function PlatformAccountsPanel({
                       <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
                         {t('platforms.usageConsumedNote')}
                       </p>
+                      <p className={`mt-1 text-[10px] leading-4 ${
+                        usage.consumed.ledger
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-muted-foreground'
+                      }`}>
+                        {usage.consumed.ledger
+                          ? t('platforms.usageConsumedLedgerOn', {
+                            days: usage.consumed.ledger_days ?? 0,
+                          })
+                          : t('platforms.usageConsumedLedgerOff')}
+                      </p>
                     </div>
                   )}
                   {usage.session_usage === null && usage.entitlement === null

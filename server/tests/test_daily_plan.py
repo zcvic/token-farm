@@ -266,6 +266,59 @@ class RunTaskTest(unittest.TestCase):
         self.assertFalse(ok, '2 个号只成功 1 个 → 不算全部成功')
         self.assertIn('Trae 1/2', msg)
 
+    def test_platform_checkin_syncs_usage_ledger_first(self) -> None:
+        """DuMate 的对话消耗补账挂在每日签到这一轮：先补账，再签到。"""
+        from server import platforms as platforms_pkg
+        from server.routers import platforms as platforms_router
+
+        events: list[str] = []
+
+        class Fake:
+            name = 'dumate'
+            label = 'DuMate'
+            supports_checkin = True
+
+            async def sync_usage_ledger(self):
+                events.append('ledger')
+                return {'records': 3, 'errors': []}
+
+        async def fake_checkin_all(name, user=None):
+            events.append('checkin')
+            return {'total': 1, 'ok': 1, 'results': []}
+
+        with mock.patch.object(platforms_pkg, 'all_adapters', lambda: [Fake()]), \
+             mock.patch.object(platforms_router, 'checkin_all', fake_checkin_all):
+            ok, msg = asyncio.run(dailyplan.run_task('platform_checkin'))
+
+        self.assertTrue(ok)
+        self.assertEqual(events, ['ledger', 'checkin'])
+        self.assertIn('DuMate 1/1', msg)
+        # 补账条数只进日志，不混进签到汇总文案（否则其他语言里会出现中文片段）。
+        self.assertNotIn('消耗', msg)
+
+    def test_platform_checkin_survives_usage_ledger_failure(self) -> None:
+        """补账是旁路：它炸了也要照常签到。"""
+        from server import platforms as platforms_pkg
+        from server.routers import platforms as platforms_router
+
+        class Fake:
+            name = 'dumate'
+            label = 'DuMate'
+            supports_checkin = True
+
+            async def sync_usage_ledger(self):
+                raise RuntimeError('ledger boom')
+
+        async def fake_checkin_all(name, user=None):
+            return {'total': 1, 'ok': 1, 'results': []}
+
+        with mock.patch.object(platforms_pkg, 'all_adapters', lambda: [Fake()]), \
+             mock.patch.object(platforms_router, 'checkin_all', fake_checkin_all):
+            ok, msg = asyncio.run(dailyplan.run_task('platform_checkin'))
+
+        self.assertTrue(ok)
+        self.assertIn('DuMate 1/1', msg)
+
     def test_platform_checkin_without_accounts(self) -> None:
         from server import platforms as platforms_pkg
 

@@ -56,6 +56,8 @@ DEFAULT_SESSION_AFFINITY_TTL = 30 * 60
 DEFAULT_DESKTOP_SYNC = True
 # Loomy 保底积分：低于该值的账号只作最后候选。默认 5000，0 = 关闭。
 DEFAULT_MIN_CREDITS = 5000
+# DuMate 对话消耗回补窗口：入账/展示时回溯同步最近多少天。
+DEFAULT_USAGE_SYNC_DAYS = 7
 
 REQUEST_TIMEOUT_MIN, REQUEST_TIMEOUT_MAX = 10, 900
 IDLE_TIMEOUT_MIN, IDLE_TIMEOUT_MAX = 10, 600
@@ -85,6 +87,11 @@ _INT_FIELDS: dict[str, tuple[_IntDefault, int, int, str]] = {
     'session_affinity_ttl': (
         DEFAULT_SESSION_AFFINITY_TTL, SESSION_AFFINITY_TTL_MIN,
         SESSION_AFFINITY_TTL_MAX, '会话亲和时长'),
+    # ── DuMate：对话扣费入账的回补窗口 ──
+    # 打开「对话消耗入账」后，每次同步会回溯最近 N 天的会话记录。窗口越大，
+    # 首次补账越完整，但上游请求也越多；默认 7 天与用量弹窗的展示窗口一致。
+    'usage_sync_days': (
+        DEFAULT_USAGE_SYNC_DAYS, 1, 90, '消耗记录回补'),
     # ── Trae：模型目录缓存与刷新退避 ──
     # 默认值就是原先 `adapter.py` 里的那几个常量。目录刷新失败时的指数退避
     # 起点与封顶也一起放出，避免「等半小时才重试」只能改代码。
@@ -111,6 +118,9 @@ _BOOL_FIELDS: dict[str, tuple[bool, str]] = {
     'session_affinity': (DEFAULT_SESSION_AFFINITY, '会话亲和'),
     'desktop_sync': (DEFAULT_DESKTOP_SYNC, '回写桌面端'),
     'web_tools': (False, '本地 Web 工具'),
+    # DuMate 的对话扣费只在上游会话记录里，网关的 usage 没有积分字段。打开后
+    # 会把记录同步进积分收支的支出账本；默认关闭 = 维持旧行为（只在弹窗展示）。
+    'usage_ledger': (False, '对话消耗入账'),
 }
 
 # Trae 协议兼容开关：name -> (config 属性, 中文名)。
@@ -192,7 +202,8 @@ _LOOMY = frozenset({
 # 但 **没有 `catalog_timeout`**：DuMate 的模型目录读的是本机客户端写下的快照
 # （`catalog.read_desktop_models()`），本进程根本不发目录请求，放出来就是一个
 # 改了也不会生效的字段。
-_DUMATE = _LOOMY - {'min_credits', 'catalog_timeout'}
+_DUMATE = (_LOOMY - {'min_credits', 'catalog_timeout'}) \
+    | {'usage_ledger', 'usage_sync_days'}
 # MiniMax Code 同为原生选号 / 目录缓存 / 冷却，且目录是**真的**在线拉取
 # （`_live_models` 带 `catalog_timeout`），所以保留 Loomy 的整组字段。
 # 额外支持网页设备码登录（路由不按能力表过滤登录，这里只是保持与适配器声明
@@ -423,6 +434,16 @@ def max_accounts_try(platform: str) -> int:
 def min_credits(platform: str) -> int:
     """保底积分（0 = 关闭）；仅 Loomy 的选号会读。"""
     return _read_int(platform, 'min_credits')
+
+
+def usage_sync_days(platform: str) -> int:
+    """DuMate 对话消耗的回补窗口（天）。"""
+    return _read_int(platform, 'usage_sync_days')
+
+
+def usage_ledger(platform: str) -> bool:
+    """是否把 DuMate 对话消耗计入积分收支（默认关闭 = 旧行为）。"""
+    return _read_bool(platform, 'usage_ledger')
 
 
 def session_affinity(platform: str) -> bool:

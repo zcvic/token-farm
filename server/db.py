@@ -341,6 +341,31 @@ CREATE TABLE IF NOT EXISTS checkin_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_checkin_ts ON checkin_logs(ts);
 
+-- DuMate 对话扣费明细（`/points/records/usage`），给积分收支提供支出口径。
+--
+-- 为什么单独一张表：DuMate 的对话题 `usage` 只有 token、没有积分，网关算不出
+-- `usage_daily.credit`；真实扣费只在上游的会话记录里。要把它并进「积分收支」，
+-- 就必须自己保存逐条记录。上游记录通常没有稳定 id，所以用「uid + 时刻 +
+-- 金额 + 会话名 + 套餐（有上游 id 时再加上它）」算指纹去重：同一窗口反复
+-- 同步不会重复入账；上游若带记录 id，同一秒两笔同额扣费也能分开。
+--
+-- points 存**正数消耗**（上游 pointsChange 是负数，归一后不再保留符号），
+-- day 按本地时区，与 usage_daily / 签到收入同一口径。
+CREATE TABLE IF NOT EXISTS dumate_usage_records (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid         TEXT    NOT NULL,
+  ts          INTEGER NOT NULL,
+  day         TEXT    NOT NULL,
+  points      REAL    NOT NULL,
+  conversation TEXT   NOT NULL DEFAULT '',
+  package_id  TEXT    NOT NULL DEFAULT '',
+  fingerprint TEXT    NOT NULL UNIQUE,
+  synced_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dumate_usage_day ON dumate_usage_records(day);
+CREATE INDEX IF NOT EXISTS idx_dumate_usage_uid_day
+  ON dumate_usage_records(uid, day);
+
 -- 上游自动任务日志（旅行 / 活跃上报 / 签到 / 保活）的结构化留痕。
 -- 上游把这些结果打在容器日志里，容器重建（更新上游）后日志就没了，
 -- 所以采集器解析后落到本表长期保留。dedup_key 由「容器日志时间戳 + 行内容」
@@ -1438,6 +1463,101 @@ def add_checkin_log(
          1 if success else 0, code, message,
          platform or '', realm or '', max(0, int(credits or 0))),
     )
+
+
+# ── DuMate 对话扣费 ────────────────────────────────────────
+def _dumate_fingerprint(uid: str, ts: int, points: float,
+                        conversation: str, package_id: str,
+                        record_id: str = '') -> str:
+    raw = '\x1f'.join((uid, str(ts), f'{points:.6f}', conversation,
+                       package_id, record_id))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def add_dumate_usage_records(uid: str, rows: Iterable[dict]) -> int:
+    """把一条用量窗口里的对话扣费明细写入账本（幂等）。
+
+    上游记录没有稳定 id，指纹由「uid + 时刻 + 金额 + 会话名 + 套餐 + 上游 id
+    （如果有）」生成。重复同步同一窗口时 `INSERT OR IGNORE` 不会重复计数；
+    时间缺失或金额为 0 的记录直接跳过（无法归日，也不构成消耗）。
+    """
+    account = str(uid or '').strip()
+    if not account:
+        return 0
+    now = int(time.time())
+    values: list[tuple] = []
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        raw_ts = row.get('at')
+        if raw_ts is None or raw_ts == '':
+            continue
+        try:
+            ts = int(float(raw_ts))
+            points = abs(float(row.get('points') or 0))
+        except (TypeError, ValueError):
+            continue
+        if ts <= 0 or not (points > 0):
+            continue
+        conversation = str(row.get('conversation') or '')[:500]
+        package_id = str(row.get('package_id') or '')[:200]
+        record_id = str(row.get('record_id') or '')[:200]
+        values.append((
+            account, ts, day_of(ts), points, conversation, package_id,
+            _dumate_fingerprint(account, ts, points, conversation,
+                                package_id, record_id),
+            now,
+        ))
+    if not values:
+        return 0
+    with _lock:
+        conn = connect()
+        try:
+            before = conn.total_changes
+            conn.executemany(
+                'INSERT OR IGNORE INTO dumate_usage_records('
+                'uid, ts, day, points, conversation, package_id, fingerprint, '
+                'synced_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
+                values,
+            )
+            inserted = conn.total_changes - before
+        except Exception:
+            # 与 `executemany` 同口径：失败必须回滚，否则写锁会挂在连接上。
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+        conn.commit()
+    return int(inserted)
+
+
+def dumate_expense_by_day(since: str, until: str | None = None) -> dict[str, float]:
+    """DuMate 对话扣费按本地日合计（正数支出）。"""
+    sql = ('SELECT day, COALESCE(SUM(points),0) AS expense '
+           'FROM dumate_usage_records WHERE day >= ?')
+    args: list = [since]
+    if until:
+        sql += ' AND day <= ?'
+        args.append(until)
+    sql += ' GROUP BY day'
+    return {str(r['day']): float(r['expense'] or 0)
+            for r in query(sql, tuple(args)) if r['day']}
+
+
+def dumate_expense_by_hour(day: str) -> dict[int, float]:
+    """DuMate 当天对话扣费按小时合计（今日折线用）。"""
+    rows = query(
+        f'SELECT {hour_sql("ts")} AS bucket, COALESCE(SUM(points),0) AS expense '
+        'FROM dumate_usage_records WHERE day = ? GROUP BY bucket',
+        (day,),
+    )
+    out: dict[int, float] = {}
+    for r in rows:
+        bucket = str(r['bucket'] or '')
+        if len(bucket) >= 13:
+            out[int(bucket[11:13])] = float(r['expense'] or 0)
+    return out
 
 
 def checkin_done_since(ts_from: int) -> dict[str, int]:

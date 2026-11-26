@@ -43,6 +43,12 @@ SETTING_MODELS_ATTEMPT = 'platforms.discovery.models_attempt'
 # 耗尽；冻 1 小时足够让批量任务改投别的账户，也不至于把「明天恢复」的号冻死。
 QUOTA_COOLDOWN_SECONDS = 3600
 
+# Cluster TPM 429 是**账户级**上限：同一账户下的 Key 共享同一个 ceiling，
+# 换号逃不掉。等窗口（上游约 1 分钟）比把整池挨个冻一遍便宜；一次请求最多
+# 等两轮、每轮不超过 15 秒，避免客户端被挂死。
+CLUSTER_WAIT_LIMIT = 2
+CLUSTER_WAIT_MAX_SECONDS = 15
+
 
 # ── 小工具 ──────────────────────────────────────────────────
 def _pick(raw: dict, *keys: str) -> str:
@@ -565,6 +571,10 @@ class DiscoveryAdapter(PlatformAdapter):
 
     def _cool_down(self, uid: str, exc: PlatformError) -> bool:
         """按设置把出错的账号冻结一段时间；返回 True = 应换下一个账号。"""
+        # 链路失败（DNS / 超时 / 代理断开）与 Cluster TPM 都不是该 Key 的健康
+        # 信号：前者换号仍可能走另一条代理，后者是账户级上限。都不冷却。
+        if exc.code in ('network_error', 'cluster_rate_limited'):
+            return False
         if exc.status == 402:
             seconds = QUOTA_COOLDOWN_SECONDS
         elif exc.status == 429:
@@ -609,7 +619,11 @@ class DiscoveryAdapter(PlatformAdapter):
         # 慢速 400 的专用预算：只有一次，且与 `max_accounts_try` 独立——把它
         # 混进普通重试会让「上游抖一下」直接吃掉本该留给真正坏号的尝试次数。
         transient_budget = 1
-        for account in candidates[:runtime['max_accounts_try']]:
+        # Cluster TPM 的等待预算：上限按请求算，重排同一个账号而不是换号。
+        cluster_waits = 0
+        queue = list(candidates[:runtime['max_accounts_try']])
+        while queue:
+            account = queue.pop(0)
             uid = str(account.get('uid') or '')
             lease = None
             release: Callable[[], None] = _noop
@@ -646,6 +660,26 @@ class DiscoveryAdapter(PlatformAdapter):
                         'discovery 上游慢速拒绝（%.1fs，key=%s），换号重试：%s',
                         elapsed, store.mask_key(self._key_of(account)),
                         str(exc.message)[:200])
+                    continue
+                # Cluster TPM 429：账户级上限，换号没用。等共享窗口重开，
+                # 把同一个账号放回队首再试；超过次数就按 429 交给客户端。
+                if exc.code == 'cluster_rate_limited' \
+                        and cluster_waits < CLUSTER_WAIT_LIMIT:
+                    cluster_waits += 1
+                    wait = min(float(exc.retry_after or 10),
+                               CLUSTER_WAIT_MAX_SECONDS)
+                    logger.warning(
+                        'discovery Cluster TPM 限流（key=%s），等待 %.0fs 后'
+                        '重试同一账号（%d/%d）：%s',
+                        store.mask_key(self._key_of(account)), wait,
+                        cluster_waits, CLUSTER_WAIT_LIMIT,
+                        str(exc.message)[:200])
+                    queue.insert(0, account)
+                    await asyncio.sleep(wait)
+                    continue
+                # 链路失败不是该 Key 的健康信号：没配代理时换号无处可去，
+                # 但每个账号可以走不同代理，换下一个仍有机会，且不冷却。
+                if exc.code == 'network_error':
                     continue
                 # 401 是 Key 失效：冻了也不会自己好，只换号不冷却。
                 if exc.status != 401 and self._cool_down(uid, exc):

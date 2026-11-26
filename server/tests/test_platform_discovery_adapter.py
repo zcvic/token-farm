@@ -20,6 +20,7 @@ from unittest import mock
 import httpx
 
 from server import config, db
+from server.platforms import settings as runtime_settings
 from server.platforms.base import PlatformError
 from server.platforms.discovery import catalog, client, constants as C, store
 from server.platforms.discovery.adapter import DiscoveryAdapter, _scan_sse
@@ -116,6 +117,26 @@ class DiscoveryClientErrorTest(unittest.TestCase):
                                           'message': 'bad key'}})
         self.assertEqual(exc.status, 401)
         self.assertEqual(exc.code, 'login_expired')
+
+    def test_cluster_tpm_429_is_not_a_per_key_rate_limit(self) -> None:
+        # 上游的账户级上限：换 Key 逃不掉，适配器要靠这个码区分。
+        exc = self._error(429, {'error': {
+                              'code': 'upstream_request_rejected',
+                              'message': 'Cluster TPM rate limit exceeded.'}},
+                          {'retry-after': '5'})
+        self.assertEqual(exc.status, 429)
+        self.assertEqual(exc.code, 'cluster_rate_limited')
+        self.assertEqual(exc.retry_after, 5)
+
+    def test_model_disabled_surfaces_suggested_model(self) -> None:
+        exc = self._error(404, {'error': {
+                              'code': 'model_disabled',
+                              'message': "Model 'old' was disabled",
+                              'suggested_model': 'new'}})
+        self.assertEqual(exc.status, 404)
+        self.assertEqual(exc.code, 'model_disabled')
+        self.assertIn("Model 'old' was disabled", exc.message)
+        self.assertIn('new', exc.message)
 
     def test_parse_models_rejects_wrong_shape(self) -> None:
         self.assertEqual(client.parse_models({}), [])
@@ -262,6 +283,74 @@ class DiscoveryAdapterTest(unittest.TestCase):
         raw = store.read_account('dc_1')
         self.assertGreater(raw.get('coolingUntil') or 0, time.time())
         self.assertIn('402', raw.get('coolingReason') or '')
+
+    def test_transport_error_is_not_charged_to_the_key(self) -> None:
+        self._seed()
+        # 即使运维把 5xx 冷却打开，链路失败也不该冻号。
+        with mock.patch.object(runtime_settings, 'cooldown_5xx',
+                               return_value=60):
+            exc = PlatformError('连接 Discovery 失败：timeout', status=502,
+                                code='network_error')
+            self.assertFalse(self.adapter._cool_down('dc_1', exc))
+        self.assertIsNone(store.read_account('dc_1').get('coolingUntil'))
+
+    def test_cluster_rate_limit_is_not_charged_to_the_key(self) -> None:
+        self._seed()
+        with mock.patch.object(runtime_settings, 'cooldown_429',
+                               return_value=60):
+            exc = PlatformError('Cluster TPM rate limit exceeded.',
+                                status=429, code='cluster_rate_limited',
+                                retry_after=5)
+            self.assertFalse(self.adapter._cool_down('dc_1', exc))
+        self.assertIsNone(store.read_account('dc_1').get('coolingUntil'))
+
+    def test_transport_error_rotates_to_next_account(self) -> None:
+        self._seed(uid='dc_1', apiKey='key-one', weight=10)
+        self._seed(uid='dc_2', apiKey='key-two', weight=1)
+        calls: list[str] = []
+
+        async def fake_chat(api_key, body, **kwargs):
+            calls.append(api_key)
+            if api_key == 'key-one':
+                raise PlatformError('连接 Discovery 失败：timeout', status=502,
+                                    code='network_error')
+            return {'choices': [{'message': {'content': 'ok'}}]}
+
+        with mock.patch.object(client, 'chat', new=fake_chat):
+            result = asyncio.run(self.adapter.chat('glm-4', {'messages': []}))
+        self.assertEqual(calls, ['key-one', 'key-two'])
+        self.assertEqual(result.payload['choices'][0]['message']['content'],
+                         'ok')
+        self.assertIsNone(store.read_account('dc_1').get('coolingUntil'))
+
+    def test_cluster_tpm_waits_out_the_window_then_retries_same_account(
+            self) -> None:
+        self._seed(uid='dc_1', apiKey='key-one', weight=10)
+        self._seed(uid='dc_2', apiKey='key-two', weight=1)
+        calls: list[str] = []
+
+        async def fake_chat(api_key, body, **kwargs):
+            calls.append(api_key)
+            if len(calls) == 1:
+                raise PlatformError('Cluster TPM rate limit exceeded.',
+                                    status=429, code='cluster_rate_limited',
+                                    retry_after=7)
+            return {'choices': [{'message': {'content': 'ok'}}]}
+
+        slept: list[float] = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+
+        with mock.patch.object(client, 'chat', new=fake_chat), \
+                mock.patch.object(asyncio, 'sleep', new=fake_sleep):
+            result = asyncio.run(self.adapter.chat('glm-4', {'messages': []}))
+        # 同一个 Key 再来一次：账户级上限换号也逃不掉。
+        self.assertEqual(calls, ['key-one', 'key-one'])
+        self.assertEqual(slept, [7.0])
+        self.assertEqual(result.payload['choices'][0]['message']['content'],
+                         'ok')
+        self.assertIsNone(store.read_account('dc_1').get('coolingUntil'))
 
     def test_stream_relays_bytes_and_fills_usage(self) -> None:
         self._seed()

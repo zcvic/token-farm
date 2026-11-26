@@ -6,7 +6,8 @@
   1. **收入只取 `kind='credit'`** —— 它是 `credits.record_balance` 在余额增加时写的
      流水。task_logs 里还有把 credits 当布尔标记写的行（如 `keepalive` 成功记 1），
      所以收入**不能**直接 `SUM(credits)` 全部 kind，否则续期次数会被当成积分收入。
-  2. **支出取 `usage_daily.credit`**（每次调用实际扣费），按天合计。
+  2. **支出取 `usage_daily.credit`**（每次调用实际扣费），按天合计；DuMate 打开
+     「对话消耗入账」后，额外并入 `dumate_usage_records`（仅 DuMate / 全部视图）。
   3. 区间内**每一天都要出现**（含没有数据的日子），折线才不会断成两截。
   4. realm 过滤：支出直接筛列；收入没有 realm 列，按**完整 uid** 映射（`kind='credit'`
      的 uid 是完整 uid，可精确匹配）。
@@ -31,11 +32,13 @@ def _day(offset: int) -> str:
 
 class CreditsFlowShapingTest(unittest.TestCase):
     def _run(self, task_rows, usage_rows, *, days=7, realm=None, uids=None,
-             platform=None, platform_rows=None):
+             platform=None, platform_rows=None, ledger=False, dumate_rows=None):
         seen: list[tuple[str, tuple]] = []
 
         def fake_query(sql, args=()):
             seen.append((sql, tuple(args)))
+            if 'dumate_usage_records' in sql:
+                return dumate_rows or []
             if 'checkin_logs' in sql:
                 return platform_rows or []
             if 'task_logs' in sql:
@@ -45,7 +48,9 @@ class CreditsFlowShapingTest(unittest.TestCase):
             return []
 
         with mock.patch.object(stats.db, 'query', fake_query), \
-             mock.patch.object(stats, '_realm_uids', lambda r: uids):
+             mock.patch.object(stats, '_realm_uids', lambda r: uids), \
+             mock.patch.object(stats.platform_settings, 'usage_ledger',
+                               lambda name: ledger):
             out = stats.credits_flow(days=days, realm=realm, platform=platform,
                                      user={'role': 'admin'})
         return out, seen
@@ -143,6 +148,40 @@ class CreditsFlowShapingTest(unittest.TestCase):
         self.assertTrue(out['income_tracked'])
         self.assertFalse(out['income_partial'])
 
+    def test_dumate_ledger_adds_expense_only_for_dumate_scope(self) -> None:
+        today = _day(0)
+        rows = [{'day': today, 'expense': 30}, {'day': _day(-1), 'expense': 5}]
+        out, _ = self._run(
+            [], [{'day': today, 'credit': 2}], platform='dumate',
+            ledger=True, dumate_rows=rows)
+        self.assertEqual(out['today']['expense'], 32)
+        self.assertEqual(out['week']['expense'], 37)
+        # 全部视图也并入（DuMate 在 usage_daily 里的 credit 恒为 0，不会双计）。
+        all_view, _ = self._run([], [], ledger=True, dumate_rows=rows)
+        self.assertEqual(all_view['today']['expense'], 30)
+        # 其他平台 / WorkBuddy 视图不能混入 DuMate 的消耗。
+        for scope in ('workbuddy', 'trae'):
+            other, seen = self._run([], [], platform=scope, ledger=True,
+                                    dumate_rows=rows)
+            self.assertEqual(other['today']['expense'], 0, scope)
+            self.assertFalse([s for s, _ in seen
+                              if 'dumate_usage_records' in s], scope)
+        # global 视图不含 DuMate（单区域平台只在 cn）。
+        global_out, seen = self._run([], [], realm='global', ledger=True,
+                                     dumate_rows=rows)
+        self.assertEqual(global_out['today']['expense'], 0)
+        self.assertFalse([s for s, _ in seen
+                          if 'dumate_usage_records' in s])
+
+    def test_dumate_ledger_off_keeps_old_expense(self) -> None:
+        today = _day(0)
+        out, seen = self._run(
+            [], [{'day': today, 'credit': 2}], platform='dumate',
+            ledger=False, dumate_rows=[{'day': today, 'expense': 30}])
+        self.assertEqual(out['today']['expense'], 2)
+        self.assertFalse([s for s, _ in seen
+                          if 'dumate_usage_records' in s])
+
 
 class CreditsFlowHourlyTest(unittest.TestCase):
     """days=1 时下探到小时（issue #285）。
@@ -153,12 +192,19 @@ class CreditsFlowHourlyTest(unittest.TestCase):
     """
 
     def _run(self, *, hours=(), expense_hours=(), days=1, realm=None, uids=None,
-             platform=None, platform_hours=None):
+             platform=None, platform_hours=None, ledger=False,
+             dumate_hours=()):
         seen: list[tuple[str, tuple]] = []
         today = _day(0)
 
         def fake_query(sql, args=()):
             seen.append((sql, tuple(args)))
+            if 'dumate_usage_records' in sql:
+                if 'GROUP BY bucket' in sql:
+                    return [{'bucket': f'{today} {h:02d}', 'expense': v}
+                            for h, v in dumate_hours]
+                return [{'day': today,
+                         'expense': sum(v for _, v in dumate_hours)}]
             if 'checkin_logs' in sql:
                 if ' AS bucket' in sql:
                     return [{'bucket': f'{today} {h:02d}', 'income': v}
@@ -176,7 +222,9 @@ class CreditsFlowHourlyTest(unittest.TestCase):
             return []
 
         with mock.patch.object(stats.db, 'query', fake_query), \
-             mock.patch.object(stats, '_realm_uids', lambda r: uids):
+             mock.patch.object(stats, '_realm_uids', lambda r: uids), \
+             mock.patch.object(stats.platform_settings, 'usage_ledger',
+                               lambda name: ledger):
             out = stats.credits_flow(days=days, realm=realm, platform=platform,
                                      user={'role': 'admin'})
         return out, seen
@@ -221,6 +269,15 @@ class CreditsFlowHourlyTest(unittest.TestCase):
         income = [(s, a) for s, a in seen if 'checkin_logs' in s][0]
         self.assertIn('platform = ?', income[0])
         self.assertIn('qoder', income[1])
+
+    def test_dumate_ledger_adds_hourly_expense(self) -> None:
+        out, seen = self._run(platform='dumate', ledger=True,
+                              expense_hours=[(9, 10.0)],
+                              dumate_hours=[(9, 4.0), (18, 6.0)])
+        self.assertEqual(out['hourly'][9]['expense'], 14.0)
+        self.assertEqual(out['hourly'][18]['expense'], 6.0)
+        sql = [s for s, _ in seen if 'dumate_usage_records' in s]
+        self.assertTrue(any('GROUP BY bucket' in s for s in sql))
 
 
 if __name__ == '__main__':

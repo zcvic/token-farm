@@ -2664,6 +2664,27 @@ miniprogram` 口径下发，于是本地把它判成「该账号没有此任务�
 并从默认 codes 里排除；`process_minichat_task` 对 claimonly 只 accept → 回读 → claim，
 不构造事件。测试 `server/tests/test_task_runner_mp_fallback.py` 11 条。
 
+**D-9 的副作用（本地补充，非参考仓改动）**：上面这条回落让「默认列表里没有的 code」
+每条都去打一次 mp 列表。一个账号二十来条映射就是二十来次
+`GET /v2/activity/growth/tasks`，实测跑到第 5 个任务之后整批 `list_tasks http=429`，
+而 `process_account` 当时没有按任务兜异常 —— 一个 429 就把整轮带走，前面已点亮的
+任务也来不及领奖。四处收口（`task_runner.py` / `task_common.py` / `school_open_day_2026.py`）：
+
+- mp 列表按**账号一次**快照（`loaded` 标志，空列表与失败都算「已拉过」）。失败时后续
+  code 不再各撞一次频控，也不谎报「任务不存在」：常规任务记 pending（没查清 ≠ 没有），
+  mp 专段整体记一次 fail；
+- `light_up` 接受调用方手里的任务行（`known`），不再为同一个任务重复读列表；accept
+  之后的回读仍然现拉（progress 是登记后才下发的）；
+- `task_common._request` 对 429 / GET 的 5xx 做有界重试（最多 3 次，认
+  `Retry-After` 秒数；要求等待超过 30s 就把 429 交回调用方，不在脚本里干等 ——
+  面板按空闲判卡死）。POST 的 5xx 不重试（可能已落账），POST 的 429 重试（没被处理，
+  claim 本身幂等）。school 模块的 `request_retry` 同样把 429 纳入退避。
+- `process_account` 的单任务异常记 fail 后继续下一个，不再中断整批；
+- `main` 对**账号**再加一层兜底：某个账号意外异常只记 fail 并继续后面的账号
+  （`ERR: [task_runner] <uid8> 账号处理中断: …`），不让一个账号带走整批。
+
+测试 `server/tests/test_task_common_retry.py` 11 条。
+
 **D-10　模型规则 review 补充**（`74456c87`）随 D-8，不单列。
 
 ### D.5 需确认（2 个主题，3 个提交）
@@ -3387,3 +3408,85 @@ CI 的 binaries 就是这么挂的。改法是取 `now + 28 天`。
 
 记录同步写进 `deploy/workbuddy-panel-ref.txt` 第二十批。
 
+
+## 附录 J：`d221c721fc..b1233f09` 增量评估（2026-11-25 扫）
+
+### J.1 范围与统计
+
+参考仓在第二十批（`d221c721fc`）之后又推了 **6 个非 merge 提交**，`b1233f09` 为
+当前 `main` 头：
+
+| 提交 | 主题 | 判定 |
+|---|---|---|
+| `392f8ac7` | 模型目录降级 WARN 每种只报一次（issue #283） | **取** |
+| `6dc02b30` | browser-complete 控制标记救援 | 不取 |
+| `f60c68d5` | 续写提示中性化 | 不取 |
+| `2e2358ca` | 合成续写不带网关身份 | 不取 |
+| `53fbd2ec` | 面板错误汇总可标已读 + 账号池批量导出 | 不取 |
+| `b1233f09` | 「每日变化」柱状图 `<title>` 挪进柱子自身（#289） | 不取 |
+
+**1 取、5 不取**。三条 browser-complete / 续写提交依赖本仓不存在的 Go 运行时模块，
+两条面板提交依赖本仓没有的渲染路径或已由本仓自己实现的能力。
+
+### J.2 `392f8ac7`：模型目录降级 WARN 每种只报一次
+
+**现场**（issue #283）：global 域的企业端点永续 500，而 `/v3/config` 每次都接住。
+每轮 warm model rates 都会重打一行 WARN，四天 49 次——真故障被这条重复告警淹掉。
+
+**参考仓做法**：新增 `degradedWarnOnce(key, format, args...)`（进程内 map + mutex，
+同 key 只打一次），两条探测的四条降级路径各给一个 key。
+
+**本仓落点**（按本仓结构重写，语义一致）：
+
+- `upstream/internal/upstream/global_models.go`：放 `degradedWarnOnce` 与两个包级变量
+  （`degradedWarnMu` / `degradedWarnSeen`），与参考仓同文件；`probeGlobalModels` 的两条
+  降级路径给 `global-models/v3` 与 `global-models/enterprise` 两个 key。
+- `upstream/internal/upstream/client.go`：`FetchModels` 的同两条路径给
+  `fetch-models/v3` 与 `fetch-models/enterprise`。
+- 企业端点持续失败那条文案补上「degraded to v3/config, catalog served normally」，
+  第一次看到的人知道功能没坏。
+
+**反向代价**（与参考仓相同）：恢复后再失败不会重新告警，得等重启；逐次可见性靠每轮
+都写的 warm model rates 那行。
+
+**测试**：新增 `upstream/internal/upstream/degraded_warn_test.go`（同 key 只报一次 /
+不同 key 各报一次）。`go build ./...`、`go vet ./internal/upstream/`、
+`go test ./internal/upstream/ -count=1` 通过。
+
+### J.3 未取的三条续写 / browser-complete 提交
+
+`6dc02b30` / `f60c68d5` / `2e2358ca` 的落点集中在参考仓的
+`internal/server/{browser_complete.go,continue.go,narration.go,toolonly.go,handler.go}`。
+
+本仓 `upstream/internal/server/` 有 60 个 go 文件但**没有**这几个：推理续写状态机
+（narration / toolonly / continue）在本仓整段不存在，browser-complete 的独立控制标记
+也没有入口。这不是「实现不同」而是**整段运行时不存在**，照搬会凭空多出一套没人驱动的
+中间层。相关教训（合成续写不要冒充上游网关身份）只适用于有该状态机的实现。
+
+### J.4 未取 `53fbd2ec`：面板错误汇总已读 + 账号池批量导出
+
+- **错误汇总可标已读**：依赖参考仓内嵌 Go 面板的日志环聚合表（`internal/panel/errors.go`
+  的 `ErrStat` + `last_unix`）。本仓日志页按请求行直出（`web/app/(main)/logs`），
+  没有「按账号 × 错误类型聚合 + 本机已读标记」这一层。
+- **账号池批量导出**：能力本仓已有。`server/routers/accounts.py` 的
+  `GET /accounts/export` 与 `server/routers/platforms.py` 的 `/{name}/accounts/export`
+  （含明文凭据、批量、审计日志 user/count/ip）；Qoder 走内置网关的 `/accounts/export`。
+  导出格式与本仓导入格式的对齐已由 `server/tests/test_account_upload.py` 覆盖，
+  不需要再抄一份参考仓的 `{accounts:[...]}` 形状。
+
+### J.5 未取 `b1233f09`：每日变化柱状图 `<title>`
+
+参考仓是手写 SVG 字符串，把 `<title>` 挂在 `<svg>` 根下，导致所有柱子共用第一条提示。
+本仓仪表盘的柱子/折线是 React + recharts（`web/app/(main)/dashboard/page.tsx` 的
+`<Bar>` + `<Tooltip>`），悬停提示由组件按每个数据点渲染，不存在「兄弟节点 `<title>`
+被浏览器当成整图说明」这个形态——不是同一个渲染路径，无处可改。
+
+### J.6 落地清单
+
+| 位置 | 改动 |
+|---|---|
+| `upstream/internal/upstream/global_models.go` | 新增 `degradedWarnOnce` / `degradedWarnMu` / `degradedWarnSeen`；两处降级 WARN 改用它 |
+| `upstream/internal/upstream/client.go` | `FetchModels` 两处降级 WARN 改用 `degradedWarnOnce` |
+| `upstream/internal/upstream/degraded_warn_test.go` | 新增：同 key 只报一次 / 不同 key 各报一次 |
+
+记录同步写进 `deploy/workbuddy-panel-ref.txt` 第二十一批。

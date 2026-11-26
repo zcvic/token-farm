@@ -8,6 +8,7 @@ import time
 from fastapi import APIRouter, Depends
 
 from .. import config, db, inflight, security
+from ..platforms import settings as platform_settings
 from ..services import pricing, wb2api
 
 router = APIRouter(prefix='/api/stats', tags=['stats'])
@@ -58,6 +59,18 @@ def _platform_scope(platform: str | None) -> str:
     """把查询参数归一成统计口径：'' = 不过滤；'workbuddy'；其他平台名。"""
     p = str(platform or '').strip().lower()
     return '' if not p or p == 'all' else p
+
+
+def _dumate_ledger_applies(scope: str, realm: str | None) -> bool:
+    """DuMate 对话消耗是否要并进当前视图的支出。
+
+    · 只看 DuMate 或「全部」视图：其他平台 / WorkBuddy 不能混入这笔支出；
+    · DuMate 是单区域平台（cn），global 视图不包含它；
+    · 用户开关关闭时维持旧口径（只在用量弹窗展示，不进积分收支）。
+    """
+    if scope not in ('', 'dumate') or realm == 'global':
+        return False
+    return platform_settings.usage_ledger('dumate')
 
 
 def _cache_rate(hit: int | None, miss: int | None) -> float | None:
@@ -731,6 +744,11 @@ def _credits_hourly(day: str, realm: str | None,
     ):
         expense[int(r['hour'])] = float(r['credit'] or 0)
     scope = _platform_scope(platform)
+    if _dumate_ledger_applies(scope, realm):
+        # DuMate 在 usage_hourly 里没有扣费（网关拿不到积分），补充上游会话
+        # 记录里的逐条消耗。只加在「全部 / DuMate」视图，避免和别的平台混账。
+        for h, value in db.dumate_expense_by_hour(day).items():
+            expense[h] = expense.get(h, 0.0) + value
     if scope and scope != 'workbuddy':
         income = _platform_income_by_hour(day, realm, scope)
     else:
@@ -806,8 +824,10 @@ def credits_flow(days: int = 30, realm: str | None = None,
     ## 支出口径
 
     `usage_daily.credit` 是每次调用上游返回的真实扣费（`usage.credit`）当日合计，
-    精确到每次请求。两个口径精度不同，所以不把「净额」当作唯一结论，而是收入 /
-    支出 / 净额三项都列。
+    精确到每次请求。DuMate 的对话题 `usage` 不含积分，默认不在这张表里；用户
+    打开「对话消耗入账」后，它的会话扣费会从 `dumate_usage_records` 并入本视图
+    的支出（仅 DuMate / 全部视图、cn 口径）。两个口径精度不同，所以不把「净额」
+    当作唯一结论，而是收入 / 支出 / 净额三项都列。
     """
     lo, hi, d = _range_bounds(days, start, end)
     since = lo
@@ -828,6 +848,12 @@ def credits_flow(days: int = 30, realm: str | None = None,
             (lo, hi) + ((realm,) if rf else ()) + pargs,
         )
     }
+    if _dumate_ledger_applies(scope, realm):
+        # DuMate 的对话扣费不在 usage_daily 里（上游对话题 usage 没有积分字段），
+        # 打开「对话消耗入账」后由 adapter 同步到 dumate_usage_records，这里并入
+        # 当前视图的支出。关闭时什么都不加，保持升级前的口径。
+        for day, value in db.dumate_expense_by_day(lo, hi).items():
+            expense[day] = expense.get(day, 0.0) + value
     if scope and scope != 'workbuddy':
         income = _platform_income_by_day(since, realm, scope, until=hi)
     else:

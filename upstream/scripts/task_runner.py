@@ -1425,12 +1425,18 @@ def _mp_list_tasks(auth):
     return (r.get("data") or {}).get("tasks") or []
 
 
-def _mp_task_status(auth, code):
-    """mp 口径查单任务；无此任务返回 None。"""
-    return next((t for t in _mp_list_tasks(auth) if t.get("task_code") == code), None)
+def _mp_task_status(auth, code, tasks=None):
+    """mp 口径查单任务；无此任务返回 None。
+
+    `tasks` 可传入已拉取的 mp 列表快照（`process_account` 一个账号只拉一次，
+    见那里的注释）；不传则现拉，供写完之后的回读用（必须看到最新状态）。
+    """
+    if tasks is None:
+        tasks = _mp_list_tasks(auth)
+    return next((t for t in tasks if t.get("task_code") == code), None)
 
 
-def process_minichat_task(auth, code, opts, stats, uid8):
+def process_minichat_task(auth, code, opts, stats, uid8, known=None):
     """小程序成长任务：mp 口径查询 → accept → mini 对话上报 → 回读 → claim。
 
     与 process_task 的 growth 主循环分开处理：该任务在默认（无 mp 头）列表里不存在，
@@ -1447,7 +1453,11 @@ def process_minichat_task(auth, code, opts, stats, uid8):
     spec = MAPPING.get(code) or {}
     kind = spec.get("kind") or "minichat"
     try:
-        t = _mp_task_status(auth, code)
+        # known：`process_account` 已拉取的 mp 列表快照。一个账号只拉一次列表，
+        # 否则每个 mp 任务各拉一次，一个账号就是十几次请求 —— 这正是撞 429 的
+        # 主因。写入之后的回读仍然现拉（见下方 t2），保证看到最新状态。
+        t = (_mp_task_status(auth, code, tasks=known) if known is not None
+             else _mp_task_status(auth, code))
     except Exception as e:
         print(f"[task_runner] {uid8} {code}: mp list_tasks 失败: {e}")
         stats["fail"] += 1
@@ -1665,7 +1675,7 @@ def process_task(auth, code, t, opts, stats):
             print(f"[task_runner] {uid8} {code}: query in_progress({cur}/{target}) -> 夜猫窗口内，可补 1 次，dry-run 跳过")
             stats["pending"] += 1
             return
-        light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=1)
+        light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=1, known=t)
         return
 
     # 可点亮：计算需要上报次数（按 target 补齐）
@@ -1686,7 +1696,7 @@ def process_task(auth, code, t, opts, stats):
         stats["pending"] += 1
         return
 
-    light_up(auth, code, spec, cur, target, uid8, opts, stats)
+    light_up(auth, code, spec, cur, target, uid8, opts, stats, known=t)
 
 
 def _accept_with_verify(auth, code, uid8, gap) -> bool:
@@ -1719,17 +1729,27 @@ def _accept_with_verify(auth, code, uid8, gap) -> bool:
     return False
 
 
-def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0):
-    """accept(若未接，带登记验证与重试) → 按 target 补齐上报 → 回读 → 已满则 claim。"""
-    ast = tc.task_status(auth, code)
-    ast = ast.get("accept_status") if ast else "not_accepted"
+def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0, known=None):
+    """accept(若未接，带登记验证与重试) → 按 target 补齐上报 → 回读 → 已满则 claim。
+
+    `known` 是调用方刚查到的任务行（`process_task` 手里那份）。有它就不再多打一次
+    列表接口——列表读是这个脚本里最频繁的请求（每个任务 2~3 次），批量跑账号时
+    429 主要就出在这里。写入之后的回读仍然现拉，保证看到最新状态。
+    """
+    if isinstance(known, dict):
+        ast = known.get("accept_status")
+    else:
+        row = tc.task_status(auth, code)
+        ast = row.get("accept_status") if row else "not_accepted"
     if ast == "not_accepted":
         if not _accept_with_verify(auth, code, uid8, opts.gap):
             print(f"[task_runner] {uid8} {code}: accept 未登记生效，本轮跳过待下次")
             stats["fail"] += 1
             return
-
-    t_now = tc.task_status(auth, code) or {}
+        # accept 之后必须现读一次：登记的瞬间 progress 才下发（未 accept 时是 null）。
+        t_now = tc.task_status(auth, code) or {}
+    else:
+        t_now = known if isinstance(known, dict) else (tc.task_status(auth, code) or {})
     prog = t_now.get("progress") or {}
     cur = prog.get("current") or cur
     tgt = prog.get("target") or target
@@ -1934,6 +1954,44 @@ def process_account(auth, opts, stats):
         return
 
     by_code = {t.get("task_code"): t for t in tasks}
+
+    # mp 口径列表的**每账号一次**快照（懒加载）。
+    #
+    # 为什么必须缓存：默认列表 miss 时每个 code 都要回落查一次 mp，一个账号
+    # 二十来条映射就是二十来次 `GET /v2/activity/growth/tasks`。上游频控按接口
+    # 计数，实测跑几个任务之后整批 429（本次故障的现场）。一个账号的**查询**
+    # 只需要一份快照；写入之后的回读（claim 回读、mp 段 t2）仍然现拉。
+    #
+    # 用 loaded 标志而不是「列表非空」判断：真的没有 mp 任务时（空列表）也要
+    # 记住「已经拉过了」，否则每条 code 又会各拉一次，缓存等于没做。失败同样要
+    # 记住：否则 429 之下每条 code 都会重新撞一次，等于把频控延长一整轮。
+    mp_snapshot: dict = {"loaded": False, "tasks": [], "error": None, "noted": False}
+
+    def mp_tasks():
+        if not mp_snapshot["loaded"]:
+            try:
+                mp_snapshot["tasks"] = _mp_list_tasks(auth)
+            except Exception as e:  # noqa: BLE001
+                mp_snapshot["error"] = e
+            finally:
+                mp_snapshot["loaded"] = True
+        if mp_snapshot["error"] is not None:
+            raise mp_snapshot["error"]
+        return mp_snapshot["tasks"]
+
+    def mp_row(code):
+        return _mp_task_status(auth, code, tasks=mp_tasks())
+
+    def mp_unavailable(e):
+        """mp 列表本轮不可用：只在第一次说一句，别每条 code 各刷一行。
+
+        行首是 `mp/list_tasks`（不是任务码），与 school 段同属**账号级**消息；
+        `task_summary` 里登记为账号级，不会在任务摘要里冒出一条假任务。
+        """
+        if not mp_snapshot["noted"]:
+            mp_snapshot["noted"] = True
+            print(f"[task_runner] {uid8} mp/list_tasks: 列表不可用（{e}），本轮不再逐条查询")
+
     # growth 映射里带 school 段的 codes：growth 任务列表无此 code（school 域独立任务空间），
     # 由 process_school_tasks 专段处理，不进 process_task（growth claim 端点对 school 任务 400）。
     # minichat 同理：mp 限定任务在默认口径列表不出现，由 process_minichat_task 专段处理。
@@ -1975,18 +2033,33 @@ def process_account(auth, opts, stats):
             # mp 列表下发（issue #243 的 Library_read），不回落会把存在的任务判成
             # 「该账号没有此任务」。命中后仍按默认头继续（只有列表口径需要 mp 头，
             # 与上游 taskByCode 的回落口径一致）；mp 专属 code 已由 special 挡在上面。
-            try:
-                t = _mp_task_status(auth, code)
-            except Exception as e:
-                print(f"[task_runner] {uid8} {code}: mp 兜底查询失败: {e}")
-                t = None
+            if mp_snapshot["error"] is None:
+                try:
+                    t = mp_row(code)
+                except Exception as e:
+                    mp_unavailable(e)
+                    t = None
             if t is None:
+                if mp_snapshot["error"] is not None:
+                    # 列表本轮取不到（典型是 429）：**不能**断言「任务不存在」——
+                    # 记 pending（可做、本轮没做成），也不再逐条重试把频控拖长。
+                    # 逐条只打一行「待确认」，让任务摘要里仍能看到这些任务。
+                    print(f"[task_runner] {uid8} {code}: query 待确认（任务列表暂不可用，下次再查）")
+                    stats["total"] += 1
+                    stats["pending"] += 1
+                    continue
                 print(f"[task_runner] {uid8} {code}: query 任务不存在")
                 stats["total"] += 1
                 stats["skip"] += 1
                 continue
             print(f"[task_runner] {uid8} {code}: 默认列表无此任务，mp 口径命中")
-        process_task(auth, code, t, opts, stats)
+        try:
+            process_task(auth, code, t, opts, stats)
+        except Exception as e:  # noqa: BLE001
+            # 单个任务的读失败（典型是回读时列表接口 429）不该带走整批：后面的
+            # 任务还能做、已点亮的也还要领奖。这里记 fail 并继续下一个任务。
+            print(f"[task_runner] {uid8} {code}: 执行失败（已跳过，下次补）: {e}")
+            stats["fail"] += 1
 
     # 小程序成长任务段（mp 口径）：已完成/可领状态下 only_claim 模式仍可入账（claim 幂等）；
     # 未完成则点亮判据属写操作，与 school 段同规则只在非 only_claim 模式触发。
@@ -1997,15 +2070,24 @@ def process_account(auth, opts, stats):
             # --only 语义：指定了 mp code 时只跑指定的（与 growth/school 段一致）
             mp_codes = ([c for c in opts.only_codes if c in minichat_in_map]
                         if opts.only_codes else minichat_in_map)
+            try:
+                mp_tasks()
+            except Exception as e:  # noqa: BLE001
+                # 列表整体拿不到（典型是 429）：这一段一个都判不了，只记一次 fail。
+                # 逐条再试只会把频控延长一整轮，且会刷出七行同样的失败。
+                mp_unavailable(e)
+                stats["fail"] += 1
+                mp_codes = []
             for mp_code in mp_codes:
                 try:
-                    t = _mp_task_status(auth, mp_code)
+                    t = mp_row(mp_code)
                     ast = (t or {}).get("accept_status")
                     if opts.only_claim and ast not in ("completed", "claimed"):
                         # only_claim 只入账已完成任务；未完成不点亮
                         print(f"[task_runner] {uid8} {mp_code}: only_claim 跳过（未 completed）")
                     else:
-                        process_minichat_task(auth, mp_code, opts, stats, uid8)
+                        process_minichat_task(auth, mp_code, opts, stats, uid8,
+                                              known=mp_tasks())
                 except Exception as e:
                     print(f"[task_runner] {uid8} {mp_code}: mp 查询失败: {e}")
                     stats["fail"] += 1
@@ -2080,7 +2162,15 @@ def main():
             stats["skip"] += 1
             continue
         account_spacing.wait()
-        process_account(c, a, stats)
+        try:
+            process_account(c, a, stats)
+        except Exception as e:  # noqa: BLE001
+            # 账号级兜底：一个账号的意外异常不该让后面的账号一个都不跑。上面已经把
+            # 「单任务失败」收在任务循环里，这里是最后一层——真走到这里说明是没预料
+            # 到的读失败（比如账号级列表接口）。记 fail、打一行，继续下一个账号。
+            uid8 = (c.get("uid") or "")[:8] or "?"
+            print(f"ERR: [task_runner] {uid8} 账号处理中断: {e}")
+            stats["fail"] += 1
 
     print_summary(stats)
 

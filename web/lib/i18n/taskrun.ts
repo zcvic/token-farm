@@ -110,6 +110,8 @@ const RULES: LineRule[] = [
   // ── 账号级：任务列表拉取失败 / 全量批量警告 / 国际版跳过 ──────────
   [/^ERR: \[task_runner\] (\S+) query list_tasks 失败: (.*)$/, (m) =>
     tStatic('tasks.runLogListTasksFailed', {uid: m[1], err: m[2]})],
+  [/^ERR: \[task_runner\] (\S+) 账号处理中断: (.*)$/, (m) =>
+    tStatic('tasks.runLogAccountAborted', {uid: m[1], err: m[2]})],
   [/^WARN: 全量批量 \+ --yes 未限定 --only，注意 54 号批量——请确认 Hermes 决策后再跑$/, () =>
     tStatic('tasks.runLogBulkWarning')],
   [/^\[skip\] (\S+) global realm 不适用 CN 任务$/, (m) =>
@@ -185,6 +187,15 @@ const RULES: LineRule[] = [
     tStatic('tasks.runLogMpListFailed', {uid: m[1], code: m[2], err: m[3]})],
   [runner('mp 口径任务不存在，skip'), (m) =>
     tStatic('tasks.runLogMpTaskMissing', {uid: m[1], code: m[2]})],
+  // 列表整体取不到（典型是上游 429）：账号级一行，之后不再逐条查询。
+  [/^\[task_runner\] (\S+) mp\/list_tasks: 列表不可用（(.*)），本轮不再逐条查询$/, (m) =>
+    tStatic('tasks.runLogMpListUnavailable', {uid: m[1], err: m[2]})],
+  // 单任务在列表不可用时既不能说「没有此任务」也不能说做完：待下次再查。
+  [runner('query 待确认（任务列表暂不可用，下次再查）'), (m) =>
+    tStatic('tasks.runLogTaskUnconfirmed', {uid: m[1], code: m[2]})],
+  // 单任务执行中途异常（回读撞限流等）：跳过这一项，其余任务继续。
+  [runner('执行失败（已跳过，下次补）: (.*)'), (m) =>
+    tStatic('tasks.runLogTaskAborted', {uid: m[1], code: m[2], err: m[3]})],
   [runner('only_claim 跳过（未 completed）'), (m) =>
     tStatic('tasks.runLogOnlyClaimNotCompleted', {uid: m[1], code: m[2]})],
 
