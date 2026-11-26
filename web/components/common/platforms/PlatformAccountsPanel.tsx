@@ -726,7 +726,8 @@ export function PlatformAccountsPanel({
     } catch {
       // DuMate / 豆包的凭证本身就是一长行 Cookie，要求用户先包成 JSON 太反人类：
       // 粘不进去的整段 Cookie 直接按 `{cookie: "..."}` 提交（后端认这个形状）。
-      if ((platform === 'dumate' || platform === 'doubao') && raw.includes('=')) {
+      if ((platform === 'dumate' || platform === 'doubao'
+        || platform === 'lingxi') && raw.includes('=')) {
         body = {cookie: raw};
       } else {
         notify.err(t('platforms.importInvalid'));
@@ -734,7 +735,8 @@ export function PlatformAccountsPanel({
       }
     }
     // 同理：粘贴的是 JSON 字符串（带引号的整行 Cookie）时也包一层。
-    if ((platform === 'dumate' || platform === 'doubao') && typeof body === 'string') {
+    if ((platform === 'dumate' || platform === 'doubao'
+      || platform === 'lingxi') && typeof body === 'string') {
       body = {cookie: body};
     }
     setImportBusy(true);
@@ -1348,7 +1350,9 @@ export function PlatformAccountsPanel({
               ? t('platforms.noAccountsDescDumate')
               : platform === 'doubao'
                 ? t('platforms.noAccountsDescDoubao')
-                : t('platforms.noAccountsDesc')}
+                : platform === 'lingxi'
+                  ? t('platforms.noAccountsDescLingxi')
+                  : t('platforms.noAccountsDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
             {/* 空态里给的是**这个平台真正能用**的入口：没有本机客户端可导入的
@@ -2312,11 +2316,18 @@ export function PlatformAccountsPanel({
                   ? t('platforms.importDescDumate')
                   : platform === 'doubao'
                     ? t('platforms.importDescDoubao')
-                    : t('platforms.importDesc')}
+                    : platform === 'lingxi'
+                      ? t('platforms.importDescLingxi')
+                      : t('platforms.importDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
             <div className="px-6 pb-2">
+              {/* field-sizing-fixed：Textarea 基类带 field-sizing-content，粘贴整段
+                  Cookie / 批量 JSON 时会按内容一直长高（宽度还会被 ScrollArea 内层
+                  display:table 按最长一行撑开），把 DialogBody 顶出弹窗上限，
+                  底部的保存按钮被 overflow-hidden 裁掉、点不到。固定尺寸后
+                  文本区自己滚动，弹窗高度不再随粘贴内容变化。 */}
               <Textarea
                 value={importText}
                 onChange={(e) => setImportText(e.target.value)}
@@ -2326,8 +2337,10 @@ export function PlatformAccountsPanel({
                     ? t('platforms.importPlaceholderDumate')
                     : platform === 'doubao'
                       ? t('platforms.importPlaceholderDoubao')
-                      : t('platforms.importPlaceholder')}
-                className="min-h-40 font-mono text-[11px]"
+                      : platform === 'lingxi'
+                        ? t('platforms.importPlaceholderLingxi')
+                        : t('platforms.importPlaceholder')}
+                className="field-sizing-fixed min-h-40 overflow-auto font-mono text-[11px]"
                 spellCheck={false}
                 autoFocus
               />

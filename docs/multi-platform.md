@@ -200,7 +200,15 @@ server/platforms/
     catalog.py           # 内置目录归一（豆包无在线目录接口）
     client.py            # 对话 / 签到 / 额度（Cookie 鉴权 + 设备查询参数）
     adapter.py           # 实现 PlatformAdapter：选号 / 冷却 / 探活 / 签到 / 对话
-server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
+  lingxi/
+    __init__.py
+    constants.py         # 双基址 / 客户端指纹 / 内置模型快照与别名
+    store.py             # Cookie 账号文件（原子写 + 文件锁 + 脱敏 + 设备号）
+    catalog.py           # `/sessions/plans` 解析 + 内置快照兜底
+    chat.py              # 请求体归一 + SSE → OpenAI chunk / chat.completion
+    client.py            # 三步握手 / run 缓存 / 余额 / 任务 / 探活
+    adapter.py           # 实现 PlatformAdapter：选号 / 冷却 / 签到 / 余额 / 对话
+  server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
 ```
 
 新增平台的模板：
@@ -651,6 +659,10 @@ DuMate 的每日签到奖励由服务端 00:00 自动发放，手动签到时 `h
 - `doubao/<model>` 走豆包（单区域，Cookie 账号池）。目录里是友好的短名
   （`deepseek-v4-flash` / `kimi-k3` / `doubao-2.1-pro` …），转发前翻成上游的
   `model_item_key`；未收录的名字原样透传，方便上游上架新模型时先试。
+- `lingxi/<model>` 走 WPS 灵犀（单区域，Cookie 账号池）。目录里的 id 就是上游
+  `model_id`（`deepseek-v4.1-flash` / `GLM-5.3` / `kimi-k3` / `plan_pro` …），
+  只剥 `wps-lingxi/` / `lingxi/` 前缀；`default` 落到默认模型，未收录的名字
+  原样透传。
 - 其他模型名 → 原样走 WorkBuddy（与今天完全一致）。
 - `/v1/models` 会把 Trae 的模型**按区域**并入列表（`traecn/` / `traecom/`），
   `owned_by` 标成 `trae`、`realm` 标出所属区域，客户端据此区分来源。
@@ -750,9 +762,26 @@ Discovery 的目录是 OpenAI schema，`/v1/models` 同时承担**额度探针**
 的名字原样透传（与 Discovery 的 `force-model` 相反：**不改写**客户端要的模型，
 否则报错指不回适配器）。
 
+#### 灵犀的目录
+
+灵犀**有**在线目录：`GET /api/aioffice/v1/sessions/plans` 返回 `data.plans[]`
+（Pro / Max 模式）与 `data.models[]`（具体模型），顺序必须保持「先模式、后模型」。
+它没有桌面端快照那一层，降级链是「在线目录 → 内置快照」两级，缓存 / 失败冷却
+口径与 Trae 一致（`catalog_ttl` / `catalog_retry_ttl` / `catalog_timeout`）。
+
+字段归一见 `server/platforms/lingxi/catalog.py`：`reasoning_efforts` 存在才算
+思考模型（`[]` = 确实没有，不猜），`max_new_tokens` 是输出上限，倍率的
+`~` / `～` / `〜` 统一成 ASCII，徽标字段叫 `tag`，介绍字段叫 `intro`（`desc`
+常为空）。`default` 映射到 `deepseek-v4.1-flash`，并剥掉 `wps-lingxi/` /
+`lingxi/` 前缀。
+
+内置快照是 13 条真实响应（2026-11-10），包含两种模式和 11 个模型；上游新上架
+的模型只要在目录里出现就会被带出来，未收录的名字也可以显式发
+`lingxi/<model>`，`upstream_model()` 原样透传。
+
 **推理档位（`efforts`）**：平台模型条目可以带 `efforts`（如
 `['low','high','max']`），测试台的模型下拉据此显示档位选择器；空数组 = 不显示。
-目前两个平台提供：
+目前三个平台提供：
 
 - **Kilo**：上游 `opencode.reasoning_options` 归一而来。`[]`（推理常开）→ 单档
   `high`；只有 `toggle` → `none` / `high`；有 `effort` 档位 → 去重后按上游
@@ -764,6 +793,8 @@ Discovery 的目录是 OpenAI schema，`/v1/models` 同时承担**额度探针**
   `['none','high','max']`。`low` 在百度渠道与 `high` 同强度，内部归一到 `high`，
   对外不再单列；`none` 会显式下发 `thinking:{type:'disabled'}` +
   `enable_thinking:false`（只删 `reasoning_effort` 不够，上游仍会按默认档思考）。
+- **灵犀**：目录里声明了 `reasoning_efforts` 的模型原样透传（当前实测均为
+  `['low','high','max']`）；没有声明的模型是空数组，界面不显示档位选择器。
 
 **Kilo 网关地址可覆盖**：默认 `https://ai-gateway.kilo.ai/api/v1`。设
 `KILO_AI_GATEWAY_URL` 可指向自建 / 代理网关（末尾斜杠自动剥掉）；只配了 legacy
@@ -988,6 +1019,7 @@ Cline 是同一个问题、同一个做法：access token 约 10 分钟且由适
 | Kilo | 无 | 有（**美元**） | 无 | token 一年期、不可刷新；余额走 `/api/profile/balance` |
 | Cline | 无 | 无 | 有（refresh token） | 余额不足由 402 `insufficient_credits` 表达 |
 | 豆包 | 有 | 有（额度汇总） | 无 | Cookie 无 refresh；额度来自 `window_limits` 汇总，401 换号、429/5xx 按设置冷却 |
+| 灵犀 | 有（每日签到） | 有（智点 + 赠送批次） | 无 | Cookie 无 refresh；余额来自 `credits/balance`，15 天内到期批次单列；401 换号、429/5xx 按设置冷却 |
 
 Discovery 的「额度」在界面上是**三态**，不是数字：`ok` / `rate_limited` /
 `quota_exhausted`。把 `429 quota_exceeded` 当成普通限流（几十秒冷却）会让已经
@@ -1706,3 +1738,118 @@ Qoder 的协议包含 COSY 签名、设备指纹、OAuth 设备授权、模型�
   入口。
 - **GLM 模型进目录**：上游实测报错，不列；需要时显式发 `doubao/glm-5.3`，
   `upstream_model()` 原样透传。
+
+---
+
+## 15. WPS 灵犀（Lingxi）
+
+原生实现，包在 `server/platforms/lingxi/`，不引入第三方运行时。灵犀没有开放
+平台 API，协议事实来自其桌面客户端自己使用的私有 **app-server** 接口，核对
+自两份社区实现（均 MIT）：`xinstart-1/dsh-connect-lingxi`（含
+`docs/PROTOCOL.md` 与逐字段抓包）与 `xfyang728/dsh-router-wpslingxi`。
+
+### 15.1 凭据与导入
+
+凭证是**网页 Cookie**，登录态字段是 `wps_sid`（导入时校验，缺了直接 400）。
+没有 OAuth、没有 refresh token；Cookie 失效只能重新登录网页版再抓一次，所以
+`refresh_account` 做的是「拿 Cookie 探一次活」，不是续期。
+
+- uid 由 `wps_sid` 派生，前缀 `lx_`；同一份登录态重复导入覆盖同一条账号。
+- 面板「手工导入」支持整段 Cookie、`Cookie:` 前缀、以及只粘 `wps_sid` 的值
+  （后端正回键名）。没有扫码登录。
+- Cookie 明文只落盘（`data/platforms/lingxi/accounts/<uid>.json`，文件锁 + 原子
+  替换 + 0600），接口只回摘要与尾部 6 位。
+- 请求头里的客户端指纹三件套 `x-kso-app-name` / `x-kso-app-version` /
+  `x-kso-device-id` 由适配器补齐；设备号默认由 Cookie 稳定派生
+  （`constants.device_id_for`），同一账号不会每次换一台设备。
+
+### 15.2 对话协议：三步握手
+
+一次对话是三次 HTTP 请求，全部带同一份 Cookie：
+
+1. `POST /api/aioffice/v1/cowork/sessions` 建会话，取 `data.session_id`；
+2. `POST /api/public/v1/credits/runs` 领 run，取 `data.run_id` / `group_id`；
+3. `POST /api/public/v1/agent-runtime/chat/completions`（OpenAI 形状请求体）。
+
+部分账号的会话只在 `lingxi.kdocs.cn` 有效，建会话 / 领 run 按「主站 → 登录域」
+两个基址都试；**401 立即上抛**，不换基址也不重试。
+
+会话 + run 按「账号 + 设备 + 模型」缓存 1 小时（`constants.RUN_TTL_SECONDS`），
+与参考实现一致；run 失效（404 且文案含 run / 会话 / 过期 / not found / 不存在）
+时丢掉缓存重建一次再试。对话头另带 `X-Client-Type` / `X-Cc-Session-ID` /
+`X-Cc-Run-ID` / `X-Request-Id`，Cookie 有 `copilot_server_branch` 时再带
+`X-Cc-Region`。
+
+请求体本身是 OpenAI 形状，但实测有两条硬约束（`chat.build_body`）：
+
+- `content` **只能是字符串**：分段数组（`[{type:"text",text}]`）任何角色都
+  400 `InvalidArgument`，逐条展平；`developer` 角色换成 `system`。
+- `tool_choice` **只能是字符串**：对象形式（指定具体函数）同样 400，降级成
+  `required` / `auto`；`tools[].function.strict` 原样保留。
+
+另外 `max_tokens` 要写进 `base_llm_arguments.max_tokens`，`reasoning_effort`
+同时写顶层与 `llm_arguments.reasoning_effort`（只写一处上游行为不稳定）。
+
+### 15.3 SSE 翻译
+
+上游与 OpenAI 有几处本质差异（`chat.StreamTranslator`）：
+
+| 上游 | 处理 |
+| --- | --- |
+| `choices[].text` | 正文增量 → `delta.content` |
+| `choices[].reasoning_content` | 同层思考内容 → `delta.reasoning_content` |
+| `choices[].tool_calls` | 同层工具调用；按 `index` 聚合 `function.arguments` |
+| `finish_reason` | 唯一的结束标记；**没有** `[DONE]`，收尾帧由 `finish()` 统一发 |
+| `usage.total_tokens` | 上游给的是**上下文大小**，必须 `prompt + completion` 重算 |
+
+流结束前没见到 `finish_reason` → `truncated_stream`（502）；一条正文都没有 →
+非流式 `empty_response`（502），流式补一段「(空响应)」再正常收尾。
+
+`code !== "Success"` 与审核拦截都是**流内错误**：翻成 `StreamError` 后继续抛，
+让 `openai_sse` 补错误帧并记 502。审核判定只看 `code` / `message` / `msg` /
+`errmsg` / `error_msg` / `error` / `detail` / `reason` 等诊断字段（以及顶层的
+纯字符串 `data`），**不看模型正文**——正文里出现 `sensitive` 这种普通英文词
+曾被误判成审核拦截。
+
+### 15.4 模型目录
+
+在线目录是 `GET /api/aioffice/v1/sessions/plans`，`plans[]`（Pro / Max 模式）
+在前、`models[]` 在后，顺序必须保持；有 `reasoning_efforts` 才算思考模型，
+`max_new_tokens` 是输出上限，倍率里的全角 / 日文波浪线统一成 ASCII，徽标字段
+叫 `tag`，介绍字段叫 `intro`（`desc` 常为空）。`default` 映射到
+`deepseek-v4.1-flash`，并剥掉 `wps-lingxi/` / `lingxi/` 前缀。
+
+读不到目录（未登录 / 接口失败）时回退 `constants.DEFAULT_MODELS`（逐字段抄自
+一次真实响应，2026-11-10）。目录缓存与刷退避走 `catalog_ttl` /
+`catalog_retry_ttl` / `catalog_timeout`。
+
+### 15.5 签到与余额
+
+- 签到 = 任务中心的 `daily_check_in`：先 `GET /api/public/v1/tasks` 找任务与
+  可用日期（优先北京时间今天，否则第一个 `available`），再
+  `POST /api/public/v1/tasks/daily_check_in/claim[?date=YYYY-MM-DD]`。
+  `result == "ok" || "Success"` 或缺失按成功；「已领取 / 已签到」按 `already`
+  处理而不是失败（否则用户会以为签到坏了）。
+- 余额 = `GET /api/public/v1/credits/balance`：优先 `data.total_balance`，
+  否则 `data.balance`；赠送批次取 `data.bonus_credits` 或
+  `data.bonus_summary.items`，无时区的时间串按北京时间（`+08:00`）解析；
+  15 天内到期的批次汇总成 `expiring`，`credits()` 一并给出到期明细。
+- 探活 = `GET /api/public/v1/account/profile`：200 且 `result` 不是
+  `UserUnauthorized` → `ok`，顺带取昵称。
+
+### 15.6 账号调度
+
+与 DuMate / Discovery 同一套 `_NATIVE_POOL`：权重 SWRR + LRU、会话亲和
+（`session_affinity`）、单账号并发闸门、`max_accounts_try` 换号、
+`cooldown_429` / `cooldown_5xx` 冷却。**401 只换号、不冷却**；`min_credits`
+不适用于灵犀（没有保底积分选号实现），设置页也不会露出该字段。
+
+### 15.7 有意不跟
+
+- **群聊任务**：`try_group_chat` 需要 WebSocket（`completions/ws`）+ 建群 /
+  解散，本轮只做普通对话与每日签到。
+- **一次性任务**：专家模式 / 客户端任务依赖 `execution_status` 上报与固定
+  话术，接口已按参考实现预留了 `group_id`，但尚未接进后台任务。
+- **图片输入**：`content` 只接受字符串，分段里的图片会被丢弃（日志记数量），
+  模型条目仍如实标 `attachment` 供界面展示。
+- **扫码登录**：见 §15.1。

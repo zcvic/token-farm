@@ -2,8 +2,9 @@
 
 **多平台 token 农场**：一套面板同时管理 **WorkBuddy（腾讯 CodeBuddy）**、
 **Trae**、**Qoder**、**Loomy（讯飞星火）**、**DuMate（百度搭子）**、
-**MiniMax Code**、**Discovery（Intern TokenPlan）**、**Kilo**、**Cline** 与
-**豆包（Doubao）** 十类账号，统一对外提供 OpenAI 兼容接口。
+**MiniMax Code**、**Discovery（Intern TokenPlan）**、**Kilo**、**Cline**、
+**豆包（Doubao）** 与 **WPS 灵犀（Lingxi）** 十一类账号，统一对外提供
+OpenAI 兼容接口。
 
 本项目派生自 [`workbuddy-manager`](https://github.com/ithtelab/workbuddy-manager)
 （MIT）。上游的全部能力都保留且行为不变 —— 账号池、扫码纳管、签到保活、密钥分发、
@@ -11,7 +12,7 @@ IP / 模型白名单、用量与日志。在此之上新增：
 
 | 新增 | 位置 | 说明 |
 |---|---|---|
-| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline / 豆包 为原生实现，Qoder 用内置网关 |
+| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline / 豆包 / 灵犀 为原生实现，Qoder 用内置网关 |
 | Trae 适配器 | `server/platforms/trae/` | 账号存储 / 令牌刷新 / 签到 / 额度 / 模型 / 对话（SSE → OpenAI chunk） |
 | Qoder 适配器 | `server/platforms/qoder/` | 账号 / 签到 / 额度 / 模型 / 对话；协议层内置在 `_vendor/`，无需额外部署 |
 | Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录（含手机号补绑）/ 手机验证码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
@@ -21,7 +22,8 @@ IP / 模型白名单、用量与日志。在此之上新增：
 | Kilo 适配器 | `server/platforms/kilo/` | 账号（官方设备授权码 → 一年期 token）/ 资料与余额（**美元**）/ 模型（免鉴权 OpenRouter schema → 自动路由兜底）/ 对话；单区域前缀 `kilo/`，无签到、无 refresh |
 | Cline 适配器 | `server/platforms/cline/` | 账号（WorkOS 设备码 → 一次性 refresh token）/ token 轮换（先落盘再使用）/ 模型（免费档 + 全量合并）/ 对话；免费档强制流式并聚合，伪装限流判成 429；单区域前缀 `cline/` |
 | 豆包适配器 | `server/platforms/doubao/` | 账号（网页 Cookie，抓包导入）/ 设备指纹 / 签到 / 额度（`window_limits` 汇总）/ 模型（内置快照）/ 对话（固定 SSE → OpenAI chunk）；上游无 usage，按字符 ÷1.7 估算；单区域前缀 `doubao/`，无扫码登录 |
-| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` / `doubao/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
+| 灵犀适配器 | `server/platforms/lingxi/` | 账号（网页 Cookie `wps_sid`）/ 客户端设备指纹 / 三步握手（建会话 → 领 run → SSE 对话）/ run 缓存 1 小时 / 签到（每日签到任务）/ 余额（赠送批次与到期）/ 模型（`/sessions/plans` + 内置快照）/ 对话（`text` 字段 → OpenAI chunk）；单区域前缀 `lingxi/`，无扫码登录 |
+| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` / `doubao/` / `lingxi/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
 | 多平台接口 | `server/routers/platforms.py` | `/api/platforms/*`：账号、导入、刷新、签到、额度、模型 |
 | 多平台页面 | `web/app/(main)/accounts/page.tsx`、`models/page.tsx` | 顶部平台下拉切换；账号 / 模型页随平台更换数据源，分版本的平台（Trae / Qoder / MiniMax Code）再按国内版 / 国际版过滤，统计与日志按平台过滤 |
 | 设计文档 | [`docs/multi-platform.md`](docs/multi-platform.md) | 契约、路由、凭据安全、已知限制 |
@@ -57,6 +59,7 @@ token-farm/
 │  ├─ kilo-ref.txt      # Kilo 官方客户端的设备码 / 余额 / 目录事实
 │  ├─ cline-ref.txt     # Cline 参考源的 WorkOS 设备码 / 强制流式 / 伪装限流
 │  ├─ doubao-ref.txt    # 豆包参考源的 Cookie / SSE 事件 / 签到 / 额度事实
+│  ├─ lingxi-ref.txt    # 灵犀参考源的三步握手 / SSE 翻译 / 目录 / 签到事实
 │  ├─ install.sh        # 上游原版：装依赖 + systemd（Linux 服务器）
 │  └─ windows-native/   # 上游原版：原生 Windows（无需 Docker）
 ├─ docs/                # 用户文档与维护者手册
@@ -342,6 +345,7 @@ MANAGER_REPO = os.environ.get('WB_MANAGER_REPO') or 'zcvic/token-farm'
 | `kilo-ref` | [kilocode](https://github.com/Kilo-Org/kilocode)（Apache-2.0） | Kilo **官方客户端**的协议事实来源，**原生重写**、无副本 | 对照 `packages/kilo-gateway` 的设备码 / 余额 / 目录，改 `server/platforms/kilo/` |
 | `cline-ref` | [cline2api](https://github.com/luawei1/cline2api)（MIT） | Cline 协议事实来源，**原生重写**、无副本 | 对照 `worker.js` 的设备码 / 伪装头 / 强制流式，改 `server/platforms/cline/` |
 | `doubao-ref` | [doubao2api](https://github.com/yyydsz/doubao2api)（MIT） | 豆包协议事实来源，**原生重写**、无副本 | 对照 Cookie 鉴权 / SSE 事件 / 签到 / 额度，改 `server/platforms/doubao/` |
+| `lingxi-ref` | [dsh-connect-lingxi](https://github.com/xinstart-1/dsh-connect-lingxi)（MIT）、[dsh-router-wpslingxi](https://github.com/xfyang728/dsh-router-wpslingxi)（MIT） | 灵犀桌面端私有协议事实来源，**原生重写**、无副本 | 对照三步握手 / 请求体约束 / SSE 翻译 / 目录 / 签到，改 `server/platforms/lingxi/` |
 
 上游 Go 源码（workbuddy2api）已经并入本仓库的 `upstream/`，日常直接在这里改，
 不再从外部仓库 fetch / merge。面板侧新能力的参考来源是
@@ -410,6 +414,16 @@ Discovery、Kilo、Cline 三个平台都是「OpenAI 兼容直连 + 账号池」
 签名、参考实现自己也不稳，因此**只支持抓包导入 Cookie**。上游不返回 usage，
 统计按「输出字符 ÷ 1.7」估算——这是估算值，不能拿去对账。已核对范围见
 `deploy/doubao-ref.txt`。
+
+WPS 灵犀（Lingxi）没有开放平台 API，协议事实来自其**桌面客户端**自己使用的
+私有 app-server 接口，核对自
+[`xinstart-1/dsh-connect-lingxi`](https://github.com/xinstart-1/dsh-connect-lingxi)
+（含 `docs/PROTOCOL.md`）与
+[`xfyang728/dsh-router-wpslingxi`](https://github.com/xfyang728/dsh-router-wpslingxi)
+（均为 MIT），同样是**原生重写**：凭证是网页 Cookie（`wps_sid`），一次对话是
+「建会话 → 领 run → SSE」三步握手，会话 / run 按账号 + 设备 + 模型缓存 1 小时，
+签到与余额走网页任务 / 积分接口。已核对范围见 `deploy/lingxi-ref.txt`，
+用户向的说明见 [`docs/multi-platform.md`](docs/multi-platform.md) §15。
 
 所有参考源都没有共享提交历史，`git merge` / `git pull` 不成立 ——
 只能挑单个提交，导出成补丁再应用。流程与注意事项见

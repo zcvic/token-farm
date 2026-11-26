@@ -156,11 +156,18 @@ class GatewayPassthroughTest(unittest.TestCase):
         #     时适配器强制走 stream 再由这里聚合回 `chat.completion`。聚合必须
         #     把 `delta.tool_calls` 收进 `message.tool_calls`，否则「强制流式」
         #     这条兜底路径会静默丢工具调用。它只作用于 `cline/` 前缀。
+        #   · platforms/lingxi/chat.py：灵犀把工具调用放在 `choices[].tool_calls`
+        #     （与正文 `choices[].text` 同层，不是 OpenAI 的 `delta`），必须翻译
+        #     成 `delta.tool_calls` 并按 `index` 聚合参数。只作用于 `lingxi/` 前缀。
+        #   · platforms/lingxi/adapter.py：上一条的**收尾判定器**——非流式出口
+        #     用 `StreamTranslator.has_tool_calls` 区分「只有工具调用、没有正文」
+        #     与真正的空响应，不改写内容；翻译仍全在 chat.py。
         allow = {'routers/anthropic.py', 'routers/responses.py', 'services/tencent.py',
                  'platforms/trae/chat.py', 'platforms/trae/client.py',
                  'platforms/trae/text_tools.py',
                  'platforms/minimax/translate.py', 'platforms/minimax/adapter.py',
-                 'platforms/cline/client.py'}
+                 'platforms/cline/client.py',
+                 'platforms/lingxi/chat.py', 'platforms/lingxi/adapter.py'}
         root = Path(__file__).resolve().parents[2] / 'server'
         # Qoder 的内置网关是**第三方源码副本**（vendor 自 qoder2api-hub），它的
         # `tool_calls` 处理属于 Qoder 私有协议 ↔ OpenAI 的翻译层，与 trae/chat.py

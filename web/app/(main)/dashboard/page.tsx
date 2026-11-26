@@ -1334,7 +1334,9 @@ export default function DashboardPage() {
                 ? t('platforms.noAccountsDescDumate')
                 : platform === 'doubao'
                   ? t('platforms.noAccountsDescDoubao')
-                  : t('platforms.noAccountsDesc')}
+                  : platform === 'lingxi'
+                    ? t('platforms.noAccountsDescLingxi')
+                    : t('platforms.noAccountsDesc')}
               className="flex flex-col items-center justify-center py-12 text-center"
             />
           )}

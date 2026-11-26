@@ -221,6 +221,9 @@ _NATIVE_POOL = _LOOMY - {'min_credits'}
 # 不能给 `catalog_*`：那会是「保存成功但行为不变」的假开关。它有签到与额度
 # 查询，`credits_ttl` / `credits_timeout` 照常保留。
 _DOUBAO = _NATIVE_POOL - {'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout'}
+# WPS 灵犀是原生选号 / 在线目录（`/sessions/plans`）/ 签到 / 余额，与 Loomy
+# 同一组策略；但没有「保底积分」的选号实现，也没有桌面端回写。
+_LINGXI = _NATIVE_POOL
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -235,6 +238,7 @@ _BY_PLATFORM: dict[str, frozenset[str]] = {
     'kilo': _NATIVE_POOL,
     'cline': _NATIVE_POOL,
     'doubao': _DOUBAO,
+    'lingxi': _LINGXI,
     'combo': _COMBO,
 }
 

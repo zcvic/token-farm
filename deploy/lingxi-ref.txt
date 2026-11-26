@@ -1,0 +1,123 @@
+# 已人工核对过的 WPS 灵犀（Lingxi）协议事实 —— 本仓库灵犀适配层的参考
+#
+# 仓库：https://github.com/xinstart-1/dsh-connect-lingxi （MIT）
+#       参考范围：`docs/PROTOCOL.md`（三步握手 / 请求头 / 请求体约束 /
+#       SSE 形状 / 错误码）、`src/protocol/*`（client / headers / errors /
+#       balance / tasks / sse / normalize / catalog / constants）。
+# 仓库：https://github.com/xfyang728/dsh-router-wpslingxi （MIT）
+#       参考范围：run 缓存与失效重试、模型目录字段、签到与余额解析。
+# 包：  @kevinfx/magpie-wps-lingxi@0.3.3（npm，MIT）
+#       仅用于交叉核对字段名与错误文案。
+# 形态：不是 fork，也没有共享历史；**不是源码副本**，仓库里没有 vendor 目录。
+#       账号 / 对话 / 目录 / 签到 / 余额都在 server/platforms/lingxi/ 里按协议
+#       事实重写（httpx + 标准库，不新增依赖）；参考仓的 HTTP 服务与面板
+#       一律不引入。
+#
+# 记录方式：一次同步写一段；未核对的提交号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/qoder-ref.txt、deploy/loomy-ref.txt 同一约定）。
+#
+# 升级流程：clone 参考仓 → 看 docs/PROTOCOL.md 与 src/protocol 的协议段 diff
+# → 在本仓库对应文件里重写 → 跑
+# server/tests/test_platform_lingxi_adapter.py → 更新本文件的锚点与差异说明。
+#
+# ---- 2026-11 首次接入
+#      基线：首次接入时两个参考仓 HEAD（具体提交号待补）。
+#
+#      已取（按能力，不是逐行移植）：
+#        · 凭证：**网页 Cookie**，登录态字段是 `wps_sid`（导入时校验，缺了
+#          直接 400）。没有 OAuth、没有 refresh token，失效只能重新登录
+#          lingxi.wps.cn 再抓一次；refresh_account 只是「拿 Cookie 探一次活」。
+#          → server/platforms/lingxi/store.py（uid 由 `wps_sid` 派生，前缀 lx_）
+#        · 基址：主站 https://lingxi.wps.cn，登录域 https://lingxi.kdocs.cn。
+#          建会话 / 领 run / plans / balance / profile 都先主站再登录域；
+#          **401 立即上抛**，不换基址也不重试。
+#          → client._request
+#        · 一次对话 = 三步握手：
+#            1. POST /api/aioffice/v1/cowork/sessions
+#               body: session_type=cowork_client / agent_version=2 /
+#                     env{device_id, device_name, work_space_dir}
+#               → data.session_id
+#            2. POST /api/public/v1/credits/runs
+#               body: session_id / model_provider=lingxi / model_id /
+#                     agent_input.text
+#               → data.run_id、data.group_id
+#            3. POST /api/public/v1/agent-runtime/chat/completions
+#               OpenAI 形状请求体，stream 固定 True
+#          → client.open_chat / _ensure_run / _send_chat
+#        · run 缓存：按「账号 + 设备 + 模型」缓存 1 小时
+#          （constants.RUN_TTL_SECONDS，与参考实现一致）。run 失效
+#          （404 且文案含 run / 会话 / 过期 / not found / 不存在）时丢缓存
+#          重建一次再试；401 不重试。
+#          → client._runs / forget_run / _ensure_run
+#        · 请求头：基础头 Cookie / User-Agent / Referer:<base>/ /
+#          Accept:application/json；Cookie = 用户 cookie +
+#          `x-kso-app-name=win-lingxi-desktop`、
+#          `x-kso-app-version=1.3.31`、`x-kso-device-id=<DEVICE_ID>`。
+#          对话头另加 Content-Type / X-Client-Type=lingxi_claw /
+#          X-Client-Lang=zh-CN / X-Cc-Agent-Type / X-Request-Id /
+#          X-Cc-Session-ID / X-Cc-Run-ID；cookie 含 copilot_server_branch
+#          时加 X-Cc-Region。
+#          → client._headers
+#        · 设备号默认由 Cookie 稳定派生（constants.device_id_for），账号里
+#          有 deviceId 则优先用账号值；同一个账号每次换设备号等于自己制造
+#          风控特征。
+#          → store.device_of
+#        · 请求体硬约束（实测违反即 400 InvalidArgument）：
+#            - `content` **只能是字符串**：分段数组（[{type:"text",text}]）
+#              任何角色都 400；developer 角色换成 system。
+#            - `tool_choice` **只能是字符串**：对象形式降级成 required / auto；
+#              tools[].function.strict 原样保留。
+#            - `max_tokens` 写进 base_llm_arguments.max_tokens。
+#            - `reasoning_effort` 同时写顶层与 llm_arguments.reasoning_effort
+#              （只写一处上游行为不稳定）。
+#          → server/platforms/lingxi/chat.py:build_body
+#        · SSE 形状（**没有 [DONE]**，靠 choices[].finish_reason 收尾）：
+#            - choices[].text              正文增量（不是 delta.content）
+#            - choices[].reasoning_content 思考内容（与 text 同层）
+#            - choices[].tool_calls        工具调用，按 index 聚合 arguments
+#            - choices[].finish_reason     唯一的结束标记
+#            - code !== "Success"          流内错误
+#            - usage.total_tokens          是**上下文大小**，必须
+#                                          prompt + completion 重算
+#          → chat.StreamTranslator
+#        · 审核判定只看诊断字段（code / message / msg / errmsg / error_msg /
+#          err_msg / errorMessage / error / detail / reason，以及顶层 data 为
+#          字符串时），**不看正文**：正文里出现 sensitive 这种普通英文词曾
+#          被误判成审核拦截。审核拦截 → 400 audit_blocked。
+#          → chat._diagnostics / Adapter._translate_error
+#        · 错误映射：401/403 且文案匹配 /unauthor|登录|凭据|credential|cookie|
+#          sid|expired/i（或文案为空）→ 401 auth_expired，否则 → 404；
+#          400/404/422 → 404；5xx 原样；其它 → 502。
+#          → client.classify
+#        · 模型目录：GET /api/aioffice/v1/sessions/plans → data.plans[] +
+#          data.models[]，顺序保持；字段 key / name / desc / tag / intro /
+#          multiplier / support_multimodal / max_context_tokens /
+#          max_input_tokens / max_new_tokens / reasoning_efforts。
+#          有 reasoning_efforts 才是思考模型；max_new_tokens 是输出上限；
+#          倍率混用 ~ / ～ / 〜 需归一；tag 是徽标；desc 为空时介绍在 intro；
+#          default → deepseek-v4.1-flash，并剥掉 wps-lingxi/ / lingxi/ 前缀。
+#          → server/platforms/lingxi/catalog.py
+#        · 余额：GET /api/public/v1/credits/balance → data.total_balance 优先
+#          于 data.balance；赠送批次取 data.bonus_credits 否则
+#          data.bonus_summary.items；无时区的时间串按 +08:00 解析；15 天内
+#          到期的批次汇总成 expiring。
+#          → client.parse_balance
+#        · 任务：GET /api/public/v1/tasks → data.tasks[]（task_key / type /
+#          status / reward_amount / action / extra{consecutive_days,
+#          check_in_days[]}）；领取 POST /api/public/v1/tasks/{task_key}/claim
+#          [?date=YYYY-MM-DD]，body {}；result === 'ok' || 'Success' 或缺失
+#          按成功；非 ok 但 hint 含「已领取 / 已签到 / already」或 result 含
+#          done / claimed 视为已领过；签到日期优先北京时区今天。
+#          → client.tasks / claim / claim_outcome / beijing_date
+#        · 探活：GET /api/public/v1/account/profile 返回 200 且
+#          result !== 'UserUnauthorized' → ok，data.name 可取昵称。
+#          → client.probe
+#
+#      有意不跟：
+#        · 群聊任务（try_group_chat）：需要 WebSocket（completions/ws）+
+#          建群 / 解散，本轮只做普通对话与每日签到。
+#        · 一次性任务（专家模式 / 客户端任务）：依赖 execution_status 上报
+#          与固定话术，接口已预留 group_id，但尚未接进后台任务。
+#        · 图片输入：content 只接受字符串，分段里的图片会被丢弃（日志记
+#          数量），模型条目仍如实标 attachment 供界面展示。
+#        · 扫码登录：没有登录接口可用，只支持抓包导入 Cookie。
