@@ -132,7 +132,7 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 >   整条数据面不存在。两个 README 提交（加代理广告位）与本项目无关。
 
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
-已核对的范围是 `80b4b21`（v2.11.10）→ `caa82c22`（v2.11.23）：
+已核对的范围是 `80b4b21`（v2.11.10）→ `a83d93738b`：
 
 | 区间 | 取到的能力 |
 |---|---|
@@ -144,12 +144,13 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 | `2b6b386` → `7d5b163`（v2.11.20） | 模型中心剔除视频 / 音频生成模型（含 `-video` / `-tts` / `-audio` 后缀，多模态对话模型保留）；统计页范围选择器补「昨日」 |
 | `7d5b163` → `eb76ab8b`（v2.11.21） | 字体改为随仓库分发（`next/font/local`，构建不再依赖 Google Fonts）；`.env.example` 数据卷默认改为命名卷，补首次部署防呆 |
 | `eb76ab8b` → `caa82c22`（v2.11.23） | compose 透传 `.env` 的 `WB_ADMIN_PASSWORD`、镜像名可覆盖；容器日志降噪（启动失败只留根因与修法、逐请求 access log 默认关）；入口脚本按 PUID/PGID 对齐挂载目录属主，NAS 不必开 SSH；i18n 术语统一 |
+| `caa82c22` → `a83d93738b` | 流式转发补客户端断连检测与「内容空闲」看门狗（`WB_STREAM_IDLE_TIMEOUT`，默认 120 秒 / 0 关闭）；设置页时长字段在配置缺该键时不再显示 undefined 并标红 |
 
-这八批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
+这九批都**只取对本项目有益的部分**；Trace Tap（调用抓包）整段未取，
 国际版 agenttool 搜索、上游自己的 CI / 发版提交同样未取。逐项清单与
 「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批、第五批、
-第七批、第十二批、第十四批、第十六批、第十九批段落里；Web 搜索的协议与错误语义
-单独写在 [web-search-passthrough.md](web-search-passthrough.md)。
+第七批、第十二批、第十四批、第十六批、第十九批、第二十二批段落里；Web 搜索的
+协议与错误语义单独写在 [web-search-passthrough.md](web-search-passthrough.md)。
 
 > **面板批（2026-11-19，`d780cab` → `2b6b386`）**：这一批是 panel / Web /
 > Docker 改动，没有 Go `upstream/` 改动。落点与三处有意偏离：
@@ -270,6 +271,29 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 > 运行，`setpriv` 降权路径只在结构层面被测试锁住（语法、挂载点判断、PUID=0
 > 回落、工具齐备），没有跑过真实容器。第一次发版前请在有 docker 的机器上
 > `docker compose up -d --build` 起一次，确认容器内 `id` 是 PUID 而不是 0。
+
+> **流式看门狗批（2026-11-26，`caa82c22` → `a83d93738b`）**：2 个提交全取。
+>
+> - `6c7648e4d3` 流式转发补客户端断连检测与「内容空闲」看门狗（issue #485）：
+>   `UPSTREAM_TIMEOUT` 是 httpx 的逐字节 read timeout，保活帧会不断重置它，
+>   于是「连接还活着、正文早就不产出」的流能挂到 999 秒。本仓的流式出口比
+>   参考仓多（直连 + 平台 raw 透传 + 平台 `openai_sse` + anthropic / responses
+>   两个转换层），所以做成「一处配置、五个出口」：`server/config.py` 新增
+>   `STREAM_IDLE_TIMEOUT`（`WB_STREAM_IDLE_TIMEOUT`，默认 120 秒 / 0 关闭），
+>   `gateway._sse_frame_has_content()` 按**单帧**判断 content /
+>   reasoning_content / tool_calls（不能用累计的 `translator.saw_content`，
+>   它在首个 token 后永远为真，看门狗会当场失效）。**有意偏离**：raw 透传
+>   路径只断开上游并把原因写进 `request_logs.error`，不注入网关自造的 SSE 帧
+>   （截断由客户端按「流未正常结束」处理）；转换层复用既有的 `error` /
+>   `response.failed` 收尾。参考仓的 `docker-compose.full.yml` 本仓不存在，跳过。
+>   测试：新增 `server/tests/test_stream_idle_watchdog.py`（假上游一帧正文后只
+>   发保活，断言 0.55 秒内中断、上游连接关闭、日志含 idle、响应体无注入帧），
+>   `test_platform_sse.py` 补 idle / disconnect 两项。
+> - `a83d93738b` 设置页时长字段在配置缺该键时显示 undefined 并标红（issue #486）：
+>   `pickValues` 先归一成同一个字符串再判合法，键不存在（`undefined` / `null`）
+>   明确回退 `f.def`；`dev/verify_new_controls.mjs` 补回归断言。
+>
+> 本批没有 Go `upstream/` 改动。
 
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
@@ -583,6 +607,33 @@ CN 专发的 `X-Client-*` 三头、小程序口径撤头、global UA 品牌段�
   提示由组件按每个数据点渲染，不存在「兄弟节点 `<title>` 被当成整图说明」这个形态。
 
 逐条见 `deploy/workbuddy-panel-ref.txt` 第二十一批。
+
+### 已评估：misakano `b1233f09..e39c2528ba`
+
+第二十一批之后参考仓又推了 4 个非 merge 提交（2026-11-25），**取 2 项**：
+
+- **取 `e39c2528ba`** TraeCode 自述句进脱敏表：上游按「interactive agent in
+  TraeCode」这一连续短语判非官方渠道，命中即 400 `11-128`；单独 `TraeCode` /
+  `in Trae IDE` / `in Cursor` 都 200。参考仓在 `sanitizeFeatures` 加
+  `"You are an interactive agent in TraeCode"`、在 `sanitizeRewrites` 加
+  → `"You are an interactive agent"`（只删这一段，句子其余部分与行为指令原样
+  保留）。本仓 `sanitize.go` 结构相同，直接落位；逐字节快照
+  `TestSanitizeLiteralByteExact` 的特征数 9→10、改写对数 7→8，并新增
+  `TestTraeCodeIntroRewritten`（含「散词 `TraeCode` 不得误伤」）。
+- **取 `e64f7d3162`** tool 配对吸收 hub #26 三修：①相邻两批
+  `assistant.tool_calls`（中间夹正文）先合并（`mergeAdjacentToolCalls`）；
+  ②repack 遇到孤儿 tool 结果不再 `break`，改成暂存后移；③cleanup 对同一
+  `tool_call_id` 的重复结果只留第一条。本仓 repack 的变量名/边界写法不同
+  （`notices` / `noticeBeforeLaterResult` vs 参考仓 `between` / `sawNonTool`），
+  按本仓结构重写并保留既有边界语义：结果前的 user/assistant 是轮次边界，
+  只有 system/developer 视为插入物；后续带 tool_calls 的 assistant 是新组头，
+  必须交还外层。`payload.go` 管线改为 合并 → 重排早到结果 → repack → 清理。
+  新增 `upstream/internal/upstream/tool_pairing_hub26_test.go`。
+- **不取 `f4c6f89b19` / `787401df7d`**（embeddings 请求级错误码与 413 归类、
+  面板 `cool_kind` 熔断）：本仓没有 embeddings 数据面（全仓搜 `/v1/embeddings`
+  零命中），整条链路不存在，没有落点。
+
+逐条见 `deploy/workbuddy-panel-ref.txt` 第二十三批。
 
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）

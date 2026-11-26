@@ -1030,3 +1030,94 @@ f0c427d2ce5633b20ccd5db73b1c6532441475d5
 #      锚点提交：b1233f090d953f4eaf6adcb7e329e244e2270c54
 #      上一次基线：d221c721fc0ace6cfab3f4562ebe2a6d7344d117
 392f8ac7c47b083797037901f2d1f5110e26a0bc
+
+
+# ---- 2026-11 第二十二批：上游 manager caa82c22 → a83d93738b（2 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批 2 项全取。第一项横跨本仓五个流式出口，第二项是纯 Web 修复。
+#      已取（按本仓结构重写）：
+#        · 6c7648e4d3 流式转发补客户端断连检测与「内容空闲」看门狗（issue #485）：
+#          现场是「上游连接还活着、保活帧一直在来，但正文早就不产出」。httpx 的
+#          read timeout 每收到一个字节就重置，保活帧会不断把它刷新 —— 一条请求
+#          能从 1.8 秒首帧一直挂到 999 秒，客户端早在 600 秒就弃连，这段时间里
+#          一直占着上游连接与并发名额。
+#          本仓的流式出口比参考仓多：网关直连 `/v1/chat/completions` 一个，
+#          平台/组合模型又分 `raw_generator`（原样透传）与 `openai_sse`（转成
+#          OpenAI chunk）两条，协议转换层 anthropic / responses 各一条。因此
+#          按「一处配置、五个出口」重写，而不是照搬参考仓那三处：
+#            - server/config.py 新增 STREAM_IDLE_TIMEOUT（WB_STREAM_IDLE_TIMEOUT，
+#              默认 120 秒，0 = 关闭）；.env.example / docker-compose.yml 同步透传。
+#              参考仓的 docker-compose.full.yml 本仓不存在（只有 docker-compose.yml
+#              与 upstream/docker-compose.yml），跳过。
+#            - server/routers/gateway.py 新增 _sse_frame_has_content()：**按单帧**
+#              判断 content / reasoning_content / tool_calls。不能用累计的
+#              translator.saw_content —— 它首个 token 之后就永远为真，保活/空帧
+#              都会被当成正文，看门狗当场失效。
+#            - _platform_chat() 增加 request 参数；raw_generator() 用
+#              wbforward.scan_sse 喂一份 scratch_usage 检测正文，每块查
+#              request.is_disconnected()；openai_sse 调用透传 idle_timeout /
+#              disconnected。直连 `_chat` 的 generator 同样处理。
+#            - server/platforms/sse.py 的 openai_sse 增加 idle_timeout /
+#              disconnected：跟踪 last_content_at，正常走完才 yield DONE，
+#              中途中断改走既有 error_frame（这是转换层，不是透传层）。
+#            - anthropic._translate_stream / responses._stream_events 增加可选
+#              request 参数与看门狗，按单帧更新 last_content_at；收尾复用各自
+#              既有的 error / response.failed 路径。
+#          **有意偏离（与参考仓一致）**：raw 透传路径只断开上游并把原因写进
+#          request_logs.error，绝不注入网关自造的 SSE 帧（test_gateway_passthrough
+#          守着「转发路径不改写 SSE」）；截断由客户端按「流未正常结束」处理。
+#          测试：新增 server/tests/test_stream_idle_watchdog.py（假上游一帧正文后
+#          只发保活，断言 <0.55 秒中断、上游连接被关闭、日志含 idle、响应体里
+#          没有 upstream_idle_timeout 帧；另加 anthropic / responses 两条转换层
+#          中断用例），server/tests/test_platform_sse.py 补 idle 与 disconnect 两项。
+#        · a83d93738b 设置页时长字段在配置缺该键时显示字面 undefined 并标红
+#          （issue #486）：pickValues 的 duration 分支原写法
+#          `durationOk(f, raw) ? String(raw).trim() : f.def`，durationOk 内部按
+#          `String(raw ?? '')` 把 undefined 当空串判合法（allowEmpty 的
+#          credit_exhausted 正是如此），随后 String(undefined) 把 "undefined"
+#          填进表单、再被 DURATION_RE 判非法 → 红框。改为先归一成同一个字符串，
+#          键不存在（undefined / null）明确回退 f.def；dev/verify_new_controls.mjs
+#          补回归断言（值为空且无 .text-destructive）。`npx tsc --noEmit` 通过。
+#      锚点提交：a83d93738b1d6ebbd38f3dae1c5a90bf222e9280
+#      上一次基线：caa82c22b467e9d5cf613f500a17428edd2b1682
+6c7648e4d3270e60a68c03f53ab9e2577067c5b5
+a83d93738b1d6ebbd38f3dae1c5a90bf222e9280
+
+
+# ---- 2026-11 第二十三批：面板仓 b1233f09 → e39c2528ba（4 个非 merge 提交）----
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      本批取 2 项（都是 upstream/ Go 侧），2 个 embeddings 提交不取。
+#      已取（按本仓结构重写）：
+#        · e39c2528ba TraeCode 自述句进脱敏表：上游按「interactive agent in
+#          TraeCode」这一连续短语判非官方渠道，命中即 400 11-128；单独 TraeCode /
+#          in Trae IDE / in Cursor 都 200。参考仓在 sanitizeFeatures 加
+#          "You are an interactive agent in TraeCode"、在 sanitizeRewrites 加
+#          → "You are an interactive agent"（只删这一段，句子其余部分与行为指令
+#          原样保留）。本仓 sanitize.go 结构相同，直接落位；逐字节快照测试
+#          TestSanitizeLiteralByteExact 的特征数 9→10、改写对数 7→8，并新增
+#          TestTraeCodeIntroRewritten（含「散词 TraeCode 不得误伤」）。
+#        · e64f7d3162 tool 配对吸收 hub #26 三修：
+#            ① 相邻两批 assistant.tool_calls（中间夹正文）先合并成一条
+#               （mergeAdjacentToolCalls：正文拼接、tool_calls 并批；content 是
+#               结构化 parts 时不动，宁可漏修不改形状）；
+#            ② repack 遇到孤儿 tool 结果不再 break，改成暂存后移 —— 否则孤儿
+#               后面的合法结果永远停在原位、中间夹着插入物，照样 11148；
+#            ③ cleanup 对同一 tool_call_id 的重复结果只留第一条（上游一个调用
+#               只认一条结果，多出来的判 11148）。
+#          本仓 repack 的变量名/边界写法与参考仓不同（本仓是 notices /
+#          noticeBeforeLaterResult），按本仓结构重写为 between / sawNonTool；
+#          边界保留本仓既有语义：结果前的 user/assistant 是轮次边界（break），
+#          只有 system/developer 视为插入物；后续 assistant 若带 tool_calls 是
+#          新组头，也必须 break 交还外层（真实会话 msg[181] 就是被吞掉后漏排）。
+#          payload.go 的管线顺序改为 合并 → 重排早到结果 → repack → 清理。
+#          测试：新增 upstream/internal/upstream/tool_pairing_hub26_test.go；
+#          `go test ./internal/upstream/ -count=1` 通过。
+#      未取：
+#        · f4c6f89b19 / 787401df7d 两个 embeddings 提交（请求级错误码
+#          input_too_large、TEI 413 归类与面板 cool_kind 熔断）：本仓没有
+#          embeddings 数据面（全仓搜 /v1/embeddings 零命中），整条链路不存在，
+#          没有落点。
+#      锚点提交：e39c2528ba2cea8eeb9cedac8caefdd8d9b1b3f5
+#      上一次基线：b1233f090d953f4eaf6adcb7e329e244e2270c54
+e64f7d31626006a2b73254348b89d0bb0293ba59
+e39c2528ba2cea8eeb9cedac8caefdd8d9b1b3f5

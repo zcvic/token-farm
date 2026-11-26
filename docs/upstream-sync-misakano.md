@@ -3490,3 +3490,77 @@ CI 的 binaries 就是这么挂的。改法是取 `now + 28 天`。
 | `upstream/internal/upstream/degraded_warn_test.go` | 新增：同 key 只报一次 / 不同 key 各报一次 |
 
 记录同步写进 `deploy/workbuddy-panel-ref.txt` 第二十一批。
+
+## 附录 K：`b1233f09..e39c2528ba` 增量评估（2026-11-26 扫）
+
+### K.1 范围与统计
+
+参考仓在第二十一批（`b1233f09`）之后又推了 **4 个非 merge 提交**，`e39c2528ba` 为
+当前 `main` 头：
+
+| 提交 | 主题 | 判定 |
+|---|---|---|
+| `e39c2528ba` | TraeCode 自述句进脱敏表（参考 hub 2026-11-24 CN 池实测） | **取** |
+| `e64f7d3162` | tool 配对吸收 hub #26 三修：相邻批合并、孤儿不遮挡、重复结果去重 | **取** |
+| `f4c6f89b19` | embeddings 请求级错误码改成 `input_too_large`、日志带上游 code（#290） | 不取 |
+| `787401df7d` | embeddings 11353（TEI 413）归请求级；面板按 `cool_kind` 判熔断（#290） | 不取 |
+
+**2 取、2 不取**。两个 embeddings 提交依赖本仓不存在的数据面，整条链路没有落点；
+两条 Go 侧修复都是上游内容审核 / tool 配对的直接对抗，照结构落位。
+
+### K.2 `e39c2528ba`：TraeCode 自述句进脱敏表
+
+**现场**：上游按「interactive agent in TraeCode」这一连续短语判非官方渠道，命中即
+HTTP 400 code `11-128`。逐条二分：单独 `TraeCode` / `in Trae IDE` / `in Cursor` 都
+200；只删掉 `in TraeCode` 后，真实 23KB system（81 个工具）整体 200。故只删这一段，
+句子其余部分与行为指令原样保留。
+
+**参考仓做法**：`sanitizeFeatures` 加 `"You are an interactive agent in TraeCode"`，
+`sanitizeRewrites` 加 → `"You are an interactive agent"`。
+
+**本仓落点**：`upstream/internal/upstream/sanitize.go` 结构相同，直接落位。逐字节
+快照 `TestSanitizeLiteralByteExact` 的特征数 9→10、改写对数 7→8；新增
+`TestTraeCodeIntroRewritten`，同时断言「散词 `TraeCode` 不得误伤」。
+
+### K.3 `e64f7d3162`：tool 配对吸收 hub #26 三修
+
+参考仓三处修复：
+
+1. **相邻批合并**：Responses 回放里 `call` / `output` 交错时，正文消息把前一批调用
+   拆成独立一条，后续调用落进正文那条，出站就是相邻两批 `assistant.tool_calls`，
+   上一批成了「无结果调用」，上游判 `11148`。新增 `mergeAdjacentToolCalls`（正文
+   拼接、`tool_calls` 并批；`content` 是结构化 parts 时不动，宁可漏修不改形状）。
+2. **孤儿不遮挡**：`repackToolResultBlocks` 遇到对不上本批的孤儿 tool 结果原来直接
+   `break`，孤儿后面的合法结果就永远停在原位、中间夹着插入物，照样 `11148`。改为
+   暂存（`between`）后移，孤儿本身交给 `cleanupOrphanToolCalls` 删除。
+3. **重复结果去重**：`cleanupOrphanToolCalls` 对同一 `tool_call_id` 只保留第一条
+   `role:tool` 结果（上游一个调用只认一条结果，多出来的判 `11148`）。
+
+**本仓落点**：本仓 repack 的变量名/边界写法与参考仓不同（本仓是 `notices` /
+`noticeBeforeLaterResult`），按本仓结构重写为 `between` / `sawNonTool`；边界保留
+本仓既有语义：结果前的 user/assistant 是轮次边界（`break`），只有 system/developer
+视为插入物；后续带 `tool_calls` 的 assistant 是新组头，也必须 `break` 交还外层
+（真实会话 `msg[181]` 就是被吞掉后漏排）。`payload.go` 的管线顺序改为
+合并 → 重排早到结果 → repack → 清理。
+
+**测试**：新增 `upstream/internal/upstream/tool_pairing_hub26_test.go`；
+`go build ./...`、`go vet ./internal/upstream/`、`go test ./internal/upstream/ -count=1`
+通过。
+
+### K.4 未取的两个 embeddings 提交
+
+`f4c6f89b19` / `787401df7d` 都围绕 `/v1/embeddings`：请求级错误码、TEI 413 归类、
+日志带上游 code、面板 `cool_kind` 熔断。本仓没有 embeddings 数据面（全仓搜
+`/v1/embeddings` 零命中），整条链路不存在，抄过来没有可挂载的入口。
+
+### K.5 落地清单
+
+| 位置 | 改动 |
+|---|---|
+| `upstream/internal/upstream/sanitize.go` | 新增 TraeCode 特征与改写对 |
+| `upstream/internal/upstream/sanitize_test.go` | 快照 9→10 / 7→8；新增 `TestTraeCodeIntroRewritten` |
+| `upstream/internal/upstream/tool_pairing.go` | 新增 `mergeAdjacentToolCalls`；repack 孤儿改暂存；cleanup 去重 |
+| `upstream/internal/upstream/payload.go` | 管线加「合并相邻调用批」一步 |
+| `upstream/internal/upstream/tool_pairing_hub26_test.go` | 新增 hub #26 三修回归用例 |
+
+记录同步写进 `deploy/workbuddy-panel-ref.txt` 第二十三批。
