@@ -202,7 +202,7 @@ async def refresh_all(force: bool = False, now: int | None = None) -> dict:
         try:
             raw = wb2api.read_account_file_any(name, base_dir)
         except Exception as exc:  # noqa: BLE001
-            _note_failure(label, f'读取失败: {err_text(exc)}')
+            _note_failure(label, f'读取失败: {err_text(exc)}', acct)
             stats['failed'] += 1
             continue
         payload = _account_payload(raw)
@@ -210,18 +210,18 @@ async def refresh_all(force: bool = False, now: int | None = None) -> dict:
         if not payload['refresh_token']:
             # 没有 refreshToken 就是真的续不了（要么重新扫码，要么它本就只有
             # 一个长期令牌）。记一次日志，别静默——用户看任务记录能明白原因。
-            _note_failure(label, '缺少 refreshToken，无法续期（需重新扫码或登录）')
+            _note_failure(label, '缺少 refreshToken，无法续期（需重新扫码或登录）', acct)
             stats['failed'] += 1
             continue
         ok, message, fields = await tencent.refresh_token(payload)
         if not ok:
-            _note_failure(label, message)
+            _note_failure(label, message, acct)
             stats['failed'] += 1
             continue
         try:
             tencent.update_auth_tokens(name, fields, base_dir)
         except Exception as exc:  # noqa: BLE001
-            _note_failure(label, f'刷新成功但写入失败: {err_text(exc)}')
+            _note_failure(label, f'刷新成功但写入失败: {err_text(exc)}', acct)
             stats['failed'] += 1
             continue
         stats['renewed'] += 1
@@ -359,15 +359,21 @@ def _record_plan(stats: dict) -> None:
     )
 
 
-def _note_failure(name: str, message: str) -> None:
-    """记失败：日志与任务记录都写，但**限频**避免每小时刷屏。"""
+def _note_failure(name: str, message: str, acct: dict | None = None) -> None:
+    """记失败：日志与任务记录都写，但**限频**避免每小时刷屏。
+
+    `acct` 是巡检拿到的真实账号行。落库必须用它，而不是把文件名写进 `uid`：
+    任务记录页的版本筛选按 uid 查账号表，文件名永远查不到，这条失败记录会在
+    「国内版 / 国际版」视图里被整段过滤掉（用户看不到账号为什么掉线）。
+    """
     now = time.time()
     last = _last_fail_log.get(name, 0.0)
     if now - last < _LOG_THROTTLE_SECONDS:
         return
     _last_fail_log[name] = now
     logger.warning('token 续期失败: %s（%s）', name, message)
-    _record({'uid': '', 'nickname': name, 'file': name}, 0, f'token 自动续期失败：{message}')
+    record_acct = acct if isinstance(acct, dict) else {'uid': '', 'nickname': name, 'file': name}
+    _record(record_acct, 0, f'token 自动续期失败：{message}')
 
 
 # ── 平台账号（Trae）的 token 续期 ─────────────────────────────

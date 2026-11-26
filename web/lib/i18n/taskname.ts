@@ -15,6 +15,7 @@ import {t as tStatic} from './index';
 const NAME_KEY: Record<string, string> = {
   // 桌面端任务
   skill_1: 'tasks.taskName_skill1',
+  skill_share: 'tasks.taskName_skillShare',
   automation_1: 'tasks.taskName_automation1',
   playbook_prompt: 'tasks.taskName_playbook',
   Expert_lighthouse: 'tasks.taskName_expertLighthouse',

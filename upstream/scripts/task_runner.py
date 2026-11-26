@@ -38,6 +38,7 @@
   桌面指纹事件链（fork autotask.go 实测吸收：POST {chat}/v2/report + desktopFingerprint 注入）：
     RichMeow_Chat       桌面对话链 6 连事件组                   1  （agent_task_created→…→chat_request_response）
     Buddy_App/_QQ       buddyapp 五连（discover→…→bind_skip）  1  （application_id: open-platform search）
+    skill_share         桌面「技能详情 → 分享 → 复制链接」双事件 1  （market 技能 id+name）
   web 域行为（fork ReportWebEvent 实测：POST www.workbuddy.cn/v2/report + web 指纹）：
     Library_read        web_element_click(library_doc_intro_click) 1  （space 文档 URL）
   小程序开学季任务（/portal/activity/school/*，模块 school_open_day_2026.py；accept=viewed 激活）：
@@ -144,6 +145,11 @@ MAPPING = {
     "RichMeow_Chat":          {"kind": "richmeow",   "target": 1, "src": "无(桌面指纹对话链)"},
     # web 域 web_element_click（fork ReportWebEvent，三账号实测点亮）
     "Library_read":           {"kind": "library",    "target": 1, "src": "无(资料库介绍点击)"},
+    # 分享技能给好友（每日 50 积分）：桌面「技能详情 → 分享 → 复制链接」双事件。
+    # 只认 skill_share_channel_action（action=link / panelAction=success /
+    # panelType=clipboard / isSuccessful=true），技能身份取真实市场技能；
+    # 单独建开放平台分享渠道并 resolve 链接进度不动（社区 7 账号实测）。
+    "skill_share":            {"kind": "skillshare", "target": 1, "src": "market 技能 id+name"},
     # 小程序开学季任务（school_open_day_2026.py 同款判据，accept=viewed 激活）
     "chat_3_times":           {"kind": "school", "target": 3, "src": "无(mini_chat×3+activityId)"},
     "expert_use":             {"kind": "school", "target": 1, "src": "BackToSchool 专家 id"},
@@ -347,6 +353,10 @@ DEFAULT_SKILL_IDS = [
     ("skill_2070033533400236032", "qqmusic"),
     ("skill_2095322904487550976", "pdf"),
 ]
+# 分享技能任务（skill_share）的兜底技能身份：市场列表不可用时用它上报。
+# 该 id 来自上游实测（频道动作事件 accepted 0/1 -> completed 1/1，约 10s），
+# 服务端只校验「技能身份形状」，不校验具体是哪个技能。
+SKILL_SHARE_FALLBACK = ("skill_2097350077599879168", "润泽小馆·日报撰写")
 DEFAULT_CASES = [("worker-ledger-freedom-dashboard", {"title": "打工人小账本",
                   "artifact_type": "other", "categories": [""], "skills": [],
                   "experts": [], "prompt": ""})]
@@ -454,8 +464,12 @@ def _fetch_market_experts(auth, team_only=False, keyword=None):
     return out
 
 
-def _fetch_skills(auth):
-    """POST market/skill/list -> [(skill_id, name)]（只读）。"""
+def _fetch_skills(auth, fallback=None):
+    """POST market/skill/list -> [(skill_id, name)]（只读）。
+
+    `fallback` 是市场不可用时使用的内置表：默认用 `DEFAULT_SKILL_IDS`
+    （skill_1 用），分享任务传入它自己实测可点亮的兜底技能。
+    """
     out = []
     try:
         st, r = tc.do_post(auth, tc.chat_base(auth),
@@ -463,13 +477,33 @@ def _fetch_skills(auth):
                            {"page": 1, "page_size": 8})
         if st == 200:
             for s in (r.get("data") or {}).get("skills") or []:
-                if s.get("skill_id"):
-                    out.append((s["skill_id"], s.get("name") or ""))
+                # 上游不同版本把技能 id 放在 skill_id 或 id（社区参考实现用 id）；
+                # 两种都认，避免市场列表命中却整表回落内置表。
+                sid = s.get("skill_id") or s.get("id")
+                if sid:
+                    out.append((str(sid), s.get("name") or ""))
     except Exception as ex:
         print(f"  [warn] 技能市场拉取失败({ex})，回落内置表")
     if not out:
-        out = DEFAULT_SKILL_IDS
+        out = list(fallback) if fallback is not None else DEFAULT_SKILL_IDS
     return out
+
+
+def _skill_share_identity(auth):
+    """取一条真实市场技能身份 ``(skillId, skillName)`` 供分享任务上报。
+
+    市场列表不可用时用 ``SKILL_SHARE_FALLBACK``（上游实测可点亮），而不是
+    skill_1 用的那组内置技能。成长系统的技能类任务只校验「技能身份形状」，
+    不校验具体是哪个技能，但仍优先用市场里的真实条目，与官方客户端分享时
+    上报的一致。
+    """
+    try:
+        skills = _fetch_skills(auth, fallback=[SKILL_SHARE_FALLBACK])
+        if skills:
+            return skills[0]
+    except Exception as ex:  # noqa: BLE001
+        print(f"  [warn] 技能市场拉取失败({ex})，回落分享任务兜底技能")
+    return SKILL_SHARE_FALLBACK
 
 
 def _fetch_playbook_cases():
@@ -572,6 +606,10 @@ def ids_for(kind, auth, need, offset=0):
         return _dedup_slice(_fetch_market_experts(auth, team_only=True), offset, need)
     if kind == "skill":
         return _dedup_slice(_fetch_skills(auth), offset, need)
+    if kind == "skillshare":
+        # 分享任务只用一条真实技能身份（target 恒为 1），不参与偏移/轮换。
+        skill = _skill_share_identity(auth)
+        return [skill for _ in range(need)]
     if kind == "playbook":
         return _dedup_slice(_fetch_playbook_cases(), offset, need)
     if kind == "lighthouse":
@@ -776,6 +814,30 @@ def desktop_expert_actual_use_local(expert, conversation_id, request_id):
 
 
 
+def desktop_skill_share_events(auth, skill):
+    """桌面「技能详情 → 分享 → 复制链接」双事件（点亮 skill_share）。
+
+    上游实测（2026-11-12，单账号 accepted 0/1 → completed 1/1，约 10s）：
+    计数只认 ``skill_share_channel_action``，形状为
+    action=link / panelAction=success / panelType=clipboard / isSuccessful=true，
+    技能身份用 market 技能（skillId + skillName + skillType=market）即算一条；
+    ``skill_share_entry_click`` 是打开分享面板的真实前置事件，一并补上更贴近客户端。
+    任务描述里的「升级 5.9.0、技能列表 → 详情 → 分享」只是引导文案，服务端不校验
+    客户端版本，也不校验是否真有好友打开过链接（建开放平台渠道并 resolve 进度不动）。
+    """
+    sid, sname = skill
+    now = int(time.time() * 1000)
+    return [
+        {"eventCode": "skill_share_entry_click", "skillId": sid, "skillName": sname,
+         "skillType": "market", "skillSource": "market", "entry": "skill_detail",
+         "status": "safe", "actionSuccessful": True, "tooltip": "", "clickAt": now},
+        {"eventCode": "skill_share_channel_action", "skillId": sid, "skillName": sname,
+         "skillType": "market", "action": "link", "panelAction": "success",
+         "panelType": "clipboard", "isSuccessful": True, "cost": 0,
+         "id": derive_id(auth, "share"), "actionAt": now},
+    ]
+
+
 def desktop_buddy_enter_single(buddy_id, buddy_name, uid, now):
     """buddy5 五连上报失败时的降级单发事件（旧形状兜底）。
 
@@ -821,10 +883,11 @@ def desktop_buddy5_sequence(auth, buddy_id, buddy_name):
 # --------------------------------------------------------------------------
 # 上报通道（fork ReportDesktopEvent / ReportWebEvent 同款）
 # --------------------------------------------------------------------------
-def report_desktop_events(auth, events):
-    """以桌面指纹向 {chat}/v2/report 批量上报；返回业务信封 (st, code)。
+def report_desktop_events(auth, events, base=None):
+    """以桌面指纹向 ``base or {chat}`` 的 /v2/report 批量上报；返回 (st, code)。
 
     fork ReportDesktopEvent：每个事件（列表）注入 desktopFingerprint 公共字段覆盖同名键。
+    ``base`` 用于个别任务需要换域上报（skill_share 的社区实测路径是 www.workbuddy.cn）。
     """
     fp = desktop_fingerprint(auth)
     arr = []
@@ -832,7 +895,7 @@ def report_desktop_events(auth, events):
         m = dict(e)
         m.update(fp)
         arr.append(m)
-    st, r = tc.do_post(auth, tc.chat_base(auth), tc.PATH_REPORT, arr,
+    st, r = tc.do_post(auth, base or tc.chat_base(auth), tc.PATH_REPORT, arr,
                        headers=_desktop_headers(auth))
     sc = r.get("code") if isinstance(r, dict) else r
     return st, sc
@@ -1904,6 +1967,27 @@ def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0, known=None
             if i < need - 1:
                 time.sleep(opts.gap)
         time.sleep(2.0)  # 服务端归账可能异步
+    elif spec["kind"] == "skillshare":
+        # 桌面「技能详情 → 分享 → 复制链接」双事件（社区 7 账号 0/1 → 1/1，约 10s）。
+        # 与 generic 分支不同源：generic 的 skill_info 是「使用技能」，不点亮分享任务。
+        # 先走本项目的桌面事件域（chat）；社区实测路径是 www.workbuddy.cn，chat 域
+        # 拒绝时按同一份事件换域重试一次，避免通道差异把这条任务卡死。
+        skill = _skill_share_identity(auth)
+        for i in range(need):
+            events = desktop_skill_share_events(auth, skill)
+            st_r, sc = report_desktop_events(auth, events)
+            if st_r != 200 or sc not in (0, None):
+                st2, sc2 = report_desktop_events(auth, events, base=WEB_BASE)
+                print(f"[task_runner] {uid8} {code}: report {i + 1}/{need} {st_r} code={sc} "
+                      f"share id={skill[0]} -> 换域重试 {st2} code={sc2}")
+            else:
+                print(f"[task_runner] {uid8} {code}: report {i + 1}/{need} {st_r} code={sc} "
+                      f"share id={skill[0]}")
+            if i < need - 1:
+                time.sleep(opts.gap)
+        # 社区实测归账约 10s；采样太早会读到 0/1 而错过本轮领奖（下次仍能补领，
+        # 但手动单跑会显示「未达 target」）。这里比通用分支多等几秒。
+        time.sleep(6.0)
     else:
         ids = ids_for(spec["kind"], auth, need, offset=cur)
         if not ids:

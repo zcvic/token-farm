@@ -380,7 +380,7 @@ _KIND_GROUP = {
     'playbook': 'desktop', 'lighthouse': 'expert', 'buddy5': 'desktop',
     'skin': 'desktop', 'chat': 'desktop', 'glmchat': 'desktop',
     'cat': 'desktop', 'buddyfirst': 'desktop', 'richmeow': 'desktop',
-    'library': 'desktop',
+    'library': 'desktop', 'skillshare': 'desktop',
     'school': 'school',
     'minichat': 'mini', 'schoolseason': 'mini', 'miniexpert': 'mini',
     'miniautomation': 'mini', 'miniglmchat': 'mini', 'miniplybook': 'mini',

@@ -1804,11 +1804,13 @@ def checkin_logs(
     total = len(merged) if realm_map is not None else local_total + auto_total
     unfiltered_total = local_total + auto_total
 
-    # 自动侧的行也要解析昵称（上游只带 uid 前 8 位）；本端的已有昵称
-    resolve_nick = _nickname_resolver()
+    # 自动侧的行也要解析昵称与备注（上游只带 uid 前 8 位）；本端的已有昵称也补齐备注
+    resolve_nick, resolve_note = _account_meta_resolvers()
     for it in merged:
+        raw_uid = str(it.get('uid') or '')
         if not it.get('nickname'):
-            it['nickname'] = resolve_nick(str(it.get('uid') or ''))
+            it['nickname'] = resolve_nick(raw_uid)
+        it['note'] = resolve_note(raw_uid)
 
     start = max(0, int(offset))
     end = start + min(500, max(1, int(limit)))
@@ -1833,48 +1835,90 @@ def clear_checkin_logs(user: dict = Depends(security.require_session_admin)) -> 
     return {'ok': True}
 
 
-def _nickname_resolver() -> object:
-    """构造 uid → 昵称的解析函数。
+def _all_group_auth_dirs() -> list[Path | None]:
+    """默认目录 + 各分组登记的账号目录（去重）。"""
+    dirs: list[Path | None] = [None]
+    base = getattr(config, 'AUTH_DIR', None)
+    seen = {str(Path(base).resolve())} if base else set()
+    for up in upstreamsvc.list_upstreams(include_default=False):
+        raw_dir = str(up.get('auth_dir') or '').strip()
+        if not raw_dir:
+            continue
+        p = Path(raw_dir)
+        key = str(p.resolve())
+        if key not in seen:
+            seen.add(key)
+            dirs.append(p)
+    return dirs
 
-    上游 2026-09-12 起把日志里的 uid 截成前 8 位，而账号表里是完整 uuid，
-    无法直接相等匹配，因此按前缀解析；前缀命中多个账号（理论可能）时不猜，
-    保留 uid 原文。签到记录与任务记录都用它，避免两处口径不一致。
+
+def _account_meta_resolvers():
+    """构造 uid（含前 8 位前缀）→ (昵称, 备注) 的一对解析函数。
+
+    上游 2026-09-12 起把日志里的 uid 截成前 8 位，而账号表与备注表里都是完整
+    uuid，因此同时支持完整匹配与唯一前缀匹配；前缀命中多个账号时不猜。
+    备注按 uid 存（见 db.set_account_note），所以还要把前缀还原成完整 uid
+    才能查到。
     """
     nick_by_uid: dict[str, str] = {}
     nick_by_prefix: dict[str, str] = {}
-    ambiguous: set[str] = set()
+    nick_ambiguous: set[str] = set()
+    uid_by_prefix: dict[str, str] = {}
+    uid_ambiguous: set[str] = set()
+    try:
+        notes = db.account_notes()
+    except Exception:  # noqa: BLE001
+        notes = {}
     try:
         # 默认目录 + 各分组登记的账号目录：日志里的 uid 可能来自任何一个池，
         # 只扫默认目录会让分组账号在日志里显示成裸 uid。
-        dirs: list[Path | None] = [None]
-        for up in upstreamsvc.list_upstreams(include_default=False):
-            raw_dir = str(up.get('auth_dir') or '').strip()
-            if raw_dir:
-                dirs.append(Path(raw_dir))
-        for base_dir in dirs:
+        for base_dir in _all_group_auth_dirs():
             for acc in wb2api.list_auth_accounts(base_dir):
                 auid = str(acc.get('uid') or '')
+                if not auid:
+                    continue
+                prefix = auid[:8]
+                if prefix in uid_by_prefix and uid_by_prefix[prefix] != auid:
+                    uid_ambiguous.add(prefix)
+                else:
+                    uid_by_prefix[prefix] = auid
                 nick = str(acc.get('nickname') or '')
-                if not auid or not nick:
+                if not nick:
                     continue
                 nick_by_uid[auid] = nick
-                prefix = auid[:8]
                 if prefix in nick_by_prefix and nick_by_prefix[prefix] != nick:
-                    ambiguous.add(prefix)
+                    nick_ambiguous.add(prefix)
                 else:
                     nick_by_prefix[prefix] = nick
     except Exception:  # noqa: BLE001
         pass
 
-    def resolve(uid: str) -> str:
+    def resolve_nick(uid: str) -> str:
         if not uid:
             return ''
         if uid in nick_by_uid:
             return nick_by_uid[uid]
         prefix = uid[:8]
-        return '' if prefix in ambiguous else nick_by_prefix.get(prefix, '')
+        return '' if prefix in nick_ambiguous else nick_by_prefix.get(prefix, '')
 
-    return resolve
+    def resolve_note(uid: str) -> str:
+        if not uid or not notes:
+            return ''
+        if uid in notes:
+            return notes[uid]
+        prefix = uid[:8]
+        if prefix in uid_ambiguous:
+            return ''
+        full_uid = uid_by_prefix.get(prefix, '')
+        return notes.get(full_uid, '') if full_uid else ''
+
+    return resolve_nick, resolve_note
+
+
+def _nickname_resolver() -> object:
+    """兼容既有调用：只取 uid → 昵称解析函数。"""
+    resolve_nick, _ = _account_meta_resolvers()
+    return resolve_nick
 
 
 def _normalize_realm(realm: str | None) -> str | None:
@@ -1889,23 +1933,25 @@ def _realm_uid_filter(realm: str | None) -> dict[str, str] | None:
 
     WorkBuddy 的日志表里只有 uid，没有 realm 列，所以按账号表把 uid 映射到
     版本再筛。上游日志里的 uid 是前 8 位，这里同时支持完整 uid 与前缀两种匹配。
+    默认池与各分组池一并扫描，避免多分组部署下非默认池账号的签到/自动任务记录
+    在版本视图里被全部筛掉。
     平台签到记录有 `realm` 列（见 `checkin_logs`），走列过滤、不走这里。
 
     注意：账号已被删除时其历史日志无从判断版本，一律按「不属于任何版本」
     处理——宁可少显示，也不要把国际版账号的日志挂到国内版视图下。
     """
-    r = _normalize_realm(realm)
-    if r is None:
+    if _normalize_realm(realm) is None:
         return None
+    out: dict[str, str] = {}
     try:
-        accounts = wb2api.list_auth_accounts()
+        for base_dir in _all_group_auth_dirs():
+            for a in wb2api.list_auth_accounts(base_dir):
+                auid = str(a.get('uid') or '')
+                if auid:
+                    out[auid] = str(a.get('realm') or 'cn')
     except Exception:  # noqa: BLE001
-        return {}
-    return {
-        str(a.get('uid')): str(a.get('realm') or 'cn')
-        for a in accounts
-        if a.get('uid')
-    }
+        return out
+    return out
 
 
 def _uid_matches_realm(uid: str, realm_map: dict[str, str] | None, realm: str) -> bool:
@@ -1961,12 +2007,14 @@ def task_logs(
         logs = [r for r in logs
                 if _uid_matches_realm(str(r.get('uid') or ''), realm_map, realm)]
 
-    resolve_nick = _nickname_resolver()
+    resolve_nick, resolve_note = _account_meta_resolvers()
     for row in logs:
         # 结果文案中文化：数据库留英文原文（排查要看上游原话），
         # 接口额外给出 message_cn 供界面展示
+        raw_uid = str(row.get('uid') or '')
         row['message_cn'] = tasklog.translate_message(row.get('message', ''))
-        row['nickname'] = resolve_nick(str(row.get('uid') or ''))
+        row['nickname'] = resolve_nick(raw_uid)
+        row['note'] = resolve_note(raw_uid)
 
     # `total` 是**当前筛选下**的条数（列表分页要用），而 `stats` 是**各类型**的
     # 汇总（筛选栏要用它显示每个类型的条数与总条数）。
