@@ -3,6 +3,7 @@
 import {createContext, useCallback, useContext, useEffect, useMemo, useState} from 'react';
 
 import {errText, platformApi} from './api';
+import {filterSwitchablePlatforms} from './platform-switch';
 import type {PlatformInfo} from './types';
 
 /**
@@ -93,7 +94,10 @@ export function PlatformProvider({children}: {children: React.ReactNode}) {
     setLoading(true);
     try {
       const {platforms: list} = await platformApi.list();
-      setPlatforms(list ?? []);
+      // Discovery / Kilo / Cline 仍能通过网关前缀与组合使用，只是不进
+      // 右上角下拉。过滤放在取数处：下方「已保存平台不在清单里」的回落
+      // 逻辑因此也会把上一版选中它们的会话退回 WorkBuddy。
+      setPlatforms(filterSwitchablePlatforms(list ?? []));
       setError('');
       setLoaded(true);
     } catch (e) {
