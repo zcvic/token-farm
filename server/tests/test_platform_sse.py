@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import unittest
 
 from server.platforms.base import PlatformChat
@@ -55,11 +56,40 @@ class SseTest(unittest.TestCase):
                             _chunk(delta={'content': 'x'})])
         _collect(outcome, started=0.0, on_finish=lambda *a: calls.append(a))
         self.assertEqual(len(calls), 1)
-        status, first_token, error = calls[0]
+        status, first_token, error, first_frame = calls[0]
         self.assertEqual(status, 200)
         self.assertIsNone(error)
         self.assertIsInstance(first_token, int)
         self.assertGreaterEqual(first_token, 0)
+        # 首帧（issue #493）：只带 role 的第一帧就算首帧，所以它不会晚于首字。
+        self.assertIsInstance(first_frame, int)
+        self.assertGreaterEqual(first_frame, 0)
+
+    def test_first_frame_set_by_role_only_chunk(self) -> None:
+        """首帧与首字是两个口径：role-only 帧定首帧，正文帧才定首字。"""
+        calls: list[tuple] = []
+
+        async def walk():
+            await asyncio.sleep(0.02)
+            yield _chunk(delta={'role': 'assistant'})
+            await asyncio.sleep(0.05)
+            yield _chunk(delta={'content': 'x'})
+
+        outcome = PlatformChat(stream=walk(), closer=lambda: asyncio.sleep(0))
+        _collect(outcome, started=time.time(), on_finish=lambda *a: calls.append(a))
+        _status, first_token, _error, first_frame = calls[0]
+        self.assertIsNotNone(first_frame)
+        self.assertIsNotNone(first_token)
+        self.assertLess(first_frame, first_token,
+                        '首帧必须早于首字（这是两列并存的意义）')
+
+    def test_first_frame_null_when_stream_is_empty(self) -> None:
+        """空流没有数据帧，首帧记 None 而不是 0。"""
+        calls: list[tuple] = []
+        outcome = _outcome([])
+        _collect(outcome, started=0.0, on_finish=lambda *a: calls.append(a))
+        _status, _first_token, _error, first_frame = calls[0]
+        self.assertIsNone(first_frame)
 
     def test_error_midstream_becomes_error_frame(self) -> None:
         calls: list[tuple] = []

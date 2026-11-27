@@ -1188,3 +1188,40 @@ e39c2528ba2cea8eeb9cedac8caefdd8d9b1b3f5
 #      上一次基线：423d697acbeb539f3bf78a31971ff98686ca03bb
 aac5cff8d0bf5957ff3bbbeb8a7164bd018c26f8
 
+# ---- 2026-11 第二十六批：上游 manager aac5cff8d0 → e846aa27b6（1 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 1 项：新增「首帧延迟」first_frame_ms（issue #493 / PR #495）。
+#      已取（按本仓结构重写）：
+#        · e846aa27b6 请求日志记录首帧延迟。现有 first_token_ms 是「首个正文/推理
+#          token」，而 issue #493 里它与上游 TTFB 差 123 秒——上游先发 role 帧，
+#          模型再思考，正文最后才来。两个口径并列，日志页能直接看出差在哪。
+#          - server/db.py：建表加 first_frame_ms 列 + 增量迁移补列（老库 ALTER，
+#            重复 connect() 幂等，旧行保持 NULL）+ INSERT 的列/占位符/取值三处
+#            同步（漏一处不会报错，只会永远写 NULL）。
+#          - server/services/wbforward.py 新增 has_payload_frame() 与
+#            first_frame_probe()：只认**带负载的** `data:` 行，`: keepalive`
+#            注释与 `data: [DONE]` 都不算（前者是排队心跳，算进来会让首帧退化
+#            成建连延迟；后者不代表产出过内容）。probe 跨块拼残片，未命中时只留
+#            最后一行，纯保活流不会让缓冲无限增长。
+#            与 has_data_frame 分开的原因：看门狗要**包含** [DONE] 与空 payload
+#            （它们也是上游在产出的证据），首帧不能算。
+#          - gateway.py：_record 加 first_frame 关键字参数并落库；raw_generator
+#            与 _platform_chat 的 generator 都在活跃度判定**之前**打点（首帧时刻
+#            与「是否续命」无关）。_platform_chat 那条走 platforms/sse.py，
+#            所以 openai_sse 的 on_finish 回调从 3 参扩到 4 参、在拼帧时判首帧：
+#            那一层拿到的是已解析 chunk，保活帧早被适配器丢掉，「第一个 chunk」
+#            就是首帧。
+#          - anthropic._translate_stream / responses._stream_events 同样在解码后
+#            先 probe，结果放进 state['first_frame']，由各自的 _record 调用带上。
+#          - 读端：/api/logs 的 _log_item 增加该字段（用 `in r.keys()` 兜住旧查询
+#            形状）；web/lib/types.ts 加注释；日志列表加一列、详情加一行；
+#            五语言 i18n 补 colFirstFrame / rowFirstFrame。前端一律 `!= null`
+#            判断（0 是合法值：同一秒内就回帧）。
+#          与第二十四批的看门狗共存：last_activity_at 与 first_frame_ms 是两个
+#          独立变量，一个记「最近活跃」、一个记「首次到达」，互不覆盖。
+#      未取：无（web 改动已按本仓日志页结构重写；本仓没有 next-intl 之外的前端
+#            框架差异需要处理）。
+#      锚点提交：e846aa27b6b7a4ee0531c7cb8d7d9ee8865b3dd4（本批只同步这一个提交）
+#      上一次基线：aac5cff8d0bf5957ff3bbbeb8a7164bd018c26f8
+e846aa27b6b7a4ee0531c7cb8d7d9ee8865b3dd4
+

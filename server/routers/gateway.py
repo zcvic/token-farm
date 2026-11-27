@@ -596,7 +596,7 @@ def _account_expected_after_error(exc: Exception) -> bool:
     return not isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
 
 
-def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None, usage: dict | None = None, effort: str | None = None, account: str | None = None, realm: str | None = None, count_requests: bool = False, account_expected: bool = True) -> None:
+def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt: int, ct: int, latency: int, ua: str | None, error: str | None, stream: bool, *, credit: float | None = None, first_token: int | None = None, first_frame: int | None = None, usage: dict | None = None, effort: str | None = None, account: str | None = None, realm: str | None = None, count_requests: bool = False, account_expected: bool = True) -> None:
     """记录调用日志与用量。
 
     credit 为上游返回的真实扣费（usage.credit）。None 表示上游没给，
@@ -609,6 +609,13 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
 
     first_token 为首字延迟（毫秒）。None 表示未采集到：非流式请求本来就没有
     中间过程，历史记录也没这个值，因此同样用 NULL 存，而不是 0。
+
+    first_frame 为首帧延迟（毫秒）：上游**第一个带负载的 `data:` 帧**到达时刻，
+    不区分 role / 推理 / 正文，与上游 TTFB 同口径。为什么单独一列——first_token
+    要等到第一个含正文或推理的 delta，`effort=max` 下推理阶段很长时两者能差上
+    百秒（实测上游 TTFB 1.48s、面板首字 125s）。只记 first_token 会把「上游多久
+    开始回话」读成「模型想了多久」，排查排队/建连问题时得出相反结论。保活注释帧
+    与 `data: [DONE]` 不算首帧，见 `wbforward.has_data_frame`。
 
     `count_requests=True` 表示这是**对话调用**：即使上游没回 usage、token 为 0，
     成功的（2xx）也累计一行 `usage_daily`（`requests + 1`）。管理类端点
@@ -682,6 +689,7 @@ def _record(key: dict | None, ip: str, model: str, mapped: str, status: int, pt:
             completion_tokens=ct,
             latency_ms=latency,
             first_token_ms=first_token,
+            first_frame_ms=first_frame,
             ua=db._clean(ua, 512),
             error=db._clean(error, 500),
             stream=1 if stream else 0,
@@ -1471,6 +1479,10 @@ async def _platform_chat(*, adapter, bare_model: str, body: dict, key: dict,
             """
             idle_limit = config.STREAM_IDLE_TIMEOUT
             last_activity_at = time.monotonic()
+            # 首帧延迟：第一个**带负载的 `data:` 帧**到达时刻（issue #493）。
+            # 与首字分开记（一个记「首次到达」、一个记「首个正文 delta」）。
+            first_frame_ms: int | None = None
+            first_frame_buf = ''
             pending = ''
             scratch_usage: dict = {}
             try:
@@ -1479,6 +1491,11 @@ async def _platform_chat(*, adapter, bare_model: str, body: dict, key: dict,
                         outcome.error = 'client disconnected'
                         break
                     piece = chunk.decode('utf-8', errors='ignore')
+                    if first_frame_ms is None:
+                        first_frame_buf, hit = wbforward.first_frame_probe(
+                            first_frame_buf, piece)
+                        if hit:
+                            first_frame_ms = int((time.time() - started) * 1000)
                     if wbforward.has_data_frame(piece):
                         last_activity_at = time.monotonic()
                     elif (idle_limit > 0
@@ -1504,7 +1521,8 @@ async def _platform_chat(*, adapter, bare_model: str, body: dict, key: dict,
                 ct = int(usage.get('completion_tokens') or 0)
                 _record(key, ip, requested_model, actual, outcome.status, pt, ct,
                         used, ua, outcome.error, True, usage=usage or None,
-                        first_token=outcome.first_token_ms, effort=effort,
+                        first_token=outcome.first_token_ms,
+                        first_frame=first_frame_ms, effort=effort,
                         account=outcome.account_hint, realm=outcome.realm,
                         count_requests=True)
 
@@ -1512,7 +1530,8 @@ async def _platform_chat(*, adapter, bare_model: str, body: dict, key: dict,
             raw_generator(), status_code=outcome.status,
             media_type=outcome.content_type)
 
-    def finish(status: int, first_token_ms: int | None, error_text: str | None) -> None:
+    def finish(status: int, first_token_ms: int | None, error_text: str | None,
+               first_frame_ms: int | None = None) -> None:
         """流结束后的记账。SSE 拼帧在 `platforms/sse.py`，网关只管记账。
 
         `usage` 必须在**收尾时现取** `outcome.usage`，不能在开流前抓成局部变量：
@@ -1520,6 +1539,9 @@ async def _platform_chat(*, adapter, bare_model: str, body: dict, key: dict,
         就地更新，提前抓的引用会一直指向最初那个空 dict，于是 token / credit 恒为
         0（Qoder 就是这种写法，旧版本还因 `if total or credit` 整条不写
         `usage_daily`，统计页因此全空）。`PlatformCall.usage` 也是现取的，口径一致。
+
+        `first_frame_ms` 由 `openai_sse` 在拼帧时打点（issue #493）：那一层拿到的是
+        已解析的 chunk，保活注释帧早被适配器丢掉，所以「第一个 chunk」就是首帧。
         """
         used = int((time.time() - started) * 1000)
         usage = outcome.usage or {}
@@ -1527,7 +1549,8 @@ async def _platform_chat(*, adapter, bare_model: str, body: dict, key: dict,
         ct = int(usage.get('completion_tokens') or 0)
         _record(key, ip, requested_model, actual, status, pt, ct, used, ua,
                 error_text, True, usage=usage or None,
-                first_token=first_token_ms, effort=effort,
+                first_token=first_token_ms, first_frame=first_frame_ms,
+                effort=effort,
                 account=outcome.account_hint, realm=outcome.realm,
                 count_requests=True)
 
@@ -1666,6 +1689,9 @@ async def _chat(request: Request, upstream_path: str):
         """
         idle_limit = config.STREAM_IDLE_TIMEOUT
         last_activity_at = time.monotonic()
+        # 首帧延迟：第一个带负载的 `data:` 帧到达时刻（issue #493），与首字分开记。
+        first_frame_ms: int | None = None
+        first_frame_buf = ''
         pending = ''
         scratch_usage: dict = {}
         try:
@@ -1674,6 +1700,11 @@ async def _chat(request: Request, upstream_path: str):
                     outcome.error_text = 'client disconnected'
                     break
                 piece = chunk.decode('utf-8', errors='ignore')
+                if first_frame_ms is None:
+                    first_frame_buf, hit = wbforward.first_frame_probe(
+                        first_frame_buf, piece)
+                    if hit:
+                        first_frame_ms = int((time.time() - started) * 1000)
                 if wbforward.has_data_frame(piece):
                     last_activity_at = time.monotonic()
                 elif (idle_limit > 0
@@ -1701,8 +1732,8 @@ async def _chat(request: Request, upstream_path: str):
             _record(
                 key, ip, requested_model or '', mapped or '', outcome.status, pt, ct,
                 latency, ua, outcome.error_text, True, usage=usage,
-                first_token=outcome.first_token_ms, effort=effort,
-                count_requests=True,
+                first_token=outcome.first_token_ms, first_frame=first_frame_ms,
+                effort=effort, count_requests=True,
             )
 
     return StreamingResponse(generator(), status_code=outcome.status,

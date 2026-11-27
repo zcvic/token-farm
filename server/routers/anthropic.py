@@ -1209,6 +1209,11 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
     translator = _StreamTranslator(model, thinking=thinking)
     error_text: str | None = None
     first_token_ms: int | None = None
+    # 首帧延迟：第一个**带负载的 `data:` 帧**到达时刻（不区分 role/推理/正文，
+    # issue #493）。与首字分开记，口径见 `wbforward.has_payload_frame`。
+    first_frame_ms: int | None = None
+    # chunk 边界可能把 `data:` 行切开，留一段残片跨块判定。
+    first_frame_buf = ''
     abort = False   # 中途出错需中止转发（缓冲超限 / 上游回 error 帧）
     # 内容空闲看门狗（issue #485）：按「距上一个数据帧」计时，保活帧
     # （SSE 注释）不续命。按数据帧而不是按正文 delta，是为了别误杀
@@ -1224,6 +1229,13 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
                 abort = True
                 break
             piece = chunk.decode('utf-8', errors='ignore')
+            # 首帧打点：只记一次；与 last_activity_at 是两个独立变量，
+            # 一个记首次到达、一个记最近活跃，互不覆盖。
+            if first_frame_ms is None:
+                first_frame_buf, hit = wbforward.first_frame_probe(
+                    first_frame_buf, piece)
+                if hit:
+                    first_frame_ms = int((time.time() - started) * 1000)
             if wbforward.has_data_frame(piece):
                 last_activity_at = time.monotonic()
             if idle_limit > 0 and time.monotonic() - last_activity_at > idle_limit:
@@ -1324,6 +1336,7 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
         state['usage'] = usage
         state['error'] = error_text
         state['first_token'] = first_token_ms
+        state['first_frame'] = first_frame_ms
 
 
 async def _platform_messages(*, body: dict, stream: bool, key: dict, ip: str,
@@ -1405,7 +1418,8 @@ async def _platform_messages(*, body: dict, stream: bool, key: dict, ip: str,
                 key, ip, model, call.model, call.status,
                 _as_int(usage.get('prompt_tokens')), _as_int(usage.get('completion_tokens')),
                 latency, ua, state.get('error'), True,
-                usage=usage, first_token=state.get('first_token'), effort=effort,
+                usage=usage, first_token=state.get('first_token'),
+                first_frame=state.get('first_frame'), effort=effort,
                 account=call.account, realm=call.realm, count_requests=True)
 
     return StreamingResponse(gen(), status_code=call.status,
@@ -1570,7 +1584,8 @@ async def messages(request: Request):
                 key, ip, model, mapped or '', status_code,
                 _as_int(usage.get('prompt_tokens')), _as_int(usage.get('completion_tokens')),
                 latency, ua, state.get('error'), True,
-                usage=usage, first_token=state.get('first_token'), effort=effort,
+                usage=usage, first_token=state.get('first_token'),
+                first_frame=state.get('first_frame'), effort=effort,
                 count_requests=True,
             )
 

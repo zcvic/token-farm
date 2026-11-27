@@ -324,6 +324,26 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 > `.json` 的 `x`）都收、都用 `setdefault`，真实 uid 的映射与前缀匹配逻辑不动。
 > 测试：`test_issue51_realm_summary_rows.py` 新增 `LegacyFileUidCompatTest` 两条。
 
+> **首帧延迟批（2026-11-27，`aac5cff8d0` → `e846aa27b6`）**：1 个提交（issue #493，
+> 接手 PR #495）。现有 `first_token_ms` 量的是「首个正文/推理 delta」，而 #493
+> 现场上游 TTFB 1.48s、面板首字 125s —— 上游先发 role 帧，模型再思考，正文最后
+> 才来。新增 `first_frame_ms` 记「首个**带负载的 `data:` 帧」，两个口径并列。
+>
+> 口径：`: keepalive` 注释与 `data: [DONE]` 都不算首帧（前者是排队心跳，算进来
+> 会让首帧退化成建连延迟；后者不代表产出过内容）。判定落在传输层
+> `wbforward.has_payload_frame()` / `first_frame_probe()`（跨块拼残片、未命中只留
+> 最后一行），与看门狗的 `has_data_frame()` **分开**：看门狗要包含 `[DONE]` 与空
+> payload，首帧不能算。`db.py` 加列 + 迁移 + INSERT 三处同步；`gateway._record`
+> 加 `first_frame` 参数；raw 透传与 `_platform_chat` 在活跃度判定前打点；
+> `platforms/sse.py` 的 `on_finish` 从 3 参扩到 4 参（那层拿到的是已解析 chunk，
+> 保活帧早被丢掉，「第一个 chunk」就是首帧）；anthropic / responses 转换层同样
+> 打点并放进 `state['first_frame']`。读端 `/api/logs` 加字段，日志页加一列一行，
+> 五语言 i18n 补键，前端一律 `!= null` 判断（0 是合法值）。
+> 测试：新增 `server/tests/test_first_frame.py`（列/迁移/写库回读、口径单测、
+> role-only 先到 300ms 后正文、保活不算首帧、`[DONE]`-only 为 NULL、三条流式
+> 协议端到端），`test_platform_sse.py` 补 3 条（role-only 定首帧、空流为 None、
+> `on_finish` 四元组）。
+
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
 

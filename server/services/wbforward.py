@@ -147,11 +147,53 @@ def has_data_frame(piece: str) -> bool:
 
     只认行首的 `data:`：正文里出现的 "data:" 字符串位于 JSON 值内部，不会
     落在行首，因此不会造成误续命。
+
+    注意与 `has_payload_frame` 的区别：这里**包含** `data: [DONE]` 与空
+    payload——它们也是上游在产出的证据，看门狗该续命；但「首帧延迟」不能
+    用它们打点。
     """
     for line in piece.split('\n'):
         if line.lstrip().startswith('data:'):
             return True
     return False
+
+
+def has_payload_frame(text: str) -> bool:
+    """这段文本里是否已经出现「带负载的 `data:` 帧」（首帧延迟用，issue #493）。
+
+    取帧口径与 `scan_sse` 一致（按行切、只看 `data:` 行、跳过空 payload 与
+    `[DONE]`），区别是不解析 JSON：首帧关心的是**到达时刻**，哪怕这一帧只有
+    role 字段、甚至 JSON 还没拼完整，它确实已经到了。
+
+    为什么要排除保活与 `[DONE]`：
+      · SSE 注释帧（`: keepalive`）是上游排队期间的心跳，把第一行注释当成首帧
+        会让首帧延迟退化成建连延迟，和上游 TTFB 不是一回事；
+      · `data: [DONE]` 只是流结束标记，不代表上游产出过任何内容；只在「空流 /
+        只有结束标记」的请求里它才会单独出现，那种情况应当记 NULL。
+    """
+    for raw_line in text.split('\n'):
+        line = raw_line.strip()
+        if not line.startswith('data:'):
+            continue
+        payload = line[5:].strip()
+        if payload and payload != '[DONE]':
+            return True
+    return False
+
+
+def first_frame_probe(buffer: str, piece: str) -> tuple[str, bool]:
+    """跨块判定首帧：返回 (新的待判缓冲, 本块是否已见到首个带负载帧)。
+
+    调用方在 `first_frame_ms is None` 时逐块调用；命中后就不用再调了。
+    `aiter_bytes` 不保证按行/按帧切块，`data:` 可能被 chunk 边界切开，所以
+    未命中时只保留最后一行——纯保活流会一直发 `: keepalive`，不能让缓冲无限长。
+    """
+    buffer += piece
+    if has_payload_frame(buffer):
+        return '', True
+    if '\n' in buffer:
+        buffer = buffer.rsplit('\n', 1)[1]
+    return buffer, False
 
 
 def upstream_headers(upstream: dict | None = None) -> dict:

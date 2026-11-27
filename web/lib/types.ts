@@ -729,6 +729,16 @@ export interface RequestLog {
    */
   first_token_ms: number | null;
   /**
+   * 首帧延迟（毫秒）：从发起上游请求到收到第一个**带负载的 `data:` 帧**，
+   * 不区分 role / 推理 / 正文（issue #493）。保活注释帧与 `data: [DONE]`
+   * 都不算，否则这个数会退化成建连延迟。
+   *
+   * 与 first_token_ms 并列：后者要等到首个含正文或推理的 delta，max 档下推理
+   * 阶段很长时两者能差上百秒。判断「排队 / 建连」快慢看这一列。
+   * null = 未采集（非流式、只有保活与 [DONE] 的空流，或本列上线前的记录）。
+   */
+  first_frame_ms: number | null;
+  /**
    * 提示词缓存的三段 token（issue #69）：上游（腾讯）在流式末帧 usage 里给。
    * **null = 上游没给这三个字段**（老上游），与「给了 0」不是一回事——
    * 后者代表这次请求确实没命中缓存。界面据此显示「—」而不是 0%。

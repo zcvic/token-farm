@@ -34,13 +34,14 @@ def error_frame(message: str, code: str = 'platform_stream_error') -> bytes:
 
 
 async def openai_sse(outcome: PlatformChat, *, started: float,
-                     on_finish: Callable[[int, int | None, str | None], None] | None = None,
+                     on_finish: Callable[[int, int | None, str | None, int | None], None] | None = None,
                      idle_timeout: float = 0,
                      disconnected: Callable[[], Awaitable[bool]] | None = None
                      ) -> AsyncIterator[bytes]:
     """把适配器的 chunk 流转成 SSE 字节流。
 
-    `on_finish(status, first_token_ms, error)` 在收尾时调用一次，供网关记账。
+    `on_finish(status, first_token_ms, error, first_frame_ms)` 在收尾时调用一次，
+    供网关记账。
 
     `idle_timeout` / `disconnected` 是流式健康检查（issue #485）：
       · `disconnected()` 为真 = 客户端已走，断开上游、结束生成器；
@@ -51,8 +52,13 @@ async def openai_sse(outcome: PlatformChat, *, started: float,
         「有内容」指 `delta` 里除 `role` 外还有非空字段——覆盖正文、推理与工具
         调用增量，长工具调用不会被误杀。
     两条都只在检测到后中止，不把正常帧改写成别的内容。
+
+    首帧延迟（issue #493）：这一层拿到的是**已经解析好的 chunk**，保活注释帧
+    早被适配器丢掉了，所以「第一个数据 chunk」就是首帧——不看 `delta` 里有没有
+    内容，只带 `role` 的第一帧也算（这正是与首字延迟的差别）。
     """
     first_token_ms: int | None = None
+    first_frame_ms: int | None = None
     error_text: str | None = None
     last_content_at = time.monotonic()
     try:
@@ -60,6 +66,8 @@ async def openai_sse(outcome: PlatformChat, *, started: float,
             if disconnected is not None and await disconnected():
                 error_text = 'client disconnected'
                 break
+            if first_frame_ms is None and isinstance(chunk, dict) and 'choices' in chunk:
+                first_frame_ms = int((time.time() - started) * 1000)
             choices: Any = chunk.get('choices') if isinstance(chunk, dict) else None
             has_content = False
             if isinstance(choices, list) and choices:
@@ -94,6 +102,7 @@ async def openai_sse(outcome: PlatformChat, *, started: float,
         await outcome.aclose()
         if on_finish is not None:
             try:
-                on_finish(200 if error_text is None else 502, first_token_ms, error_text)
+                on_finish(200 if error_text is None else 502, first_token_ms,
+                          error_text, first_frame_ms)
             except Exception:  # noqa: BLE001 —— 记账失败不能影响响应收尾
                 pass
