@@ -77,7 +77,7 @@ from .qoder_accounts import (get_realm_config, gateway_candidates,
                             local_vm_status)
 from pathlib import Path
 
-VERSION = "1.10.3"
+VERSION = "1.10.4"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 
@@ -693,7 +693,7 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None,
         row.update(fp)
     if session_trace:
         # Never serialize tenant identifiers, client conversation IDs or prompts.
-        for field in ("session_affinity", "upstream_session_id", "route_rule"):
+        for field in ("session_affinity", "upstream_session_id", "route_rule", "reasoning_intent"):
             if session_trace.get(field):
                 row[field] = session_trace[field]
         for field in ("output_content_chars", "output_reasoning_chars", "output_has_tool_call",
@@ -765,9 +765,9 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None,
         acc_tag = " acct=%s" % account[:8] if account else ""
         speed_tag = " %st/s" % row.get("tokens_per_sec", 0) \
             if row.get("tokens_per_sec") else ""
-        log("chat done: model=%s%s%s tokens=%d (in=%d out=%d)%s"
-            % (model, acc_tag, dur, t_tokens, fields.get("prompt_tokens", 0),
-               fields.get("completion_tokens", 0), speed_tag), tag="chat")
+        log("chat done: model=%r%s%s tokens=%d (in=%d out=%d reasoning_tokens=%d)%s"
+            % (str(model)[:120], acc_tag, dur, t_tokens, fields.get("prompt_tokens", 0),
+               fields.get("completion_tokens", 0), fields.get("reasoning_tokens", 0), speed_tag), tag="chat")
     except Exception:
         pass
     if session_trace and session_trace.get("output_code_without_tools"):
@@ -3175,6 +3175,17 @@ def resolve_request_model(model, realm=None):
     return "auto" if policy == "auto" else key
 
 
+def _chat_display_model(reported, ctx):
+    """A generic upstream 'auto' label is not a client model ID for a pinned catalog request."""
+    ctx = ctx or {}
+    requested = ctx.get("requested_model")
+    key = ctx.get("upstream_model_key")
+    if (reported == "auto" and isinstance(requested, str) and requested
+            and key and key != "auto" and qoder_catalog.is_known_upstream_key(key)):
+        return requested
+    return reported
+
+
 def _capture_model_identity(chunk, holder=None, usage_ctx=None):
     """Record only an explicit upstream chunk model, never the requested name."""
     actual = chunk.get("model") if isinstance(chunk, dict) else None
@@ -3948,22 +3959,48 @@ def normalize_reasoning_effort(effort, meta):
     return best, "unsupported level %s -> %s" % (e, best)
 
 
-def requested_effort(payload):
-    """请求侧的**原始**思考档位（归一化之前），供 usage 记账与请求体构造共用。
-
-    取值顺序与 build_qoder_body 下发给上游时完全一致（同源，避免两处漂移）：
-    reasoning_effort -> reasoning.effort -> thinking.effort / thinking.level。
-    仅做提取，不做任何归一化或猜测；空值返回 None。
-    """
+def reasoning_request(payload):
+    """Return (requested level, intent); never infer a level from a token budget."""
     if not isinstance(payload, dict):
-        return None
-    effort = payload.get("reasoning_effort")
-    if not effort and isinstance(payload.get("reasoning"), dict):
-        effort = (payload.get("reasoning") or {}).get("effort")
-    if not effort and isinstance(payload.get("thinking"), dict):
-        # 兼容 thinking.effort / thinking_level 风格客户端
-        effort = (payload.get("thinking") or {}).get("effort")             or (payload.get("thinking") or {}).get("level")
-    return effort or None
+        return None, "absent"
+    extra = payload.get("extra_body")
+    for source in (payload, extra if isinstance(extra, dict) else {}):
+        reasoning, thinking = source.get("reasoning"), source.get("thinking")
+        r = reasoning if isinstance(reasoning, dict) else {}
+        t = thinking if isinstance(thinking, dict) else {}
+        kind = t.get("type")
+        if (thinking is False or source.get("enable_thinking") is False
+                or r.get("enabled") is False or kind == "disabled"):
+            return "none", "disabled"
+        levels = (source.get("reasoning_effort"), r.get("effort"),
+                  t.get("effort"), t.get("level"))
+        for level in levels:
+            if isinstance(level, str):
+                normalized = level.strip().lower()
+                if normalized in _EFFORT_OFF:
+                    return "none", "disabled"
+                if normalized in EFFORT_RANK:
+                    return normalized, "level"
+        budgets = (source.get("thinking_budget"), t.get("budget_tokens"), r.get("max_tokens"))
+        if any(type(value) is int and value > 0 for value in budgets):
+            found = "budget_unsupported"
+        elif (thinking is True or source.get("enable_thinking") is True
+              or r.get("enabled") is True or kind in ("enabled", "adaptive")):
+            found = "enabled_default"
+        elif (any(k in source for k in ("reasoning_effort", "thinking", "enable_thinking", "thinking_budget"))
+              or ("reasoning" in source and (not isinstance(reasoning, dict)
+                  or any(k in r for k in ("effort", "max_tokens", "enabled"))))):
+            found = "unrecognized"
+        else:
+            continue
+        # SDK-style extra_body is fallback only; never override top-level intent.
+        return None, found
+    return None, "absent"
+
+
+def requested_effort(payload):
+    """Return the normalized requested named effort, or None if none was specified."""
+    return reasoning_request(payload)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -9214,12 +9251,14 @@ def rewrite_web_tools(tools, names):
     return out
 
 
-def _chat_chunks(obj, model):
+def _chat_chunks(obj, model, *, chat_display=False):
     """把聚合好的 chat 对象摊成 SSE 分片（web 工具路径用：内容是整段回放）。"""
     obj = obj or {}
     choice = (obj.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     reported_model = obj.get("resolved_model") if "resolved_model" in obj else obj.get("model") or model
+    if chat_display and reported_model:
+        reported_model = obj.get("model") or reported_model
     base = {"id": obj.get("id") or "chatcmpl-web", "object": "chat.completion.chunk",
             "created": int(obj.get("created") or time.time()),
             "model": reported_model or ""}
@@ -9240,8 +9279,8 @@ def _chat_chunks(obj, model):
     yield tail
 
 
-def _chat_chunks_iter(obj, model):
-    for chunk in _chat_chunks(obj, model):
+def _chat_chunks_iter(obj, model, *, chat_display=False):
+    for chunk in _chat_chunks(obj, model, chat_display=chat_display):
         yield ("data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n").encode("utf-8")
 
 
@@ -9329,7 +9368,7 @@ def open_upstream(payload, session_key=None, target_realm=None, usage_ctx=None,
     if usage_ctx is not None:
         # 实际下发档位直接取自请求体（build_qoder_body 只在 norm 非 None 时写入），
         # 与真实出站内容同源，不做二次推算。
-        usage_ctx["effort_requested"] = requested_effort(payload)
+        usage_ctx["effort_requested"], usage_ctx["reasoning_intent"] = reasoning_request(payload)
         usage_ctx["effort"] = (body_obj.get("parameters") or {}).get(
             "reasoning_effort")
         # #26：本次实际出口（自动路由后可能与请求开始时不同）—— 调用方据此
@@ -9944,7 +9983,7 @@ def note_inner_upstream_error(obj, status=None):
     return kind
 
 
-def iter_inner_sse(resp, holder=None):
+def iter_inner_sse(resp, holder=None, *, chat_display=False):
     """把上游 SSE 信封流解包成标准 OpenAI chunk 的 "data: ..." 行。
 
     上游帧形态：
@@ -9995,7 +10034,8 @@ def iter_inner_sse(resp, holder=None):
         if isinstance(inner, dict):
             if isinstance(inner.get("error"), dict) and _is_upstream_model_rejection(400, inner):
                 raise UpstreamStatus(400, _MODEL_REJECTION_DETAIL)
-            _capture_model_identity(inner, holder, getattr(resp, "_qd_model_audit", None))
+            audit = getattr(resp, "_qd_model_audit", None)
+            _capture_model_identity(inner, holder, audit)
             # Hosted orchestration must reject explicit errors even when a stop
             # frame precedes/follows them. Do not log or expose raw error bodies,
             # execute their tool calls, or replay an already established request.
@@ -10018,6 +10058,10 @@ def iter_inner_sse(resp, holder=None):
             if (holder is not None and isinstance(inner_usage, dict)
                     and inner_usage and not holder.get("usage")):
                 holder["usage"] = inner_usage
+            if chat_display and not inner.get("error"):
+                label = _chat_display_model(inner.get("model"), audit)
+                if label != inner.get("model"):
+                    body = json.dumps(dict(inner, model=label), ensure_ascii=False)
         cleaned = clean_chunk(body)
         if not cleaned:
             continue
@@ -10781,14 +10825,13 @@ def responses_to_chat(payload, hosted_web=False):
             chat[key] = payload[key]
     if payload.get("max_output_tokens") is not None:
         chat["max_tokens"] = payload["max_output_tokens"]
-    effort = None
+    for key in ("reasoning", "reasoning_effort", "thinking", "thinking_budget", "enable_thinking", "extra_body"):
+        if key in payload:
+            chat[key] = payload[key]
+    # Responses historically gives reasoning.effort priority over its top-level alias.
     reasoning = payload.get("reasoning")
-    if isinstance(reasoning, dict):
-        effort = reasoning.get("effort")
-    if not effort:
-        effort = payload.get("reasoning_effort")
-    if effort:
-        chat["reasoning_effort"] = effort
+    if isinstance(reasoning, dict) and reasoning.get("effort"):
+        chat["reasoning_effort"] = reasoning["effort"]
     # issue #127：工具清单可能分两处（顶层 tools + input 里的 additional_tools），
     # 且可能包在 type:"namespace" 容器里。先合并再展平，最后才做类型过滤。
     _raw_tools = _responses_tool_declarations(payload)
@@ -13589,18 +13632,23 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 res = qoder_tasks.run_checkin(account, gap=CHECKIN_MIN_GAP,
                                               only_daily=True)
+                amount = res.get("earned_credit") or 0
+                outcome = ("failed" if not res.get("ok") else res.get("state")
+                           or ("claimed" if amount > 0 else "no_credit"))
+                detail = (res.get("message") or res.get("error") or res.get("msg")
+                          or res.get("reason") or (res.get("logs") or [""])[0])
                 qoder_activity.record(
                     USAGE_DIR, "checkin", bool(res.get("ok")),
                     uid=account.uid, nickname=account.nickname,
                     realm=getattr(account, "realm", "") or "",
-                    detail=(res.get("msg") or res.get("reason") or ""),
-                    amount=res.get("earned_credit") or 0)
+                    detail=detail, amount=amount, outcome=outcome)
                 return {
                     "uid": account.uid,
                     "nickname": account.nickname,
                     "ok": bool(res.get("ok")),
-                    "earned_credit": res.get("earned_credit") or 0,
-                    "msg": (res.get("logs") or [""])[-1],
+                    "earned_credit": amount,
+                    "state": outcome,
+                    "msg": detail,
                     "logs": res.get("logs") or [],
                     "credits": res.get("credits"),
                     # issue #20：透传活动平台的精确结论（前端一直在读）。
@@ -13627,7 +13675,7 @@ class Handler(BaseHTTPRequestHandler):
                             acc = targets[idx]
                             results[idx] = {
                                 "uid": acc.uid, "nickname": acc.nickname,
-                                "ok": False, "earned_credit": 0,
+                                "ok": False, "earned_credit": 0, "state": "failed",
                                 "msg": "签到异常: %s" % str(exc)[:120],
                                 "logs": [], "credits": None,
                                 "message": None, "claimed": [],
@@ -13636,6 +13684,7 @@ class Handler(BaseHTTPRequestHandler):
             results = [r for r in results if r]
             qoder_tasks.invalidate_panel_cache()   # 写操作后失效面板短缓存
             return self._json(200, {"results": results,
+                                    "credit_added": sum(r["earned_credit"] for r in results),
                                     "accounts": account_views()})
         if path == "/accounts/login/start":
             platform = payload.get("platform") or "CLI"
@@ -14588,10 +14637,11 @@ class Handler(BaseHTTPRequestHandler):
             })
             web_output.stream_final(clean_responses_frame(frame) for frame in frames)
             return
+        obj["model"] = _chat_display_model(obj.get("model"), usage_ctx)
         if not want_stream:
             return self._json(200, obj)
         self._sse_begin()
-        for frame in _chat_chunks_iter(obj, model):
+        for frame in _chat_chunks_iter(obj, model, chat_display=True):
             self._sse_write(frame)
         self._sse_write(b"data: [DONE]\n\n")
 
@@ -15214,10 +15264,10 @@ class Handler(BaseHTTPRequestHandler):
         session_key = extract_session_key(self.headers, payload)
         fp = prompt_fingerprint(payload.get("messages"))
         t_start = time.time()
-        effort = requested_effort(payload)   # 与 usage 记账、请求体构造同源
+        effort, intent = reasoning_request(payload)
         self._apply_context_header(payload)  # issue #106：X-QD-Context 抬窗
-        log("chat: model=%s client_effort=%r stream=%s msgs=%d"
-            % (model, effort, want_stream,
+        log("chat: model=%r client_effort=%r reasoning_intent=%s stream=%s msgs=%d"
+            % (str(model)[:120], effort, intent, want_stream,
                len(payload.get("messages") or [])))
         # account 预置在 try 之外：下面所有 except 里的 record_error 都会引用它，
         # 而选号成功前它就是 None。必须在任何可能抛异常的语句之前。
@@ -15330,7 +15380,7 @@ class Handler(BaseHTTPRequestHandler):
                         try:
                             for line in sse_with_heartbeat(
                                     recover_leaked_tool_calls(
-                                        iter_inner_sse(cur, holder=holder),
+                                        iter_inner_sse(cur, holder=holder, chat_display=True),
                                         allowed_names=_tool_names_from_payload(payload), audit=usage_ctx),
                                     self._sse_write):
                                 if first_ms is None:
@@ -15491,6 +15541,7 @@ class Handler(BaseHTTPRequestHandler):
                          key_id=self._key_id_for_usage(),
                          realm_reason=usage_ctx.get("realm_reason", ""),
                          session_trace=usage_ctx)
+            result["model"] = _chat_display_model(result.get("model"), usage_ctx)
             return self._json(200, result)
 
 

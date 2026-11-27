@@ -7,8 +7,8 @@
 #         python server/platforms/qoder/tools/vendor_qoder.py --source /path/to/qoder2api-hub
 #         python server/platforms/qoder/tools/vendor_qoder.py --check
 #
-# 本地对上游只保留一处逻辑补丁：账号权重（落点见 _vendor/README.md）。
-# 重新 vendor 后必须重新应用，server/tests/test_qoder_vendor.py 守着它。
+# 本地对上游只保留两处逻辑补丁：账号权重、明文导出（落点见 _vendor/README.md）。
+# 重新 vendor 后必须重新应用，server/tests/test_qoder_vendor.py 守着它们。
 #
 # 记录方式：一次同步写一段；未同步的提交号不要提前写进来（与
 # deploy/trae-ref.txt、deploy/workbuddy-panel-ref.txt 同一约定）。
@@ -285,3 +285,35 @@
 #        · qoder_updater 的自更新改动只是随文件保留，token-farm 不调用。
 #      锚点提交：36fa929592684c0676e3167b812a158edbf036f2（v1.10.3）
 #      上一次基线：3cc8617e88efd57c76a20a9ca20fb6f224daa913（v1.10.1）
+
+# ---- 2026-11 第二十四批：v1.10.3 (36fa929592) → v1.10.4 (2b0981c991)
+#      上游 1 个非 merge 提交（2b0981c991），整体重 vendor 到 v1.10.4。
+#      已取：
+#        · 签到回执「未新增积分」不再显示成「领取成功 +0」（#174）：
+#          claim_campaign 把 benefit.amount / amount 单独归一（malformed 记 0，
+#          不再当成正收益），新增 amount_reported 区分「上游明确回报 0」与
+#          「上游没回报金额」；run_checkin 只在 only_daily 且 earned==0 时改写
+#          文案，其余路径照旧。新增 state 字段（claimed / already_claimed /
+#          no_credit），供上层区分「真领到」与「上游已处理但没积分」。
+#        · Chat Completions 已知目录模型被上游回报通用标签 auto 时，响应 model
+#          回显请求名（#175）：_chat_display_model + iter_inner_sse(chat_display)
+#          / _chat_chunks(chat_display)；上游明确回报的其他模型名、未知 / BYOK
+#          模型、自动路由都不改写，usage 的 upstream_model_key 与 resolved_model
+#          仍独立记账。
+#        · 思考意图审计（#176）：requested_effort 拆成 reasoning_request，返回
+#          (档位, intent)，intent 区分 absent / level / disabled /
+#          enabled_default / budget_unsupported / unrecognized；显式关闭思考
+#          （thinking=false、enable_thinking=false、reasoning.enabled=false、
+#          thinking.type=disabled、effort=off/none）都归 disabled。intent 随
+#          session_trace 落 usage 行的 reasoning_intent 字段。
+#        · chat done 日志带 reasoning_tokens，model 用 %r 并截到 120 字符
+#          （避免超长模型名把日志行撑爆）。
+#      本地补丁：账号权重、明文导出照旧重新应用（vendor 脚本会覆盖，已按
+#      _vendor/README.md 的落点重放）。--check 通过，test_qoder_vendor 19 项、
+#      Qoder 四套件 100 项通过。
+#      未取：
+#        · dashboard.html / i18n / docs/api.md / CHANGELOG / tests：面板与发布链
+#          是自己的；上游那两份 JS 测试只测它自己的 dashboard 渲染。
+#      锚点提交：2b0981c99166d681cdc8c9b38629c8c1b7306634（v1.10.4）
+#      上一次基线：36fa929592684c0676e3167b812a158edbf036f2（v1.10.3）
+

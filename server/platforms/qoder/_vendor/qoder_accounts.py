@@ -3291,6 +3291,14 @@ class Account(object):
                     "failure_code": failure, "replayed": False,
                     "redemption_code": code,
                     "message": _CAMPAIGN_FAILURE_CN[failure], "raw": r}
+        benefit = r.get("benefit")
+        amount = benefit.get("amount") if isinstance(benefit, dict) else None
+        if amount is None:
+            amount = r.get("amount")
+        try:
+            amount = max(0, int(amount)) if amount is not None else None
+        except (TypeError, ValueError, OverflowError):
+            amount = 0  # malformed receipt is not evidence of a positive grant
         return {
             "ok": not failure and r.get("success") is not False
                   and status in ("CLAIMED", "GRANTED", "SUCCESS"),
@@ -3300,8 +3308,8 @@ class Account(object):
             "grant_id": str(r.get("grantId") or ""),
             "redemption_code": code,
             "confirming": bool(status == "CLAIMED" and not code),
-            "amount": int(((r.get("benefit") or {}) if isinstance(r.get("benefit"), dict)
-                           else {}).get("amount") or r.get("amount") or 0),
+            "amount": amount if amount is not None else 0,
+            "amount_reported": amount is not None,
             "message": ("已领取" if r.get("replayed") else "领取成功")
                        + (("，兑换码：%s" % code) if code else
                           ("，兑换码发放确认中" if status == "CLAIMED" else "")),
@@ -3414,7 +3422,9 @@ class Account(object):
                 continue      # 同人已领（冷却中）：不再重复 POST
             res = self.claim_campaign(cid)
             if res.get("ok"):
-                amount = res.get("amount") or c["benefit"]["amount"] or 0
+                amount = res.get("amount")
+                if amount is None or res.get("amount_reported") is False:
+                    amount = (c.get("benefit") or {}).get("amount") or 0
                 self._stamp_checkin()
                 if res.get("replayed"):
                     already.append(c)
@@ -3451,8 +3461,11 @@ class Account(object):
             # #25-e：已有 CLAIMED 的签到类活动 = 今日已领 -> 本地盖章一次。
             self._stamp_checkin()
         if claimed:
-            msg = "活动领取成功 +%d Credits（%s）" % (
-                earned, "、".join(self.campaign_label(c) for c in claimed))
+            labels = "、".join(self.campaign_label(c) for c in claimed)
+            if earned == 0 and only_kinds == ("", "CREDITS"):
+                msg = "上游确认处理（%s），本次未新增积分" % labels
+            else:
+                msg = "活动领取成功 +%d Credits（%s）" % (earned, labels)
         elif blocked:
             msg = ("同人已领取：同一设备/身份下的其他账号本轮已领过（服务端按人去重，"
                    "failureCode=%s）" % blocked[0].get("failure_code"))

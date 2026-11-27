@@ -311,6 +311,24 @@ git fetch qoder-ref --no-tags
 `--check` 校验一致性；重新 vendor 后必须重新应用那两处补丁
 （`server/tests/test_qoder_vendor.py` 守着）。
 
+> **Qoder 批（2026-11-27，`36fa929592` → `2b0981c991`，v1.10.4）**：1 个非 merge
+> 提交，整目录重 vendor。三条线都只改「怎么说」不改协议：①**签到回执**（#174）
+> `claim_campaign` 把金额单独归一（`benefit.amount` 优先、`amount` 兜底，
+> malformed 记 0 而不是当成正收益），新增 `amount_reported` 区分「上游明确回报 0」
+> 与「上游没回报金额」，`run_checkin` 只在 `only_daily` 且 `earned == 0` 时改写成
+> 「上游确认处理，本次未新增积分」，并新增 `state`
+> （`claimed` / `already_claimed` / `no_credit`）供上层区分。②**模型回显**（#175）
+> 已知目录模型被上游回报通用标签 `auto` 时，Chat Completions 响应的 `model`
+> 回显请求名（`_chat_display_model`，只在这一种组合下改写；上游明确回报的其他
+> 模型名、未知 / BYOK、自动路由都不动，usage 的 `upstream_model_key` /
+> `resolved_model` 仍独立记账）。③**思考意图审计**（#176）`requested_effort`
+> 拆成 `reasoning_request` 返回 `(档位, intent)`，`intent` 区分 `absent` /
+> `level` / `disabled` / `enabled_default` / `budget_unsupported` /
+> `unrecognized`（显式关闭的四种写法都归 `disabled`），随 `session_trace` 落
+> usage 行的 `reasoning_intent`；`chat done` 日志补 `reasoning_tokens`。
+> 账号权重与明文导出补丁已按 `_vendor/README.md` 的落点重放；`--check` 与
+> Qoder 四套件 100 项测试通过。逐条见 `deploy/qoder-ref.txt` 第二十四批。
+
 > **Qoder 批（2026-11-26，`3cc8617e88` → `36fa92959`，v1.10.3）**：5 个非 merge
 > 提交，整目录重 vendor。三条线：①**出站身份句守卫**（PR #168）：上游对第三方
 > Agent 品牌身份句做大小写敏感的字面检测，命中返回 HTTP 200 + SSE 内嵌
