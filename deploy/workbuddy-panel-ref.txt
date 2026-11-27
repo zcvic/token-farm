@@ -1121,3 +1121,45 @@ a83d93738b1d6ebbd38f3dae1c5a90bf222e9280
 #      上一次基线：b1233f090d953f4eaf6adcb7e329e244e2270c54
 e64f7d31626006a2b73254348b89d0bb0293ba59
 e39c2528ba2cea8eeb9cedac8caefdd8d9b1b3f5
+
+
+# ---- 2026-11 第二十四批：上游 manager a83d93738b → 423d697acb（1 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 1 项：修上一批自己引入的误杀。
+#      已取（按本仓结构重写）：
+#        · 423d697acb 空闲看门狗改按「数据帧」续命，不再按正文 delta。
+#          上一批（第二十二批 6c7648e4d3）按 content / reasoning_content 判活跃，
+#          而长时间工具调用（生成一个大文件的参数）可能连续几分钟只有工具调用
+#          增量、没有正文 —— 那条流会被看门狗当成空闲并中断，属于把合法请求
+#          误杀。改法：只要这一块里有 `data:` 行就算活跃，只有纯保活注释
+#          （`: keepalive`）才计时。
+#          本仓落点比参考仓多一处，因为本仓多一条出口，而且判定下沉到了传输层：
+#            - server/services/wbforward.py 新增 has_data_frame(piece)：按**行首**
+#              `data:` 判断（正文里出现的 "data:" 在 JSON 值内部、不在行首，
+#              不会误续命）。放在传输层而不是 routers/，是因为 raw 透传与
+#              `_platform_chat` 两条路径都在这里取 SSE 文本。
+#            - gateway.py 两个 generator 都改用 has_data_frame；scan_sse 仍然
+#              照旧喂 scratch_usage（消费完整行、限制残留缓冲增长），只是不再
+#              拿它的 saw_content 续命。
+#            - anthropic._translate_stream / responses._stream_events 在解码后
+#              先判 has_data_frame，再走各自的逐行解析；原先那两处
+#              `_sse_frame_has_content(obj)` 续命调用删除，首字延迟判定
+#              （translator.saw_content）保持不动 —— 工具调用帧仍**不算**首字，
+#              否则「上游多久开始回话」这个指标会失真。
+#            - gateway._sse_frame_has_content() 随之删除：唯一用途就是续命，
+#              现在判定在传输层；留着会变成没人调用、却仍要维护的字段名列表。
+#            - platforms/sse.py 的 openai_sse 原判据是「delta 里除 role 外还有
+#              任意键」，那会把 `delta:{}` 之外的噪声也算进去；改成「除 role 外
+#              还有非空值」，与 has_data_frame 的口径对齐（该层拿到的是 dict，
+#              不是原始字节）。
+#          **有意保留的本地偏离**：raw 透传路径仍然只断开、不注入 SSE 错误帧
+#          （test_gateway_passthrough 守着）。
+#          测试：test_stream_idle_watchdog.py 新增 _ToolStream 假上游与
+#          test_tool_call_only_stream_is_not_killed（断言整条 600ms 工具流不被
+#          提前中断、日志里没有 error），转换层补 anthropic / responses 两条
+#          「只有工具帧不报 idle」用例；test_platform_sse.py 补
+#          test_tool_call_only_stream_is_not_idle。
+#      锚点提交：423d697acbeb539f3bf78a31971ff98686ca03bb（本批只同步这一个提交，面板仓那批的锚点不动）
+#      上一次基线：a83d93738b1d6ebbd38f3dae1c5a90bf222e9280
+423d697acbeb539f3bf78a31971ff98686ca03bb
+

@@ -136,6 +136,29 @@ class SseTest(unittest.TestCase):
         self.assertEqual(closed, [True])
         self.assertEqual(calls[0][0], 502)
 
+    def test_tool_call_only_stream_is_not_idle(self) -> None:
+        """只有工具调用增量、没有正文的流不算空闲。
+
+        长工具调用（生成一个大文件的参数）可能连续几分钟没有 `content` delta；
+        按正文判活跃会把这类合法请求误杀。看门狗必须按「有产出」判。
+        """
+        calls: list[tuple] = []
+
+        async def tool_stream():
+            yield _chunk(delta={'role': 'assistant'})
+            for _ in range(4):
+                await asyncio.sleep(0.01)
+                yield _chunk(delta={'tool_calls': [
+                    {'index': 0, 'function': {'arguments': 'x'}}]})
+
+        outcome = PlatformChat(stream=tool_stream(), closer=lambda: asyncio.sleep(0))
+        frames = _collect(outcome, started=0.0, idle_timeout=0.02,
+                          on_finish=lambda *a: calls.append(a))
+        self.assertEqual(frames[-1], DONE)
+        self.assertNotIn(b'"error"', b''.join(frames))
+        self.assertEqual(calls[0][0], 200)
+        self.assertIsNone(calls[0][2])
+
     def test_disconnected_stops_stream(self) -> None:
         """客户端已断开：停止读取上游，且不伪造 [DONE]。"""
         calls: list[tuple] = []

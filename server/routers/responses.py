@@ -47,7 +47,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import config, keysvc, platforms, upstreamsvc
-from ..services import platformcall
+from ..services import platformcall, wbforward
 from . import gateway
 
 logger = logging.getLogger('workbuddy.responses')
@@ -1977,21 +1977,25 @@ async def _stream_events(*, chunks, model: str, resp_id: str,
         defer_finish=True)
     error_text: str | None = None
     first_token_ms: int | None = None
-    # 内容空闲看门狗（issue #485）。只按正文续命：保活帧会不断重置 httpx
-    # 的 read timeout，于是「连接还活着、正文早就不产出」的流可以挂十几分钟，
-    # 一直占着上游并发名额。断开时走下面既有的 response.failed 收尾。
+    # 内容空闲看门狗（issue #485）：按「距上一个数据帧」计时，保活帧
+    # （SSE 注释）不续命。按数据帧而不是按正文 delta，是为了别误杀
+    # 长时间只有 tool_calls 增量的合法流。
+    # 断开时走下面既有的 response.failed 收尾。
     idle_limit = config.STREAM_IDLE_TIMEOUT
-    last_content_at = time.monotonic()
+    last_activity_at = time.monotonic()
 
     try:
         async for chunk in chunks:
             if request is not None and await request.is_disconnected():
                 error_text = 'client disconnected'
                 break
-            if idle_limit > 0 and time.monotonic() - last_content_at > idle_limit:
+            piece = chunk.decode('utf-8', errors='ignore')
+            if wbforward.has_data_frame(piece):
+                last_activity_at = time.monotonic()
+            if idle_limit > 0 and time.monotonic() - last_activity_at > idle_limit:
                 error_text = 'upstream idle for %ds without content' % idle_limit
                 break
-            pending += chunk.decode('utf-8', errors='ignore')
+            pending += piece
 
             if len(pending) > MAX_SSE_BUFFER:
                 logger.warning('SSE 缓冲超过 %d 字节仍未见换行，中止转发', MAX_SSE_BUFFER)
@@ -2029,8 +2033,6 @@ async def _stream_events(*, chunks, model: str, resp_id: str,
                 for event in translator.feed(obj):
                     yield event
 
-                if gateway._sse_frame_has_content(obj):
-                    last_content_at = time.monotonic()
                 if translator.saw_content and first_token_ms is None:
                     first_token_ms = int((time.time() - started) * 1000)
 

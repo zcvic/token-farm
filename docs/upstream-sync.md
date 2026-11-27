@@ -295,6 +295,24 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 >
 > 本批没有 Go `upstream/` 改动。
 
+> **流式看门狗修正（2026-11-27，`a83d93738b` → `423d697acb`）**：1 个提交，修上一批
+> 自己引入的误杀。上一批按 `content` / `reasoning_content` 判活跃，而长时间工具
+> 调用（生成一个大文件的参数）可能连续几分钟只有工具调用增量、没有正文——那条
+> 流会被当成空闲并中断。改为「这一块里有 `data:` 行就算活跃」，只有纯保活注释
+> （`: keepalive`）才计时。
+>
+> 本仓的判定下沉到传输层 `server/services/wbforward.py::has_data_frame()`（按**行首**
+> `data:` 判，正文里的 `"data:"` 在 JSON 值内部不会误续命），因为 raw 透传与
+> `_platform_chat` 两条路径都在那里取 SSE 文本；`gateway.py` 两个 generator、
+> `anthropic._translate_stream`、`responses._stream_events` 都改成先判它再解析。
+> `gateway._sse_frame_has_content()` 随删除（唯一用途就是续命）。首字延迟仍按
+> 正文 delta 判——工具调用帧**不算**首字，否则「上游多久开始回话」会失真。
+> `platforms/sse.py` 的 `openai_sse` 顺带把判据从「除 role 外还有任意键」收紧成
+> 「除 role 外还有非空值」。raw 透传路径仍然只断开、不注入错误帧（本地偏离保留）。
+> 测试：`test_stream_idle_watchdog.py` 加 `_ToolStream` 与
+> `test_tool_call_only_stream_is_not_killed`，转换层补两条工具帧用例，
+> `test_platform_sse.py` 补 `test_tool_call_only_stream_is_not_idle`。
+
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
 

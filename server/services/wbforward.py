@@ -137,6 +137,23 @@ def scan_sse(pending: str, usage: dict) -> tuple[str, bool]:
     return pending, saw_content
 
 
+def has_data_frame(piece: str) -> bool:
+    """片段里是否含至少一条 `data:` 行（不看内容、不看能否解析）。
+
+    空闲看门狗（issue #485）按「距上一个**数据帧**」计时，纯保活注释
+    （`: keepalive` 这类 SSE 注释行）不续命。**按数据帧而不是按正文 delta**：
+    长工具调用（例如生成一个大文件的参数）可能连续几分钟只有工具调用增量、
+    没有正文，按正文判会把这类合法请求误杀。
+
+    只认行首的 `data:`：正文里出现的 "data:" 字符串位于 JSON 值内部，不会
+    落在行首，因此不会造成误续命。
+    """
+    for line in piece.split('\n'):
+        if line.lstrip().startswith('data:'):
+            return True
+    return False
+
+
 def upstream_headers(upstream: dict | None = None) -> dict:
     """转发时用的请求头；`upstream` 为空 = 默认上游。
 

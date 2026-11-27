@@ -40,7 +40,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import config, db, iputil, keysvc, platforms, upstreamsvc
 from ..routers.security import get_config as get_security_config
-from ..services import platformcall, requestctx
+from ..services import platformcall, requestctx, wbforward
 # responses 只为复用推理凭据的编解码（`_encode_credential` / `_decode_credential`）：
 # Anthropic 的 `signature` 与 Responses 的 `encrypted_content` 语义完全相同——
 # 都是「客户端原样搬来搬去的不透明串」，两边编解码必须一致，否则同一轮对话在
@@ -1210,11 +1210,12 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
     error_text: str | None = None
     first_token_ms: int | None = None
     abort = False   # 中途出错需中止转发（缓冲超限 / 上游回 error 帧）
-    # 内容空闲看门狗（issue #485）。只按正文续命：保活帧会不断重置 httpx
-    # 的 read timeout，于是「连接还活着、正文早就不产出」的流可以挂十几分钟。
+    # 内容空闲看门狗（issue #485）：按「距上一个数据帧」计时，保活帧
+    # （SSE 注释）不续命。按数据帧而不是按正文 delta，是为了别误杀
+    # 长时间只有 tool_calls 增量的合法流。
     # 断开后走下面既有的 error 事件收尾（发在 message_stop 之前）。
     idle_limit = config.STREAM_IDLE_TIMEOUT
-    last_content_at = time.monotonic()
+    last_activity_at = time.monotonic()
 
     try:
         async for chunk in chunks:
@@ -1222,11 +1223,14 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
                 error_text = 'client disconnected'
                 abort = True
                 break
-            if idle_limit > 0 and time.monotonic() - last_content_at > idle_limit:
+            piece = chunk.decode('utf-8', errors='ignore')
+            if wbforward.has_data_frame(piece):
+                last_activity_at = time.monotonic()
+            if idle_limit > 0 and time.monotonic() - last_activity_at > idle_limit:
                 error_text = 'upstream idle for %ds without content' % idle_limit
                 abort = True
                 break
-            pending += chunk.decode('utf-8', errors='ignore')
+            pending += piece
 
             if status_code >= 400:
                 # 有数据就留一份：早先要等到 4000 字节才取，而常见的上游错误体
@@ -1288,8 +1292,6 @@ async def _translate_stream(*, chunks, model: str, thinking: bool,
                 for event in translator.feed(obj):
                     yield event
 
-                if gateway._sse_frame_has_content(obj):
-                    last_content_at = time.monotonic()
                 if translator.saw_content and first_token_ms is None:
                     first_token_ms = int((time.time() - started) * 1000)
 

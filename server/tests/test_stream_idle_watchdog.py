@@ -35,6 +35,11 @@ CONTENT_FRAME = (
 )
 # 保活帧：只有注释，没有任何正文
 KEEPALIVE_FRAME = b': keepalive\n\n'
+# 工具调用增量帧：没有正文，但它是**真实产出**，必须续命。
+TOOL_FRAME = (
+    b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+    b'"function":{"arguments":"x"}}]}}]}\n\n'
+)
 
 
 class _IdleUpstream:
@@ -55,6 +60,20 @@ class _IdleUpstream:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class _ToolStream(_IdleUpstream):
+    """状态 200 的 SSE 上游：先一帧正文，之后只发 tool_calls 增量（无正文）。
+
+    这是真实存在的形态：模型生成一个大文件的工具参数时，可能连续几分钟只有
+    `tool_calls` delta。看门狗按「正文」判会把它误杀，所以必须按数据帧续命。
+    """
+
+    async def aiter_bytes(self):
+        yield CONTENT_FRAME
+        for _ in range(20):
+            await asyncio.sleep(0.03)
+            yield TOOL_FRAME
 
 
 class _Client:
@@ -143,6 +162,26 @@ class StreamIdleWatchdogTest(unittest.TestCase):
         self.assertIn('idle', (row['error'] or ''),
                       '中断必须落进日志，否则监控会当成正常长耗时请求')
 
+    def test_tool_call_only_stream_is_not_killed(self) -> None:
+        """只有 tool_calls 增量、没有正文的流不能被看门狗误杀。
+
+        长工具调用（生成大文件的参数）可能连续几分钟没有 `content` delta。
+        看门狗必须按「数据帧」而不是「正文」续命，否则这类合法请求会被中断。
+        """
+        self.upstream = _ToolStream()
+        started = time.monotonic()
+        r = self._chat()
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(200, r.status_code, r.text[:300])
+        self.assertGreaterEqual(elapsed, 0.55,
+                                '工具调用流被误判为空闲并提前中断了')
+        row = db.query_one(
+            'SELECT error FROM request_logs ORDER BY id DESC LIMIT 1')
+        self.assertIsNotNone(row)
+        self.assertFalse((row['error'] or '').strip(),
+                         '正常的工具调用流不应被记成错误')
+
 
 class TranslatedStreamIdleTest(unittest.IsolatedAsyncioTestCase):
     """协议转换层（anthropic / responses）同样要看门狗。
@@ -176,6 +215,50 @@ class TranslatedStreamIdleTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b'idle', blob)
         self.assertNotIn(b'never', blob)
         self.assertIn('idle', state.get('error') or '')
+
+    async def test_anthropic_translate_stream_tool_calls_not_idle(self) -> None:
+        """转换层同样不能把「只有工具调用增量」的流当空闲。"""
+        from server.routers import anthropic
+
+        # 0.02 秒一帧、共 4 帧；上限放到 0.5 秒，只有「工具帧不续命」才会超时。
+        config.STREAM_IDLE_TIMEOUT = 0.5
+
+        async def chunks():
+            yield b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+            for _ in range(4):
+                await asyncio.sleep(0.02)
+                yield (b'data: {"choices":[{"delta":{"tool_calls":'
+                       b'[{"index":0,"function":{"arguments":"x"}}]}}]}\n\n')
+
+        state: dict = {}
+        events = [e async for e in anthropic._translate_stream(
+            chunks=chunks(), model='m', thinking=False, status_code=200,
+            started=time.time(), state=state)]
+        blob = b''.join(events)
+        self.assertNotIn(b'"error"', blob)
+        self.assertFalse((state.get('error') or '').strip())
+
+    async def test_responses_stream_tool_calls_not_idle(self) -> None:
+        from server.routers import responses
+
+        config.STREAM_IDLE_TIMEOUT = 0.5
+
+        async def chunks():
+            yield b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+            for _ in range(4):
+                await asyncio.sleep(0.02)
+                yield (b'data: {"choices":[{"delta":{"tool_calls":'
+                       b'[{"index":0,"function":{"arguments":"x"}}]}}]}\n\n')
+
+        state: dict = {}
+        bridge = responses._ToolBridge(None, None)
+        events = [e async for e in responses._stream_events(
+            chunks=chunks(), model='m', resp_id='resp_x',
+            custom_tool_names=set(), bridge=bridge, started=time.time(),
+            state=state)]
+        blob = b''.join(events)
+        self.assertNotIn(b'response.failed', blob)
+        self.assertFalse((state.get('error') or '').strip())
 
     async def test_responses_stream_events_idle(self) -> None:
         from server.routers import responses

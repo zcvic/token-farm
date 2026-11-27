@@ -44,10 +44,12 @@ async def openai_sse(outcome: PlatformChat, *, started: float,
 
     `idle_timeout` / `disconnected` 是流式健康检查（issue #485）：
       · `disconnected()` 为真 = 客户端已走，断开上游、结束生成器；
-      · `idle_timeout`（秒，0 = 关闭）按「距上一个正文 chunk」计时，保活 / 空
-        帧不续命。上游开着 keepalive 时 httpx 的逐字节读超时会被不断重置，
-        于是一条「连接还活着、正文早就不产出」的流可以挂十几分钟并一直占着
-        上游并发名额。
+      · `idle_timeout`（秒，0 = 关闭）按「距上一个**有内容的 chunk**」计时，
+        保活 / 空帧不续命。上游开着 keepalive 时 httpx 的逐字节读超时会被不断
+        重置，于是一条「连接还活着、正文早就不产出」的流可以挂十几分钟并一直
+        占着上游并发名额。这里的 chunk 已经是适配器产出的 OpenAI 形状 dict，
+        「有内容」指 `delta` 里除 `role` 外还有非空字段——覆盖正文、推理与工具
+        调用增量，长工具调用不会被误杀。
     两条都只在检测到后中止，不把正常帧改写成别的内容。
     """
     first_token_ms: int | None = None
@@ -64,7 +66,10 @@ async def openai_sse(outcome: PlatformChat, *, started: float,
                 delta = choices[0].get('delta') or {}
                 # 首字延迟：跳过只带 role 的第一帧。这里刻意**不按具体字段名**
                 # 判断，否则「转发热路径不得出现某字段」的架构约束会被注释本身触发。
-                if delta and any(key != 'role' for key in delta):
+                # 除 role 外还有非空值就算产出：正文、推理、工具调用增量都算，
+                # 所以长时间只有工具调用增量的合法流不会被看门狗误杀。
+                if delta and any(key != 'role' and value
+                                 for key, value in delta.items()):
                     has_content = True
                     if first_token_ms is None:
                         first_token_ms = int((time.time() - started) * 1000)

@@ -887,30 +887,9 @@ def _upstream_for(key: dict | None, *, ip: str, model: str, mapped: str,
 
 
 # `_scan_sse` 见文件顶部别名（实现：`services/wbforward.scan_sse`）。
-
-
-def _sse_frame_has_content(obj: dict) -> bool:
-    """单帧是否携带可续命的「进度」（正文 / 推理 / 工具调用片段）。
-
-    **必须按单帧判断**：`translator.saw_content` 是累计值，一旦为真就永远为真，
-    用它给空闲看门狗续命会让看门狗在首个 token 之后彻底失效（保活/空帧也被当成
-    正文）。这里刻意**不写具体字段名**：转发热路径不得处理工具调用字段的守卫会
-    扫描本文件，按「delta 里除 role 外是否有非空值」判断既覆盖正文 / 推理 /
-    工具调用片段，也不会触发那条守卫。
-    """
-    choices = obj.get('choices')
-    if not isinstance(choices, list):
-        return False
-    for choice in choices:
-        if not isinstance(choice, dict):
-            continue
-        delta = choice.get('delta') or choice.get('message') or {}
-        if not isinstance(delta, dict):
-            continue
-        for key, value in delta.items():
-            if key != 'role' and value:
-                return True
-    return False
+# 「这一块算不算活跃」的判定也下沉到了传输层（`wbforward.has_data_frame`）：
+# 按 `data:` 行而不是按 JSON 里的正文 delta，否则长时间只有工具调用增量的
+# 合法流会被空闲看门狗误杀（见 docs/upstream-sync.md 的看门狗批）。
 
 
 # ── 密钥自查用量（issue #137）─────────────────────────────
@@ -1480,15 +1459,18 @@ async def _platform_chat(*, adapter, bare_model: str, body: dict, key: dict,
             `usage` / `first_token_ms` 由适配器的 relay 在流结束时同步回
             `outcome`（同一个对象），所以这里读的是终值。
 
-            每块检查客户端断连，并按「距上一个正文帧」计时（issue #485）：
+            每块检查客户端断连，并按「距上一个数据帧」计时（issue #485）：
             上游开着保活时保活帧会不断重置 httpx 的逐字节读超时，正文停了的
             请求能挂十几分钟并一直占着上游连接与并发名额。**只断开、不改写
             SSE**：透传路径必须原样转发上游字节（`test_gateway_passthrough`
             守着），网关自己构造错误帧会引入重编码与兼容风险；截断由客户端按
             「流未正常结束」处理，原因写进请求日志。
+
+            按**数据帧**而不是按正文 delta 续命：长工具调用可能连续几分钟只有
+            工具调用增量、没有正文，按正文判会把这类合法请求误杀。
             """
             idle_limit = config.STREAM_IDLE_TIMEOUT
-            last_content_at = time.monotonic()
+            last_activity_at = time.monotonic()
             pending = ''
             scratch_usage: dict = {}
             try:
@@ -1497,15 +1479,17 @@ async def _platform_chat(*, adapter, bare_model: str, body: dict, key: dict,
                         outcome.error = 'client disconnected'
                         break
                     piece = chunk.decode('utf-8', errors='ignore')
-                    pending += piece
-                    pending, saw_content = wbforward.scan_sse(pending, scratch_usage)
-                    if saw_content:
-                        last_content_at = time.monotonic()
+                    if wbforward.has_data_frame(piece):
+                        last_activity_at = time.monotonic()
                     elif (idle_limit > 0
-                          and time.monotonic() - last_content_at > idle_limit):
+                          and time.monotonic() - last_activity_at > idle_limit):
                         outcome.error = ('upstream idle for %ds without content'
                                          % idle_limit)
                         break
+                    pending += piece
+                    # 这里只借 scan_sse 消费完整行、让残留缓冲不无限增长；
+                    # 是否续命已由上面的 `has_data_frame` 判定。
+                    pending, _ = wbforward.scan_sse(pending, scratch_usage)
                     yield chunk
             finally:
                 # 客户端提前断开（或正常走完）都要释放上游连接。适配器已经保证
@@ -1671,14 +1655,17 @@ async def _chat(request: Request, upstream_path: str):
         `usage` / 首字延迟由 `wbforward` 在流里扫描后写回同一个 outcome——
         内外两层的 `finally` 有明确顺序（内层先结束），所以这里读到的是终值。
 
-        每块检查客户端断连，并按「距上一个正文帧」计时（issue #485）：上游
+        每块检查客户端断连，并按「距上一个数据帧」计时（issue #485）：上游
         开着保活时保活帧会不断重置 httpx 的逐字节读超时，正文停了的请求能挂
         十几分钟并一直占着上游连接与并发名额。只断开、不改写 SSE——透传路径
         必须原样转发上游字节，截断由客户端按「流未正常结束」处理，原因写进
         `request_logs.error`。
+
+        按**数据帧**而不是按正文 delta 续命：长工具调用可能连续几分钟只有
+        工具调用增量、没有正文，按正文判会把这类合法请求误杀。
         """
         idle_limit = config.STREAM_IDLE_TIMEOUT
-        last_content_at = time.monotonic()
+        last_activity_at = time.monotonic()
         pending = ''
         scratch_usage: dict = {}
         try:
@@ -1687,15 +1674,16 @@ async def _chat(request: Request, upstream_path: str):
                     outcome.error_text = 'client disconnected'
                     break
                 piece = chunk.decode('utf-8', errors='ignore')
-                pending += piece
-                pending, saw_content = wbforward.scan_sse(pending, scratch_usage)
-                if saw_content:
-                    last_content_at = time.monotonic()
+                if wbforward.has_data_frame(piece):
+                    last_activity_at = time.monotonic()
                 elif (idle_limit > 0
-                      and time.monotonic() - last_content_at > idle_limit):
+                      and time.monotonic() - last_activity_at > idle_limit):
                     outcome.error_text = ('upstream idle for %ds without content'
                                           % idle_limit)
                     break
+                pending += piece
+                # 只借 scan_sse 消费完整行、限制残留缓冲增长；续命判定在上面。
+                pending, _ = wbforward.scan_sse(pending, scratch_usage)
                 yield chunk
         finally:
             # 客户端提前断开时不会走到内层的收尾，这里补一次 aclose，
