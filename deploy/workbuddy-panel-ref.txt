@@ -1225,3 +1225,39 @@ aac5cff8d0bf5957ff3bbbeb8a7164bd018c26f8
 #      上一次基线：aac5cff8d0bf5957ff3bbbeb8a7164bd018c26f8
 e846aa27b6b7a4ee0531c7cb8d7d9ee8865b3dd4
 
+# ---- 2026-11 第二十七批：上游 manager e846aa27b6 → 79d6977d42（1 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 1 项：登录态失效标记收敛为「连续 401 + 布尔字段 + 界面可见」（#490）。
+#      已取（按本仓结构重写）：
+#        · 79d6977d42 账号登录态被上游作废后 billing 返回 401，面板拿不到实时积分
+#          只能回退展示 /status 旧快照 —— 那个数字会让用户以为账号还能用；而前端
+#          原先只在「未加载」分支用 invalid_reason，池内账号显示的是「在线 + 积分
+#          空白」，tooltip 还说「上游不可达」，恰好把「该重登」说成「上游坏了」。
+#          后端：
+#            - credits.py 新增标记表（settings 里的 credits_session_dead）。
+#              判定克制是重点：只认**明确的 401**（`查询失败 code=401`，
+#              `4010` 之类不误命中；`查询异常` 与带「代理/proxy」的文案不算），
+#              连续两次才置位（上游自己认为纯 401 可能是网关抖动/token 竞态），
+#              非 401 的临时失败不改标记（原实现任何非 401 都会清掉有效告警），
+#              查询成功/重登成功/账号删除都清，只在计数变化时写库，7 天 TTL，
+#              并兼容旧的「uid -> 时间戳」形态。
+#            - wb2api.py 加 30 秒短缓存（列表页每个账号都要用它，不缓存就是一次
+#              列表请求读一次库）；merge_pool_status 下发布尔 needs_relogin，
+#              并把 credits 置空 —— 登录态失效时上游那份也是旧快照，不能覆盖。
+#            - accounts.py 的 _save_and_finish 在落盘成功后清标记（重登成功即清，
+#              不必等下一次积分查询）。
+#          前端：
+#            - account-status.ts 新增 needsRelogin 分档（归入「需要注意」，优先于
+#              在线/冷却判定），徽章与积分格都显示「需重登」，tooltip 给出
+#              「重新扫码」的动作；needsRelogin() 同时认这个新标记。
+#            - accounts 页补徽章与积分格分支（积分格不再说「上游不可达」）；
+#              仪表盘的分档计数补新键；五语言 i18n 补 badgeNeedsRelogin /
+#              badgeNeedsReloginTitle。
+#          测试：新增 server/tests/test_session_dead.py 8 项（精确 401、单次不置位、
+#          两次置位、成功/删除清除、TTL、旧形态兼容、merge 置空与默认 false），
+#          web/lib/account-status.test.mjs 补两项。
+#      未取：无。
+#      锚点提交：79d6977d4237904405be67895ce7b969149a9da2（本批只同步这一个提交）
+#      上一次基线：e846aa27b6b7a4ee0531c7cb8d7d9ee8865b3dd4
+79d6977d4237904405be67895ce7b969149a9da2
+

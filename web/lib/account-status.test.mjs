@@ -102,6 +102,17 @@ check(
   availabilityOf(mergePoolStatus([acct('a.json', 'u1')], status(['u1']))[0]),
   'online',
 );
+console.log('登录态失效标记（issue #490）：需重登优先于「在线」');
+check(
+  '带 needs_relogin → 分档是「需重登」而不是「在线」',
+  availabilityOf({uid: 'u1', file: 'a.json', in_pool: true, needs_relogin: true}),
+  'needsRelogin',
+);
+check(
+  'needs_relogin 归入「需要注意」分组',
+  availabilityGroup('needsRelogin'),
+  'attention',
+);
 check(
   '面板主动停用要早于「不在池里」判定（否则会显示成故障）',
   availabilityOf(mergePoolStatus(

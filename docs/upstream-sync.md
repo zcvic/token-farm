@@ -344,6 +344,26 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 > 协议端到端），`test_platform_sse.py` 补 3 条（role-only 定首帧、空流为 None、
 > `on_finish` 四元组）。
 
+> **登录态失效标记批（2026-11-27，`e846aa27b6` → `79d6977d42`）**：1 个提交
+> （issue #490）。账号登录态被上游作废后 billing 返回 401，面板拿不到实时积分只能
+> 回退展示 `/status` 旧快照 —— 那个数字会让用户以为账号还能用；而前端原先只在
+> 「未加载」分支用 `invalid_reason`，池内账号显示的是「在线 + 积分空白」，tooltip
+> 还说「上游不可达」，恰好把「该重登」说成「上游坏了」。
+>
+> 后端：`credits.py` 新增标记表（settings 的 `credits_session_dead`），判定克制是
+> 重点 —— 只认**明确的 401**（`查询失败 code=401`，`4010` 不误命中；`查询异常` 与
+> 带「代理/proxy」的文案不算）、连续两次才置位（纯 401 可能是网关抖动或 token 竞态）、
+> 非 401 的临时失败**不改**标记（否则一次超时抹掉有效告警）、查询成功/重登成功/
+> 删号都清、只在计数变化时写库、7 天 TTL、兼容旧的「uid → 时间戳」形态。
+> `wb2api.merge_pool_status` 下发布尔 `needs_relogin` 并把 `credits` 置空（上游那份
+> 也是旧快照），配 30 秒短缓存（列表页每个账号都要读它）。`accounts._save_and_finish`
+> 落盘成功后清标记，用户重登完不必等下一次积分查询。
+> 前端：`account-status.ts` 新增 `needsRelogin` 分档（归「需要注意」，优先于在线/
+> 冷却判定），徽章与积分格都显示「需重登」、tooltip 给「重新扫码」；仪表盘分档计数
+> 补新键；五语言 i18n 补 `badgeNeedsRelogin` / `badgeNeedsReloginTitle`。
+> 测试：新增 `server/tests/test_session_dead.py` 8 项，`web/lib/account-status.test.mjs`
+> 补两项。
+
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
 

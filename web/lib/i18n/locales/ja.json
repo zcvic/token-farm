@@ -678,7 +678,9 @@
     "reloginQueueEmptyDesc": "すべてのアカウントが正常にオンラインまたはスケジュール中です。利用禁止や手動停止のアカウントはこのキューに入りません。",
     "reloginQueueCurrentHint": "疎通確認、または再認証ログインを開始",
     "reloginQueueWaitingCount": "一覧（全 {count} 件）",
-    "reloginQueueListHint": "行をクリックで切替 · 再ログインは直接開始"
+    "reloginQueueListHint": "行をクリックで切替 · 再ログインは直接開始",
+    "badgeNeedsRelogin": "● 再ログイン",
+    "badgeNeedsReloginTitle": "ログイン状態が上流で無効化されました（請求照会が 401 を返し続けています）。「再ログイン」から再スキャンしてください。成功すると自動で解除されます。"
   },
   "whatsNew": {
     "title": "今回の更新：v{version}",
