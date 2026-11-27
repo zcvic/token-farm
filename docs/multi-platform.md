@@ -639,6 +639,26 @@ DuMate 的每日签到奖励由服务端 00:00 自动发放，手动签到时 `h
 「激活状态 / 兑换码」分段不出现。任务面板字段见 `web/lib/types.ts`
 的 `PlatformTaskItem` / `PlatformDrawStatus` / `PlatformInviteStatus`。
 
+#### 灵犀的任务体系
+
+灵犀复用同一组契约（`supports_tasks` / `task_status` / `run_task`）：
+
+| 动作 | 上游 | 说明 |
+| --- | --- | --- |
+| `checkin` | `GET /tasks` + `POST /tasks/daily_check_in/claim` | 与账号页签到同一实现 |
+| `complete_task` | `POST /tasks/{task_key}/claim` | 只代领 `claimable`；`incomplete` 提示去客户端；每日签到才带 `?date=` |
+| `bind_invite` | `POST /referral/bind` | body `{referral_code, source:"manual"}`，6 位字母数字，一次性 |
+| `redeem` | `POST /tasks/gift_card/redeem` | 任务中心的「兑换权益」，与邀请码是两套东西 |
+
+`task_status` 并发拉任务中心 + 邀请活动 / 我的邀请码 / 邀请进度四路。
+邀请接口必须带 `X-Open-Position: invite_rewards`，响应是
+`{v7code, result, data}` 信封，由 `client.referral_data` 拆包；单路失败放
+`errors`，其余分段照常显示。任务状态词是 `incomplete` / `claimable` /
+`claimed`，签到日历同时接受 `day`（桌面端实际形状）与 `date`。绑定失败
+（`already_bound` / `invalid_code` / `self_invite` / `not_new_user` /
+`activity_ended` 等）映射成 4xx，不按 502。前端复用 DuMate 的
+「签到 / 任务 / 邀请」分段，但没有抽奖，另加兑换码与连签天数。
+
 ---
 
 ## 5. 路由与模型命名
@@ -1838,6 +1858,13 @@ Qoder 的协议包含 COSY 签名、设备指纹、OAuth 设备授权、模型�
   15 天内到期的批次汇总成 `expiring`，`credits()` 一并给出到期明细。
 - 探活 = `GET /api/public/v1/account/profile`：200 且 `result` 不是
   `UserUnauthorized` → `ok`，顺带取昵称。
+- 任务面板（§4.1）：`GET /api/public/v1/tasks` 只读；`claimable` 由
+  `POST /tasks/{key}/claim` 代领。邀请接口四个：`referral/activity` /
+  `referral/code` / `referral/summary` / `referral/bind`，都要
+  `X-Open-Position: invite_rewards`，返回 `{v7code, result, data}` 信封；
+  `bind` body `{referral_code, source:"manual"}`。兑换权益走
+  `POST /tasks/gift_card/redeem`（body `{code}`，`data.granted` 判成功）。
+  签到日历实际下发 `{day, status}`，`parse_tasks` 同时保留 `day` 与 `date`。
 
 ### 15.6 每请求实扣积分（`credit_meter`）
 
@@ -1891,8 +1918,8 @@ run 生命周期（`running → completed`）后才结算，不上报的 run 永
 
 - **群聊任务**：`try_group_chat` 需要 WebSocket（`completions/ws`）+ 建群 /
   解散，本轮只做普通对话与每日签到。
-- **一次性任务**：专家模式 / 客户端任务依赖固定话术与单独的任务流程；
-  `execution_status` 上报本身已用于 §15.6 的实扣积分，但尚未接进后台任务。
+- **一次性任务的自动完成**：专家模式 / 客户端任务需要用户在客户端产生行为，
+  本端只展示并代领已经 `claimable` 的奖励，不代做。
 - **图片输入**：`content` 只接受字符串，分段里的图片会被丢弃（日志记数量），
   模型条目仍如实标 `attachment` 供界面展示。
 - **扫码登录**：见 §15.1。

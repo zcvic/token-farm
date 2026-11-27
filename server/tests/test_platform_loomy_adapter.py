@@ -1656,9 +1656,10 @@ class LoomyTaskRoutingTest(unittest.TestCase):
                  for item in platforms_router.list_platforms({})['platforms']}
         self.assertTrue(items['loomy']['supports_tasks'])
         self.assertTrue(items['dumate']['supports_tasks'])
+        self.assertTrue(items['lingxi']['supports_tasks'])
         # 其余平台没有这套概念：前端不该在它们身上出现「任务」分段。
         for name, item in items.items():
-            if name in ('loomy', 'dumate'):
+            if name in ('loomy', 'dumate', 'lingxi'):
                 continue
             self.assertFalse(item['supports_tasks'], name)
 

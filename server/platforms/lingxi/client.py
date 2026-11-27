@@ -39,6 +39,9 @@ from . import store
 
 __all__ = [
     'probe', 'list_plans', 'balance', 'account_consumed', 'tasks', 'claim',
+    'referral_activity', 'referral_code', 'referral_summary',
+    'bind_referral', 'referral_data', 'redeem_gift_card',
+    'redeem_gift_outcome',
     'open_chat', 'iter_frames', 'parse_balance', 'parse_expenses',
     'session_expenses', 'report_status', 'parse_tasks', 'claim_outcome',
     'classify', 'is_audit', 'beijing_date', 'normalize_user_cookie',
@@ -240,7 +243,8 @@ def _parse_json(text: str) -> object:
 
 async def _json_request(account: dict, method: str, path: str, *,
                         body: object = None, proxy: str | None,
-                        timeout: float) -> object:
+                        timeout: float,
+                        headers: dict[str, str] | None = None) -> object:
     cookie = _cookie_of(account)
     if not cookie:
         raise PlatformError('WPS 灵犀账号缺少 Cookie', status=401,
@@ -251,7 +255,9 @@ async def _json_request(account: dict, method: str, path: str, *,
                 httpx.Timeout(timeout, connect=10),
                 proxy=_selected_proxy(proxy), lane='lingxi') as client:
             request = client.build_request(
-                method, url, headers=_basic_headers(account, path.split('/api/')[0]),
+                method, url,
+                headers={**_basic_headers(account, path.split('/api/')[0]),
+                         **(headers or {})},
                 content=None if body is None
                 else json.dumps(body, ensure_ascii=False).encode('utf-8'))
             response = await client.send(request)
@@ -267,14 +273,16 @@ async def _json_request(account: dict, method: str, path: str, *,
 
 async def _request_on_bases(account: dict, method: str, path: str, *,
                            body: object = None, proxy: str | None,
-                           timeout: float) -> tuple[object, str]:
+                           timeout: float,
+                           headers: dict[str, str] | None = None
+                           ) -> tuple[object, str]:
     """按基址顺序请求；401 立即抛出，其余错误换下一个基址再试。"""
     last: PlatformError | None = None
     for base in _bases(account):
         try:
             payload = await _json_request(
                 account, method, f'{base}{path}', body=body, proxy=proxy,
-                timeout=timeout)
+                timeout=timeout, headers=headers)
             return payload, base
         except PlatformError as exc:
             last = exc
@@ -600,6 +608,13 @@ _TASK_TITLES = {
 
 
 def _checkin_days(raw: object) -> list[dict]:
+    """签到日历：上游两种形状都认。
+
+    · 桌面客户端实际下发 `{day: 1..7, status: available|claimed}`，并用
+      `extra.today_day` 标今天；
+    · 早期抓包见过 `{date: 'YYYY-MM-DD', status}`。
+    两种字段都保留，签到日期的选择逻辑可以继续按 `date` 读。
+    """
     if not isinstance(raw, list):
         return []
     out: list[dict] = []
@@ -608,10 +623,12 @@ def _checkin_days(raw: object) -> list[dict]:
             continue
         date = item.get('date')
         date = date.strip() if isinstance(date, str) else ''
-        if not date:
+        day = _finite(item.get('day'))
+        if not date and day is None:
             continue
         status = item.get('status')
         out.append({'date': date,
+                    'day': int(day) if day is not None else None,
                     'status': status.strip() if isinstance(status, str) else ''})
     return out
 
@@ -636,11 +653,18 @@ def parse_tasks(payload: object) -> list[dict]:
             continue
         extra = raw.get('extra') if isinstance(raw.get('extra'), dict) else {}
         streak = _finite(extra.get('consecutive_days'))
+        today_day = _finite(extra.get('today_day'))
         title = ''
         for field in ('title', 'name'):
             value = raw.get(field)
             if isinstance(value, str) and value.strip():
                 title = value.strip()
+                break
+        description = ''
+        for field in ('description', 'desc', 'sub_title'):
+            value = raw.get(field)
+            if isinstance(value, str) and value.strip():
+                description = value.strip()
                 break
         action = raw.get('action')
         action = action.strip() if isinstance(action, str) else ''
@@ -648,10 +672,13 @@ def parse_tasks(payload: object) -> list[dict]:
             'key': key,
             'type': str(raw.get('type') or 'one_time').strip(),
             'title': title or _TASK_TITLES.get(key, key),
+            'description': description,
             'status': str(raw.get('status') or '').strip(),
             'reward': _finite(raw.get('reward_amount')) or 0.0,
             'action': action,
             'streak': int(streak) if streak else None,
+            'today_day': int(today_day) if today_day is not None else None,
+            'today_reward': _finite(extra.get('today_reward')),
             'days': _checkin_days(extra.get('check_in_days')),
         })
     return out
@@ -721,6 +748,120 @@ async def claim(account: dict, key: str, date: str = '', *,
         return claim_outcome(payload)
     raise last or PlatformError('领取任务失败', status=502,
                                 code='upstream_error')
+
+
+# ── 邀请有礼 / 兑换码 ────────────────────────────────────────
+def referral_data(payload: object) -> dict:
+    """公开活动接口的 `{v7code, result, data}` 信封 → `data`。
+
+    活动页的请求层对 `protocol: public-api` 会做 `v7code === 0 &&
+    result === 'ok'` 校验后返回 `data`；这里在代理 / 网关改写后也要能读，
+    所以「是信封就拆、不是就原样用」。
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if 'v7code' in payload or 'result' in payload:
+        data = payload.get('data')
+        return data if isinstance(data, dict) else {}
+    return payload
+
+
+def _referral_message(payload: object, data: dict) -> str:
+    for field in ('message', 'msg', 'hint'):
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if isinstance(payload, dict):
+        for field in ('msg', 'message', 'hint'):
+            value = payload.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ''
+
+
+async def referral_activity(account: dict, *, proxy: str | None = None,
+                            timeout: float = C.WEB_TIMEOUT) -> dict:
+    """邀请活动规则：`campaign_status` / 奖励额度 / 邀请上限。"""
+    payload, _ = await _request_on_bases(
+        account, 'GET', C.REFERRAL_ACTIVITY_PATH, proxy=proxy,
+        timeout=timeout, headers=C.REFERRAL_HEADERS)
+    return referral_data(payload)
+
+
+async def referral_code(account: dict, *, proxy: str | None = None,
+                        timeout: float = C.WEB_TIMEOUT) -> dict:
+    """我的邀请码：`{referral_code, campaign_id, ...}`。"""
+    payload, _ = await _request_on_bases(
+        account, 'GET', C.REFERRAL_CODE_PATH, proxy=proxy,
+        timeout=timeout, headers=C.REFERRAL_HEADERS)
+    return referral_data(payload)
+
+
+async def referral_summary(account: dict, *, proxy: str | None = None,
+                           timeout: float = C.WEB_TIMEOUT) -> dict:
+    """我的邀请进度 / 兑换状态：`redeemed` / `success_count` / `total_reward`。"""
+    payload, _ = await _request_on_bases(
+        account, 'GET', C.REFERRAL_SUMMARY_PATH, proxy=proxy,
+        timeout=timeout, headers=C.REFERRAL_HEADERS)
+    return referral_data(payload)
+
+
+async def bind_referral(account: dict, code: str, *,
+                        proxy: str | None = None,
+                        timeout: float = C.WEB_TIMEOUT) -> dict:
+    """绑定邀请码（邀请人侧的口径：`referral_code` + `source=manual`）。
+
+    返回 `{bound, message/reason, invitee_reward, reward_status,
+    reward_expire_at, ...}`；业务失败通常仍是 HTTP 200，由 `bound` 判定。
+    """
+    referral = str(code or '').strip()
+    if not referral:
+        raise PlatformError('请填写邀请码', status=400,
+                            code='missing_invite_code')
+    payload, _ = await _request_on_bases(
+        account, 'POST', C.REFERRAL_BIND_PATH,
+        body={'referral_code': referral, 'source': 'manual'},
+        proxy=proxy, timeout=timeout, headers=C.REFERRAL_HEADERS)
+    data = referral_data(payload)
+    if data.get('bound') is None and isinstance(payload, dict):
+        # 信封里 `result != 'ok'` 时没有 data，但 `msg` 仍然可读。
+        return {'bound': False, **data,
+                'message': _referral_message(payload, data)}
+    return data
+
+
+def redeem_gift_outcome(payload: object) -> dict:
+    """兑换码响应 → `{ok, reward, message, data}`。
+
+    客户端 UI 的判定是 `result === 'ok' && data.granted`；`granted` 缺失
+    （旧版本 / 网关裁剪）时按成功，避免把已到账的兑换报成失败。
+    """
+    if not isinstance(payload, dict):
+        return {'ok': True, 'reward': 0.0, 'message': '', 'data': {}}
+    data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+    result = payload.get('result')
+    ok = result in (None, '', 'ok', 'Success')
+    granted = data.get('granted')
+    return {
+        'ok': ok and granted is not False,
+        'reward': _finite(data.get('face_value')) or 0.0,
+        'message': _referral_message(payload, data),
+        'data': data,
+    }
+
+
+async def redeem_gift_card(account: dict, code: str, *,
+                           proxy: str | None = None,
+                           timeout: float = C.WEB_TIMEOUT) -> dict:
+    """任务中心「兑换权益」：`POST /tasks/gift_card/redeem` body `{code}`。"""
+    value = str(code or '').strip()
+    if not value:
+        raise PlatformError('请填写兑换码', status=400,
+                            code='missing_redeem_code')
+    payload, _ = await _request_on_bases(
+        account, 'POST', C.GIFT_REDEEM_PATH, body={'code': value},
+        proxy=proxy, timeout=timeout)
+    return redeem_gift_outcome(payload)
 
 
 def beijing_date(now: float | None = None) -> str:

@@ -45,7 +45,8 @@ import type {
 
 /**
  * 平台「任务」页（Loomy：签到 / 绑定邀请码 / 兑换兑换码；
- * DuMate：签到 / 成长任务 / 抽奖 / 邀请码）。
+ * DuMate：签到 / 成长任务 / 抽奖 / 邀请码；
+ * 灵犀：签到 / 任务中心 / 邀请码 / 兑换权益）。
  *
  * 为什么单独一页而不是塞进账号表格：这些事都是**按账号、低频、带输入**
  * 的动作（邀请码是一次性的，绑错无法解绑），和「看账号状态」不是一个
@@ -67,6 +68,9 @@ export function PlatformTasksPanel({
   const {isAdmin} = useAuth();
   /** DuMate 的任务体系与 Loomy 完全不同（成长任务 / 抽奖 / 邀请），分段渲染。 */
   const isDumate = platform === 'dumate';
+  /** 灵犀同样是「签到 + 任务 + 邀请」结构，但没有抽奖，另有兑换码。 */
+  const isLingxi = platform === 'lingxi';
+  const structured = isDumate || isLingxi;
 
   /** 有凭据的账号才能跑任务；冻结账号也允许（用户可能就是想签完再解冻）。 */
   const candidates = useMemo(
@@ -197,9 +201,9 @@ export function PlatformTasksPanel({
           );
         }
       }
-      // DuMate 的写接口只回动作结果（不含整页快照），统一重读一次；
+      // DuMate / 灵犀的写接口只回动作结果（不含整页快照），统一重读一次；
       // Loomy 的动作返回里带着最新状态，直接合并省一次往返。
-      if (isDumate) {
+      if (structured) {
         void load(uid);
       } else if (task.uid) {
         setStatus((prev) => ({...(prev || {uid}), ...task} as PlatformTaskStatus));
@@ -325,7 +329,7 @@ export function PlatformTasksPanel({
         </section>
       ) : null}
 
-      {!isDumate ? (
+      {!structured ? (
         <>
       {/* ── 邀请码绑定 ─────────────────────────────────── */}
       <section className="overflow-hidden rounded-[20px] bg-muted">
@@ -614,30 +618,60 @@ export function PlatformTasksPanel({
             <div className="space-y-2 px-3.5 py-3">
               {checkin ? (
                 <>
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-4">
-                    <Metric label={t('platforms.tasks.balance')} value={checkin.balance} />
-                    {/* 每天 500 分是服务端 00:00 自动发的，所以「已签到」时
-                        也可能有到账额；这里展示的是最近一次真正到账的那笔。 */}
-                    <Metric
-                      label={t('platforms.tasks.checkinEarnedLabel')}
-                      value={
-                        typeof checkin.earned_credit === 'number' && checkin.earned_credit > 0
-                          ? `+${checkin.earned_credit}`
-                          : 0
-                      }
-                      hint={checkin.earned_at
-                        ? fmtDateTime(checkin.earned_at * 1000)
-                        : undefined}
-                    />
-                    <Metric
-                      label={t('platforms.tasks.checkinMonthPoints')}
-                      value={checkin.month_points}
-                    />
-                    <Metric
-                      label={t('platforms.tasks.checkinTotalTimes')}
-                      value={checkin.total_times}
-                    />
-                  </div>
+                  {isLingxi ? (
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-3">
+                      <Metric
+                        label={t('platforms.tasks.checkinStreak')}
+                        value={checkin.continuous_days}
+                      />
+                      <Metric
+                        label={t('platforms.tasks.checkinEarnedLabel')}
+                        value={
+                          typeof checkin.earned_credit === 'number' && checkin.earned_credit > 0
+                            ? `+${checkin.earned_credit}`
+                            : 0
+                        }
+                        hint={checkin.earned_at
+                          ? fmtDateTime(checkin.earned_at * 1000)
+                          : undefined}
+                      />
+                      <Metric
+                        label={t('platforms.tasks.lastResult')}
+                        value={
+                          checkin.already
+                            ? t('platforms.tasks.checkinAlready')
+                            : checkin.message || (checkin.ok
+                              ? t('platforms.tasks.checkinDone')
+                              : t('platforms.checkinFailed'))
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-4">
+                      <Metric label={t('platforms.tasks.balance')} value={checkin.balance} />
+                      {/* 每天 500 分是服务端 00:00 自动发的，所以「已签到」时
+                          也可能有到账额；这里展示的是最近一次真正到账的那笔。 */}
+                      <Metric
+                        label={t('platforms.tasks.checkinEarnedLabel')}
+                        value={
+                          typeof checkin.earned_credit === 'number' && checkin.earned_credit > 0
+                            ? `+${checkin.earned_credit}`
+                            : 0
+                        }
+                        hint={checkin.earned_at
+                          ? fmtDateTime(checkin.earned_at * 1000)
+                          : undefined}
+                      />
+                      <Metric
+                        label={t('platforms.tasks.checkinMonthPoints')}
+                        value={checkin.month_points}
+                      />
+                      <Metric
+                        label={t('platforms.tasks.checkinTotalTimes')}
+                        value={checkin.total_times}
+                      />
+                    </div>
+                  )}
                   <p className="text-[11px] text-muted-foreground">
                     {checkin.already
                       ? t('platforms.tasks.checkinAlready')
@@ -660,7 +694,9 @@ export function PlatformTasksPanel({
               <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                 <ListChecks className="h-3.5 w-3.5" />
                 <h3 className="text-xs font-medium text-foreground">
-                  {t('platforms.tasks.growthTitle')}
+                  {isLingxi
+                    ? t('platforms.tasks.lingxiTasksTitle')
+                    : t('platforms.tasks.growthTitle')}
                 </h3>
                 {taskTotal > 0 ? (
                   <Badge
@@ -674,23 +710,26 @@ export function PlatformTasksPanel({
                   </Badge>
                 ) : null}
               </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 rounded-full px-3 text-[11px]"
-                disabled={!isAdmin || busy !== '' || !autoPending}
-                title={
-                  isAdmin
-                    ? t('platforms.tasks.growthRunAutoHint')
-                    : t('platforms.tasks.adminOnly')
-                }
-                onClick={() => void runAction('complete_task')}
-              >
-                {busy === 'complete_task'
-                  ? <Loader2 className="animate-spin" />
-                  : <ListChecks />}
-                {t('platforms.tasks.growthRunAuto')}
-              </Button>
+              {/* 灵犀的任务必须逐条领取（上游没有批量接口），不显示「自动完成」。 */}
+              {!isLingxi ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 rounded-full px-3 text-[11px]"
+                  disabled={!isAdmin || busy !== '' || !autoPending}
+                  title={
+                    isAdmin
+                      ? t('platforms.tasks.growthRunAutoHint')
+                      : t('platforms.tasks.adminOnly')
+                  }
+                  onClick={() => void runAction('complete_task')}
+                >
+                  {busy === 'complete_task'
+                    ? <Loader2 className="animate-spin" />
+                    : <ListChecks />}
+                  {t('platforms.tasks.growthRunAuto')}
+                </Button>
+              ) : null}
             </div>
             {taskGroups.length ? (
               <div className="divide-y divide-border/40">
@@ -777,7 +816,9 @@ export function PlatformTasksPanel({
                                 variant="outline"
                                 className="h-7 rounded-full px-2.5 text-[10px]"
                                 disabled={!isAdmin || busy !== ''}
-                                title={t('platforms.tasks.growthQueryHint')}
+                                title={isLingxi
+                                  ? t('platforms.tasks.claimNowHint')
+                                  : t('platforms.tasks.growthQueryHint')}
                                 onClick={() =>
                                   void runAction(
                                     'complete_task',
@@ -789,7 +830,9 @@ export function PlatformTasksPanel({
                                 {running
                                   ? <Loader2 className="animate-spin" />
                                   : <Check />}
-                                {t('platforms.tasks.growthComplete')}
+                                {isLingxi
+                                  ? t('platforms.tasks.claimNow')
+                                  : t('platforms.tasks.growthComplete')}
                               </Button>
                             ) : (
                               <>
@@ -883,7 +926,9 @@ export function PlatformTasksPanel({
                 <Input
                   value={invite}
                   onChange={(e) => setInvite(e.target.value)}
-                  placeholder={t('platforms.tasks.inviteRedeemPlaceholder')}
+                  placeholder={isLingxi
+                    ? t('platforms.tasks.invitePlaceholderLingxi')
+                    : t('platforms.tasks.inviteRedeemPlaceholder')}
                   className="h-8 min-w-[180px] flex-1 rounded-xl text-xs"
                   disabled={!isAdmin || busy !== ''}
                   autoComplete="off"
@@ -903,13 +948,60 @@ export function PlatformTasksPanel({
               </form>
               <p className="text-[11px] leading-5 text-muted-foreground">
                 {isAdmin
-                  ? t('platforms.tasks.inviteRedeemHint')
+                  ? isLingxi
+                    ? t('platforms.tasks.inviteRedeemHintLingxi')
+                    : t('platforms.tasks.inviteRedeemHint')
                   : t('platforms.tasks.adminOnly')}
               </p>
             </div>
           </section>
 
-          {/* ── 抽奖 ─────────────────────────────────────── */}
+          {/* ── 兑换码（灵犀任务中心的「兑换权益」）────────── */}
+          {isLingxi ? (
+            <section className="overflow-hidden rounded-[20px] bg-muted">
+              <div className="flex items-center gap-2 border-b border-border/60 px-3.5 py-3 text-[11px] text-muted-foreground">
+                <Coins className="h-3.5 w-3.5" />
+                <h3 className="text-xs font-medium text-foreground">
+                  {t('platforms.tasks.redeemTitle')}
+                </h3>
+              </div>
+              <div className="space-y-2 px-3.5 py-3">
+                <form
+                  className="flex flex-wrap items-center gap-1.5"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!isAdmin) return;
+                    void runAction('redeem', {code: redeem.trim()});
+                  }}
+                >
+                  <Input
+                    value={redeem}
+                    onChange={(e) => setRedeem(e.target.value)}
+                    placeholder={t('platforms.tasks.redeemPlaceholder')}
+                    className="h-8 min-w-[180px] flex-1 rounded-xl text-xs"
+                    disabled={!isAdmin || busy !== ''}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <Button
+                    type="submit"
+                    size="sm"
+                    className="h-8 shrink-0 rounded-full px-3 text-[11px]"
+                    disabled={!isAdmin || busy !== '' || !redeem.trim()}
+                  >
+                    {busy === 'redeem' ? <Loader2 className="animate-spin" /> : null}
+                    {t('platforms.tasks.redeem')}
+                  </Button>
+                </form>
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  {isAdmin ? t('platforms.tasks.redeemDesc') : t('platforms.tasks.adminOnly')}
+                </p>
+              </div>
+            </section>
+          ) : null}
+
+          {/* ── 抽奖（仅 DuMate）──────────────────────────── */}
+          {isDumate ? (
           <section className="overflow-hidden rounded-[20px] bg-muted">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3.5 py-3">
               <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
@@ -1026,6 +1118,7 @@ export function PlatformTasksPanel({
               ) : null}
             </div>
           </section>
+          ) : null}
         </>
       )}
     </div>

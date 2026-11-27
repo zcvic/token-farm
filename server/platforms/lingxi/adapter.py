@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable
@@ -48,6 +49,24 @@ SETTING_MODELS_ATTEMPT = 'platforms.lingxi.models_attempt'
 # 429 / 额度的冷却口径。灵犀用 429 表达限流；与其它平台一致，默认 0 表示
 # 「维持旧行为：直接上抛、不换号不冻结」，由设置项开启。
 QUOTA_COOLDOWN_SECONDS = 3600
+
+# 任务中心的状态词（桌面客户端）：可领取 / 已领取；其余（incomplete）需要
+# 用户在客户端完成对应动作，本端只展示、不代做。
+_TASK_DONE_STATUS = {'claimed', 'completed', 'done', 'finished'}
+_TASK_CLAIMABLE_STATUS = {'claimable', 'available'}
+# 每日签到在面板上有独立的签到卡片，不再出现在任务列表里（否则同一天
+# 会有两个按钮能触发领取，绕过 checkin 的缓存刷新）。
+_DAILY_TASK_KEY = 'daily_check_in'
+# `referral/bind` 的业务失败原因 → HTTP 语义（上游通常仍返回 200）。
+_INVITE_ERRORS: dict[str, tuple[int, str]] = {
+    'already_bound': (409, 'already_activated'),
+    'not_new_user': (400, 'invite_not_new_user'),
+    'self_invite': (400, 'invite_self'),
+    'invalid_code': (400, 'invite_invalid'),
+    'activity_ended': (400, 'invite_activity_ended'),
+    'activity_not_started': (400, 'invite_activity_upcoming'),
+    'activity_paused': (400, 'invite_activity_paused'),
+}
 
 # 独立任务集合：取消之后补发的 `completed` 上报挂在这里，避免被 GC 提前回收
 # （fire-and-forget 的任务必须自己保活，见 asyncio 文档）。
@@ -134,8 +153,14 @@ class LingxiAdapter(PlatformAdapter):
     # 单区域平台。
     realm_aware = False
 
+    def supports_tasks(self) -> bool:
+        """灵犀客户端里有任务中心（签到 / 一次性任务）与邀请有礼。"""
+        return True
+
     def __init__(self) -> None:
         self._locks: dict[str, asyncio.Lock] = {}
+        # 同一账号的任务写操作串行（领取 / 绑邀请码 / 兑换），避免连点重复提交。
+        self._task_locks: dict[str, asyncio.Lock] = {}
         self._last_used: dict[str, float] = {}
         self._probes: dict[str, tuple[float, dict]] = {}
         self._credits: dict[str, tuple[float, dict]] = {}
@@ -341,6 +366,286 @@ class LingxiAdapter(PlatformAdapter):
             'reward': reward,
             'continuous_days': daily.get('streak') if daily else None,
         }
+
+    # ── 任务面板（任务中心 / 邀请有礼 / 兑换码）────────────
+    def _task_lock(self, uid: str) -> asyncio.Lock:
+        lock = self._task_locks.get(uid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._task_locks[uid] = lock
+        return lock
+
+    @staticmethod
+    def _task_item(task: dict) -> dict:
+        """`client.parse_tasks` 的一条 → 前端通用任务条目。"""
+        status = str(task.get('status') or '').strip()
+        done = status in _TASK_DONE_STATUS
+        claimable = status in _TASK_CLAIMABLE_STATUS
+        reward = int(round(_num(task.get('reward')) or 0))
+        return {
+            'task_id': str(task.get('key') or ''),
+            'task_type': str(task.get('type') or ''),
+            'title': str(task.get('title') or ''),
+            'sub_title': str(task.get('description') or ''),
+            'reward_points': reward,
+            'done': done,
+            # 只有 claimable 才允许本端代领；incomplete 需要用户去客户端完成。
+            'auto': claimable,
+            'status': status,
+        }
+
+    @staticmethod
+    def _checkin_view(account: dict) -> dict | None:
+        """账号里缓存的签到记录 → 前端签到卡片（没有记录返回 None）。"""
+        stored = account.get('checkin') if isinstance(
+            account.get('checkin'), dict) else {}
+        last_at = int(_num(stored.get('last_at')) or 0)
+        if last_at <= 0:
+            return None
+        result = str(stored.get('last_result') or '')
+        ok = result in ('ok', 'already')
+        reward = int(round(_num(stored.get('reward')) or 0))
+        balance = account.get('balance') if isinstance(
+            account.get('balance'), dict) else {}
+        remaining = _num(balance.get('remaining'))
+        view: dict[str, Any] = {
+            'ok': ok,
+            'already': result == 'already',
+            'message': '今日已签到' if result == 'already' else (
+                '签到成功' if result == 'ok' else '签到失败'),
+            'earned_credit': 0 if result == 'already' else reward,
+            'earned_at': last_at,
+            'continuous_days': stored.get('continuous_days'),
+        }
+        if remaining is not None:
+            view['balance'] = remaining
+        return view
+
+    async def task_status(self, account_id: str) -> dict:
+        """任务面板只读状态：任务中心 + 邀请有礼 + 缓存签到。
+
+        四路并行、各自容错：任务中心或邀请接口单路失败时，面板仍显示其它
+        分段，失败原因放进 `errors`。**不做任何写操作**（签到哪里由
+        `run_task('checkin')` 显式触发）。
+        """
+        account = self._require(account_id)
+        uid = str(account.get('uid') or '')
+        proxy = self._proxy_for(account)
+        timeout = runtime_settings.credits_timeout(self.name)
+        errors: list[dict[str, Any]] = []
+
+        async def read(endpoint: str, coro) -> Any:
+            try:
+                return await coro
+            except PlatformError as exc:
+                errors.append({'endpoint': endpoint, 'code': exc.code,
+                               'message': exc.message})
+                return {}
+
+        task_list, activity, code, summary = await asyncio.gather(
+            read('tasks', client.tasks(
+                account, proxy=proxy, timeout=timeout)),
+            read('referral/activity', client.referral_activity(
+                account, proxy=proxy, timeout=timeout)),
+            read('referral/code', client.referral_code(
+                account, proxy=proxy, timeout=timeout)),
+            read('referral/summary', client.referral_summary(
+                account, proxy=proxy, timeout=timeout)),
+        )
+        raw_tasks = task_list if isinstance(task_list, list) else []
+        activity = activity if isinstance(activity, dict) else {}
+        code = code if isinstance(code, dict) else {}
+        summary = summary if isinstance(summary, dict) else {}
+
+        summary_error = next(
+            (e for e in errors if e['endpoint'] == 'referral/summary'), None)
+        if summary_error:
+            activation: dict[str, Any] = {
+                'error': summary_error['message'],
+                'code': summary_error['code'],
+            }
+        else:
+            activation = {
+                'activated': summary.get('redeemed') is True,
+                'raw': {'activity': activity, 'summary': summary},
+            }
+
+        invite_code = str(code.get('referral_code') or '').strip()
+        success_count = int(_num(summary.get('success_count')) or 0)
+        total_reward = int(round(_num(summary.get('total_reward')) or 0))
+        limit = _num(summary.get('max_success_invites'))
+        unlimited = summary.get('unlimited') is True
+        max_uses = None
+        if not unlimited and limit is not None and limit > 0:
+            max_uses = int(limit)
+
+        invite_codes: list[dict[str, Any]] = []
+        if invite_code:
+            entry: dict[str, Any] = {
+                'inviteCode': invite_code,
+                'status': 'active' if activity.get('campaign_status') == 'active'
+                else str(activity.get('campaign_status') or ''),
+            }
+            # 只有拿到上限时才显示「已用 / 上限」，否则 0 会被读成「不能邀请」。
+            if max_uses is not None:
+                entry['usedCount'] = success_count
+                entry['maxUses'] = max_uses
+            invite_codes.append(entry)
+
+        tasks = [self._task_item(item) for item in raw_tasks
+                 if isinstance(item, dict) and item.get('key')
+                 and item.get('key') != _DAILY_TASK_KEY]
+        groups = [{'group_code': '', 'group_name': '', 'tasks': tasks}] \
+            if tasks else []
+
+        return {
+            'uid': uid,
+            'nickname': str(account.get('nickname') or ''),
+            'realm': store.REALM,
+            'activation': activation,
+            'checkin': self._checkin_view(account),
+            'invite_codes': invite_codes,
+            'invite': {
+                'invitation_code': invite_code,
+                'invited_count': success_count,
+                'total_points': total_reward,
+            },
+            'tasks': tasks,
+            'task_groups': groups,
+            'synced_at': int(time.time()),
+            'errors': errors,
+        }
+
+    async def run_task(self, account_id: str, action: str, **params: Any) -> dict:
+        """任务动作：`checkin` / `complete_task` / `bind_invite` / `redeem`。"""
+        action = str(action or '').strip().lower()
+        async with self._task_lock(str(account_id)):
+            if action in ('checkin', 'sync'):
+                return await self._task_checkin(account_id)
+            if action in ('complete_task', 'claim_task', 'claim', 'task_claim'):
+                return await self._claim_task(
+                    account_id, str(params.get('task_id')
+                                    or params.get('task_key') or ''))
+            if action in ('bind_invite', 'invite', 'redeem_invite'):
+                return await self._bind_invite(
+                    account_id,
+                    str(params.get('invite_code') or params.get('code') or ''))
+            if action in ('redeem', 'redeem_code'):
+                return await self._redeem(
+                    account_id, str(params.get('code')
+                                    or params.get('redeem_code') or ''))
+        raise PlatformError(f'不支持的任务动作 {action!r}', status=400,
+                            code='task_unsupported')
+
+    async def _task_checkin(self, account_id: str) -> dict:
+        """签到（复用 `checkin`）后刷新一次任务面板。"""
+        result = await self.checkin(account_id)
+        snapshot = await self.task_status(account_id)
+        earned = int(_num(result.get('earned_credit')) or 0)
+        checkin = dict(snapshot.get('checkin') or {})
+        checkin.update({
+            'ok': bool(result.get('ok')),
+            'already': bool(result.get('already')),
+            'message': str(result.get('message') or ''),
+            'earned_credit': earned,
+            'earned_this_run': earned,
+            'continuous_days': result.get('continuous_days'),
+        })
+        snapshot.update({'ok': True, 'action': 'checkin', 'checkin': checkin})
+        return snapshot
+
+    async def _claim_task(self, account_id: str, task_key: str) -> dict:
+        key = str(task_key or '').strip()
+        if not key:
+            raise PlatformError('缺少任务标识', status=400,
+                                code='missing_task_key')
+        account = self._require(account_id)
+        # 只有每日签到按日期领取；一次性任务带上 `?date=` 没有意义。
+        date = client.beijing_date() if key == _DAILY_TASK_KEY else ''
+        out = await client.claim(
+            account, key, date,
+            proxy=self._proxy_for(account),
+            timeout=runtime_settings.credits_timeout(self.name))
+        already = bool(out.get('already'))
+        if not out.get('ok') and not already:
+            raise PlatformError(str(out.get('message') or '领取任务失败'),
+                                status=400, code='task_claim_failed',
+                                payload=out)
+        reward = int(round(_num(out.get('reward')) or 0))
+        self._credits.pop(str(account.get('uid') or ''), None)
+        snapshot = await self.task_status(account_id)
+        message = str(out.get('message') or '')
+        snapshot.update({
+            'ok': True,
+            'action': 'complete_task',
+            'task_id': key,
+            'desc': message or (f'已领取 {reward} 智点' if reward else '已领取'),
+            'done_count': 1,
+            'already_count': 1 if already else 0,
+            'fail_count': 0,
+            'results': [{'task_id': key, 'title': key, 'ok': True,
+                         'already': already}],
+        })
+        return snapshot
+
+    async def _bind_invite(self, account_id: str, invite_code: str) -> dict:
+        # 与 Web 活动页一致：邀请码可能被整段粘贴（「邀请码：AB12CD」），
+        # 先去掉分隔符，只认其中的 6 位字母数字。
+        raw = str(invite_code or '').strip()
+        compact = re.sub(r'[^A-Za-z0-9]', '', raw)
+        if re.fullmatch(r'[A-Za-z0-9]{6}', compact):
+            invite = compact
+        else:
+            found = re.search(r'[A-Za-z0-9]{6}', raw)
+            invite = found.group(0) if found else ''
+        if not invite:
+            raise PlatformError('邀请码是 6 位英文字母或数字',
+                                status=400, code='invalid_invite_code')
+        account = self._require(account_id)
+        data = await client.bind_referral(
+            account, invite, proxy=self._proxy_for(account),
+            timeout=runtime_settings.credits_timeout(self.name))
+        if data.get('bound') is not True:
+            reason = str(data.get('reason') or '').strip()
+            status, code = _INVITE_ERRORS.get(
+                reason, (400, reason or 'invite_failed'))
+            raise PlatformError(
+                str(data.get('message') or '绑定邀请码失败'),
+                status=status, code=code, payload=data)
+        self._credits.pop(str(account.get('uid') or ''), None)
+        snapshot = await self.task_status(account_id)
+        snapshot.update({
+            'ok': True,
+            'action': 'bind_invite',
+            'invite_code': invite,
+            'desc': str(data.get('message') or '邀请关系已绑定'),
+        })
+        return snapshot
+
+    async def _redeem(self, account_id: str, code: str) -> dict:
+        value = str(code or '').strip()
+        if not value:
+            raise PlatformError('请填写兑换码', status=400,
+                                code='missing_redeem_code')
+        account = self._require(account_id)
+        out = await client.redeem_gift_card(
+            account, value, proxy=self._proxy_for(account),
+            timeout=runtime_settings.credits_timeout(self.name))
+        if not out.get('ok'):
+            raise PlatformError(str(out.get('message') or '兑换失败'),
+                                status=400, code='redeem_failed',
+                                payload=out)
+        reward = int(round(_num(out.get('reward')) or 0))
+        self._credits.pop(str(account.get('uid') or ''), None)
+        snapshot = await self.task_status(account_id)
+        snapshot.update({
+            'ok': True,
+            'action': 'redeem',
+            'desc': str(out.get('message') or '') or (
+                f'已到账 {reward} 智点' if reward else '兑换成功'),
+            'data': out.get('data') or {},
+        })
+        return snapshot
 
     async def usage(self, account_id: str) -> dict:
         """余额 / 用量快照（余额接口）。"""

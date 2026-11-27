@@ -724,6 +724,84 @@ class LingxiClientTest(unittest.TestCase):
         self.assertTrue(already['already'])
         self.assertEqual(client.claim_outcome({})['ok'], True)
 
+    def test_parse_tasks_reads_day_keyed_checkin_and_extra(self) -> None:
+        tasks = client.parse_tasks({'data': {'tasks': [
+            {'task_key': 'daily_check_in', 'type': 'daily',
+             'status': 'claimable', 'reward_amount': 100,
+             'description': '每天签到领智点',
+             'extra': {'consecutive_days': 3, 'today_day': 4,
+                       'today_reward': 100,
+                       'check_in_days': [
+                           {'day': 1, 'status': 'claimed'},
+                           {'day': 4, 'status': 'available'}]}},
+            {'task_key': 'try_expert_mode', 'type': 'one_time',
+             'status': 'incomplete', 'reward_amount': 50},
+        ]}})
+        daily = tasks[0]
+        self.assertEqual(daily['description'], '每天签到领智点')
+        self.assertEqual(daily['today_day'], 4)
+        self.assertEqual(daily['today_reward'], 100)
+        self.assertEqual([d['day'] for d in daily['days']], [1, 4])
+        self.assertEqual(daily['days'][1]['status'], 'available')
+        self.assertEqual(tasks[1]['status'], 'incomplete')
+
+    def test_referral_and_gift_card_protocol(self) -> None:
+        seen: list[dict] = []
+
+        def reply(request):
+            seen.append({
+                'path': request.url.path,
+                'method': request.method,
+                'position': request.headers.get('x-open-position'),
+                'body': json.loads(request.content or b'{}'),
+            })
+            if request.url.path == C.REFERRAL_BIND_PATH:
+                return httpx.Response(200, json={
+                    'v7code': 0, 'result': 'ok',
+                    'data': {'bound': True, 'invitee_reward': 200,
+                             'reward_status': 'granted'}})
+            if request.url.path == C.GIFT_REDEEM_PATH:
+                return httpx.Response(200, json={
+                    'result': 'ok', 'data': {'granted': True,
+                                              'face_value': 300}})
+            return httpx.Response(200, json={
+                'v7code': 0, 'result': 'ok',
+                'data': {'referral_code': 'AB12CD',
+                         'campaign_status': 'active', 'redeemed': False}})
+
+        self._patch_http(reply)
+
+        activity = asyncio.run(client.referral_activity(self._account()))
+        self.assertEqual(activity['campaign_status'], 'active')
+        code = asyncio.run(client.referral_code(self._account()))
+        self.assertEqual(code['referral_code'], 'AB12CD')
+        summary = asyncio.run(client.referral_summary(self._account()))
+        self.assertFalse(summary['redeemed'])
+        bound = asyncio.run(client.bind_referral(self._account(), ' XY-1234 '))
+        self.assertTrue(bound['bound'])
+        gift = asyncio.run(client.redeem_gift_card(self._account(), ' GIFT-1 '))
+        self.assertTrue(gift['ok'])
+        self.assertEqual(gift['reward'], 300.0)
+
+        self.assertEqual([s['method'] for s in seen],
+                         ['GET', 'GET', 'GET', 'POST', 'POST'])
+        self.assertTrue(all(s['position'] == 'invite_rewards'
+                            for s in seen[:4]),
+                        '邀请接口必须带 X-Open-Position 头')
+        self.assertEqual(seen[3]['body'],
+                         {'referral_code': 'XY-1234', 'source': 'manual'})
+        self.assertEqual(seen[4]['body'], {'code': 'GIFT-1'})
+
+    def test_referral_bind_failure_is_a_normal_result(self) -> None:
+        self._patch_http(lambda request: httpx.Response(200, json={
+            'v7code': 4001, 'result': 'failed',
+            'msg': '邀请码无效'}))
+        out = asyncio.run(client.bind_referral(self._account(), 'ABC123'))
+        self.assertFalse(out['bound'])
+        self.assertEqual(out['message'], '邀请码无效')
+        self.assertFalse(client.redeem_gift_outcome({
+            'result': 'ok', 'data': {'granted': False}})['ok'])
+
     def test_beijing_date_uses_utc_plus_eight(self) -> None:
         self.assertEqual(client.beijing_date(0), '1970-01-01')
         self.assertEqual(client.beijing_date(1_700_000_000), '2023-11-15')
@@ -1291,6 +1369,164 @@ class LingxiAdapterTest(unittest.TestCase):
             out = asyncio.run(self.adapter.checkin('lx_1'))
         self.assertTrue(out['already'])
         self.assertEqual(out['earned_credit'], 0)
+
+    def test_task_status_merges_tasks_checkin_and_referral(self) -> None:
+        self._seed(checkin={'last_at': int(time.time()),
+                            'last_result': 'already', 'continuous_days': 4,
+                            'reward': 100})
+
+        async def fake_tasks(account, **kwargs):
+            return [{'key': 'try_expert_mode', 'type': 'one_time',
+                     'title': '体验专家模式', 'description': '试一次',
+                     'status': 'claimable', 'reward': 50, 'action': '',
+                     'streak': None, 'days': []},
+                    {'key': 'use_lingxi_client', 'type': 'one_time',
+                     'title': '使用灵犀客户端', 'description': '',
+                     'status': 'claimed', 'reward': 100, 'action': '',
+                     'streak': None, 'days': []}]
+
+        async def fake_activity(account, **kwargs):
+            return {'campaign_status': 'active', 'invitee_reward': 200}
+
+        async def fake_code(account, **kwargs):
+            return {'referral_code': 'AB12CD'}
+
+        async def fake_summary(account, **kwargs):
+            return {'redeemed': False, 'success_count': 2,
+                    'total_reward': 400, 'max_success_invites': 10}
+
+        with mock.patch.object(client, 'tasks', new=fake_tasks), \
+                mock.patch.object(client, 'referral_activity', new=fake_activity), \
+                mock.patch.object(client, 'referral_code', new=fake_code), \
+                mock.patch.object(client, 'referral_summary', new=fake_summary):
+            out = asyncio.run(self.adapter.task_status('lx_1'))
+
+        self.assertTrue(self.adapter.supports_tasks())
+        self.assertEqual(out['invite']['invitation_code'], 'AB12CD')
+        self.assertEqual(out['invite']['invited_count'], 2)
+        self.assertEqual(out['invite_codes'][0]['maxUses'], 10)
+        self.assertFalse(out['activation']['activated'])
+        self.assertEqual(out['checkin']['continuous_days'], 4)
+        self.assertTrue(out['checkin']['already'])
+        self.assertEqual(out['tasks'][0]['task_id'], 'try_expert_mode')
+        self.assertTrue(out['tasks'][0]['auto'])
+        self.assertEqual(out['tasks'][1]['task_id'], 'use_lingxi_client')
+        self.assertTrue(out['tasks'][1]['done'])
+        self.assertEqual(out['errors'], [])
+
+    def test_task_status_keeps_other_segments_when_referral_fails(self) -> None:
+        self._seed()
+
+        async def fake_tasks(account, **kwargs):
+            return []
+
+        async def fake_empty(account, **kwargs):
+            return {}
+
+        async def fake_summary(account, **kwargs):
+            raise PlatformError('上游挂了', status=502, code='upstream_error')
+
+        with mock.patch.object(client, 'tasks', new=fake_tasks), \
+                mock.patch.object(client, 'referral_activity', new=fake_empty), \
+                mock.patch.object(client, 'referral_code', new=fake_empty), \
+                mock.patch.object(client, 'referral_summary', new=fake_summary):
+            out = asyncio.run(self.adapter.task_status('lx_1'))
+        self.assertEqual(out['activation']['error'], '上游挂了')
+        self.assertEqual(out['activation']['code'], 'upstream_error')
+        self.assertEqual(out['tasks'], [])
+        self.assertEqual(out['errors'][0]['endpoint'], 'referral/summary')
+
+    def test_run_task_claims_binds_and_redeems(self) -> None:
+        self._seed()
+
+        async def fake_tasks(account, **kwargs):
+            return []
+
+        async def fake_empty(account, **kwargs):
+            return {}
+
+        async def fake_claim(account, key, date, **kwargs):
+            self.assertEqual(key, 'try_expert_mode')
+            self.assertEqual(date, '', '一次性任务不应带 date')
+            return {'ok': True, 'already': False, 'reward': 50,
+                    'message': '已领取 50 智点'}
+
+        async def fake_bind(account, code, **kwargs):
+            self.assertEqual(code, 'AB12CD')
+            return {'bound': True, 'message': '邀请关系已绑定'}
+
+        async def fake_redeem(account, code, **kwargs):
+            self.assertEqual(code, 'GIFT-1')
+            return {'ok': True, 'reward': 300, 'message': '已到账 300 智点',
+                    'data': {'granted': True}}
+
+        with mock.patch.object(client, 'tasks', new=fake_tasks), \
+                mock.patch.object(client, 'referral_activity', new=fake_empty), \
+                mock.patch.object(client, 'referral_code', new=fake_empty), \
+                mock.patch.object(client, 'referral_summary', new=fake_empty), \
+                mock.patch.object(client, 'claim', new=fake_claim), \
+                mock.patch.object(client, 'bind_referral', new=fake_bind), \
+                mock.patch.object(client, 'redeem_gift_card', new=fake_redeem):
+            claimed = asyncio.run(
+                self.adapter.run_task('lx_1', 'complete_task',
+                                      task_id='try_expert_mode'))
+            bound = asyncio.run(
+                self.adapter.run_task('lx_1', 'bind_invite',
+                                      invite_code='邀请码：AB12CD'))
+            redeemed = asyncio.run(
+                self.adapter.run_task('lx_1', 'redeem', code='GIFT-1'))
+
+        self.assertEqual(claimed['action'], 'complete_task')
+        self.assertEqual(claimed['desc'], '已领取 50 智点')
+        self.assertEqual(bound['action'], 'bind_invite')
+        self.assertEqual(redeemed['action'], 'redeem')
+        self.assertEqual(redeemed['desc'], '已到账 300 智点')
+
+    def test_run_task_checkin_reports_this_run_reward(self) -> None:
+        self._seed()
+
+        async def fake_checkin(account_id):
+            return {'ok': True, 'already': False, 'earned_credit': 100,
+                    'message': '签到成功', 'continuous_days': 5}
+
+        async def fake_status(account_id):
+            return {'uid': account_id, 'checkin': {'ok': True},
+                    'tasks': [], 'errors': []}
+
+        with mock.patch.object(self.adapter, 'checkin', new=fake_checkin), \
+                mock.patch.object(self.adapter, 'task_status', new=fake_status):
+            out = asyncio.run(self.adapter.run_task('lx_1', 'checkin'))
+        self.assertEqual(out['action'], 'checkin')
+        self.assertEqual(out['checkin']['earned_this_run'], 100)
+        self.assertEqual(out['checkin']['continuous_days'], 5)
+
+    def test_bind_invite_maps_upstream_reason_to_http_code(self) -> None:
+        self._seed()
+
+        async def fake_bind(account, code, **kwargs):
+            return {'bound': False, 'reason': 'already_bound',
+                    'message': '该账号已绑定邀请码'}
+
+        with mock.patch.object(client, 'bind_referral', new=fake_bind):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(self.adapter.run_task(
+                    'lx_1', 'bind_invite', invite_code='AB12CD'))
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(ctx.exception.code, 'already_activated')
+        self.assertEqual(ctx.exception.message, '该账号已绑定邀请码')
+
+    def test_run_task_rejects_bad_inputs(self) -> None:
+        self._seed()
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(self.adapter.run_task('lx_1', 'complete_task'))
+        self.assertEqual(ctx.exception.code, 'missing_task_key')
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(self.adapter.run_task(
+                'lx_1', 'bind_invite', invite_code='bad'))
+        self.assertEqual(ctx.exception.code, 'invalid_invite_code')
+        with self.assertRaises(PlatformError) as ctx:
+            asyncio.run(self.adapter.run_task('lx_1', 'unknown'))
+        self.assertEqual(ctx.exception.code, 'task_unsupported')
 
     def test_credits_exposes_remaining_and_expiries(self) -> None:
         self._seed()

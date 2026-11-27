@@ -142,3 +142,29 @@
 #        · 图片输入：content 只接受字符串，分段里的图片会被丢弃（日志记
 #          数量），模型条目仍如实标 attachment 供界面展示。
 #        · 扫码登录：没有登录接口可用，只支持抓包导入 Cookie。
+
+# ---- 2026-11 任务面板（邀请有礼 / 签到 / 兑换码）
+#      来源：灵犀 Web 活动页 bundle（公开活动页使用的 public-api 协议）
+#      已验证：
+#        · 邀请有礼四个接口都要 X-Open-Position: invite_rewards：
+#            GET  /api/public/v1/referral/activity
+#            GET  /api/public/v1/referral/code
+#            GET  /api/public/v1/referral/summary
+#            POST /api/public/v1/referral/bind
+#          bind body {referral_code, source:"manual"}；邀请码 6 位字母数字。
+#          响应信封 {v7code, result, data}；前端要求 v7code===0 && result==='ok'
+#          后取 data。data 字段：campaign_id / campaign_status / enabled /
+#          inviter_reward / invitee_reward / reward_duration_days /
+#          max_success_invites / referral_code / redeemed / unlimited /
+#          success_count / total_reward / invitee_reward_status /
+#          invitee_reward_expire_at。
+#          bind 失败 reason：already_bound / invalid_code / not_new_user /
+#          self_invite / activity_ended（HTTP 往往仍是 200）。
+#        · 兑换权益：POST /api/public/v1/tasks/gift_card/redeem body {code}
+#          → {result:'ok', data:{granted, face_value}}。与邀请码无关。
+#        · 任务状态：incomplete / claimable / claimed；签到日历实际形状是
+#          extra.check_in_days[] = {day: 1..7, status}，extra.today_day /
+#          extra.today_reward 标今天；parse_tasks 同时兼容 date 形状。
+#        · 签到奖励 100 智点/天，第 7 天 200；按北京日期。
+#          → client.referral_* / bind_referral / redeem_gift_card
+#          → adapter.supports_tasks / task_status / run_task

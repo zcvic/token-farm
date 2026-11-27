@@ -35,6 +35,16 @@ PLANS_PATH = '/api/aioffice/v1/sessions/plans'
 BALANCE_PATH = '/api/public/v1/credits/balance'
 PROFILE_PATH = '/api/public/v1/account/profile'
 TASKS_PATH = '/api/public/v1/tasks'
+# 任务中心里的「兑换权益」（兑换码，与邀请码是两套东西）。
+GIFT_REDEEM_PATH = '/api/public/v1/tasks/gift_card/redeem'
+# 「邀请有礼」活动：活动规则 / 我的邀请码 / 邀请关系 / 绑定邀请码。
+# 这四个是公开活动页用的接口，需要 `X-Open-Position: invite_rewards` 头；
+# 返回是 `{v7code, result, data}` 信封（见 client.referral_data）。
+REFERRAL_ACTIVITY_PATH = '/api/public/v1/referral/activity'
+REFERRAL_CODE_PATH = '/api/public/v1/referral/code'
+REFERRAL_SUMMARY_PATH = '/api/public/v1/referral/summary'
+REFERRAL_BIND_PATH = '/api/public/v1/referral/bind'
+REFERRAL_HEADERS = {'X-Open-Position': 'invite_rewards'}
 # run 生命周期上报（running → completed 是上游结算 / 扣费的唯一触发点）。
 EXECUTION_STATUS_PATH = '/api/public/v1/sessions/{session_id}/execution_status'
 # 单会话消耗明细（`session_id` → 这一轮实际扣了多少智点）。

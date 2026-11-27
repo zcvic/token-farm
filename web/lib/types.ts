@@ -2771,6 +2771,8 @@ export interface PlatformTaskCheckin {
   month_points?: number | null;
   /** DuMate：本月已签到的日期列表 */
   sign_in_days?: unknown[];
+  /** 灵犀：连签天数（上游 `extra.consecutive_days`） */
+  continuous_days?: number | null;
 }
 
 /** `GET /api/platforms/{name}/accounts/{uid}/tasks`：任务面板状态。 */
@@ -2817,6 +2819,8 @@ export interface PlatformTaskItem {
   display_terminal?: string[];
   group_code?: string;
   group_name?: string;
+  /** 平台原始状态（灵犀：`incomplete` / `claimable` / `claimed`） */
+  status?: string;
   /** 执行结果（`results[]` 里用）：是否成功 / 是否本来就已完成 */
   ok?: boolean;
   already?: boolean;
