@@ -48,6 +48,11 @@
     **一次性轮换**且与 DPoP 私钥绑定；对话是 OpenAI 形状，但 SSE 里的 `text`
     是**累计全文**，适配器内部改成增量 chunk。模型目录按账号三路合并，限时
     福利模型要带 `maas_type: benefit`。
+  · AutoClaw（autoclaw）—— 原生实现（智谱 / Z.ai），分国内 / 国际两站，
+    模型名以 `autoclawcn/` / `autoclawcom/` 为前缀。国内是手机号 + 短信验证码
+    登录，国际是 Google / z.ai OAuth（只做「打开授权页 + 粘回调」）；凭证是
+    access + **一次性 refresh** JWT，`deviceId` 必须持久化。对话是 OpenAI
+    形状，国内 2.x 禁发 `max_tokens` 族。
   · 组合（combo）—— **虚拟平台**：没有账号，只把 `combo/<name>` 按权重
     分发给上面这些真实平台。因此不在界面里露出（`ui_visible=False`）。
 """
@@ -71,6 +76,7 @@ from .doubao import adapter as doubao_adapter
 from .lingxi import adapter as lingxi_adapter
 from .raccoon import adapter as raccoon_adapter
 from .codearts import adapter as codearts_adapter
+from .autoclaw import adapter as autoclaw_adapter
 from .combo import adapter as combo_adapter
 
 # 注册内置平台。放在 import 之后而不是模块顶层逐个 register，是为了让
@@ -88,6 +94,7 @@ register(doubao_adapter)
 register(lingxi_adapter)
 register(raccoon_adapter)
 register(codearts_adapter)
+register(autoclaw_adapter)
 register(combo_adapter)
 
 __all__ = [

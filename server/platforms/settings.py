@@ -238,6 +238,10 @@ _RACCOON = _NATIVE_POOL
 # 同一组策略；没有「保底积分」选号实现，也没有桌面端回写。`credit_meter` 不
 # 适用：CodeArts 的扣费在上游按 token 结算，没有可对齐的每请求积分口径。
 _CODEARTS = _NATIVE_POOL
+# AutoClaw（智谱 / Z.ai）是原生选号 / 按区域的在线目录 / 签到 / 积分钱包，
+# 与 Loomy 同一组策略；没有「保底积分」选号实现，也没有桌面端回写。
+# `credit_meter` 不适用：上游按额度扣减，没有可对齐的每请求积分口径。
+_AUTOCLAW = _NATIVE_POOL
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -255,6 +259,7 @@ _BY_PLATFORM: dict[str, frozenset[str]] = {
     'lingxi': _LINGXI,
     'raccoon': _RACCOON,
     'codearts': _CODEARTS,
+    'autoclaw': _AUTOCLAW,
     'combo': _COMBO,
 }
 

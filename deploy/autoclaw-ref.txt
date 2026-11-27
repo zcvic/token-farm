@@ -1,0 +1,209 @@
+# AutoClaw（智谱 / Z.ai）协议事实 —— 本仓库 AutoClaw 适配层的参考
+#
+# 仓库：https://github.com/VVVVVILK/AutoClawProxyAPI （MIT）
+#       锚点 87bd0995b473f48438da365e74ff59ddb27f9c98（2026-11-27 核对）
+#       核对范围：README、internal/protocol/constants.go（双区基址 / 签名 /
+#       客户端常量 / 业务码）、auth.go（国内短信 + 国际 OAuth）、models.go
+#       （模型目录）、account_ops.go（刷新 / 钱包 / 签到 / 登录活跃）、
+#       chat.go（对话与 SSE 入口）、errors.go（错误分级）。
+# 仓库：https://github.com/hubo1989/opencode-autoclaw-auth （MIT）
+#       锚点 db2ad8984c7628d714be7ee10d6ef85c598482a4（2026-11-27 核对）
+#       核对范围：README、index.mjs 的登录 / 刷新 / 签到 / 任务 / 钱包 / 模型段。
+# 仓库：https://github.com/hj01857655/AutoClaw2api （**无 LICENSE**，只读事实）
+#       锚点 dba59b0dd34c623904908f3a68c17d4d41a9434a（2026-11-27 核对）
+#       核对范围：README、docs/dual-domain-protocol.md（国内 2.x / 国际 1.x
+#       的方言差异、chat 路径与请求体约束、双域路由）。
+# 仓库：https://github.com/ZFXing-lite/autoclaw2api （**无 LICENSE**，只读事实）
+#       锚点 15802ecd08b81197688452caed2f6a43a38c6a95（2026-11-27 核对）
+#       核对范围：README、internal/upstream/headers.go（签名头 / 沙箱 relay /
+#       基址）、internal/upstream/client.go（短信 / 刷新 / 积分 / 沙箱）。
+# 仓库：https://github.com/JustCnc/autoclaw2api （**无 LICENSE**，只读事实）
+#       锚点 8c4458332a1fbedb15b75a00822f633f3cf2f30c（2026-11-27 核对）
+#       核对范围：README（2.x 桌面端接管 / 账单回填 / 登录奖励 / 每日任务）。
+# 仓库：https://github.com/apmengzi/autoclaw-switch （MIT）
+#       锚点 1980f6e29474add6b870e9576c36fed705bf7cda（2026-11-27 核对）
+#       核对范围：README 的 2.x 契约、国内 / 国际双线与「国内没有签到」的实测结论。
+#
+# 形态：不是 fork，也没有共享历史；**不是源码副本**，仓库里没有 vendor 目录。
+#       账号 / 登录 / 目录 / 积分 / 签到 / 对话都准备在
+#       server/platforms/autoclaw/ 里按协议事实重写（httpx + 标准库，不新增
+#       依赖）；参考仓的 HTTP 服务、沙箱 relay、WebSocket、代理池与面板一律不引入。
+#
+# 状态：**已接入（第一版）**。`server/platforms/autoclaw/` 已有
+#       `constants.py` / `protocol.py` / `catalog.py` / `store.py` / `client.py` /
+#       `login.py` / `adapter.py`，并已注册到网关（`autoclawcn/` / `autoclawcom/`，
+#       旧式 `autoclaw/` 兼容）。本文件记录事实、分歧与取舍；下列端点仍**没有**
+#       用本仓库的真实账号复测，双域名 / chat 路径都按「首选 + 回退」实现。
+#
+# 记录方式：一次同步写一段；未核对的提交号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/qoder-ref.txt、deploy/loomy-ref.txt 同一约定）。
+#
+# ---- 2026-11 首次调研（只读源码与 README，未联网实测）
+#
+#      1. 双区是两套互相独立的账号宇宙
+#         · 国内：+86 手机号 + 短信验证码；国际：Google / z.ai 网页 OAuth。
+#         · 凭证不通用：国内 token 打国际 chat 域 401，反之亦然；按 token 的
+#           JWT `source_id`（`agent` 开头 = 国内短信号）或账号记录的 realm 选域。
+#         · 国内又分「账号面」和「推理面」两个域名，不能混用。
+#
+#      2. 基址
+#         · CN 账号面 / 登录 / 刷新 / 任务 / 钱包 / 模型目录：
+#             https://autoglm-api.zhipuai.cn
+#         · CN 推理面（managed gateway）：
+#             https://autoglm-acceleration-api.zhipuai.cn
+#         · 国际（账号面与推理面同一域名）：
+#             https://autoglm-api.autoglm.ai
+#         → 三个值都要能在平台设置里覆盖；不要按「国内只有一个域名」写死。
+#
+#      3. 客户端签名（账号面与对话共用）
+#         · X-Auth-Appid: 100003
+#         · X-Auth-TimeStamp: 秒级 Unix 时间戳
+#         · X-Auth-Sign: md5("100003&<ts>&38d2391985e2369a5fb8227d8e6cd5e5")
+#         · X-Product: autoclaw；X-Client-Type: pc（部分实现用 web）
+#         · X-Version / UA：1.18.x（国际 1.x）或 2.1.0（国内 2.x）
+#         · X-Tm: mac / win / linux；写成 "linux" 而不是 "linux-x64" 可能 403
+#         · X-Channel: 国际 AutoClaw4、国内 AutoClaw26；实测发 official 两域皆 200
+#         · X-Trace-Id: 16 位随机 hex；X-Lang: zh-CN
+#         · Origin / Referer: http://localhost:18432（OAuth 回环白名单端口）
+#         → 签名算法已多源一致；除签名外的头属于「客户端指纹」，随版本变。
+#
+#      4. 国内短信登录
+#         · POST {CN_ACCOUNT}/userapi/v1/agent-send-code
+#             body {phone, source_id:"autoclaw", device_id}
+#             → 返回的 device_id 必须与下一步复用
+#         · POST {CN_ACCOUNT}/userapi/v1/agent-login/   ← 末尾斜杠必须保留
+#             body {phone, code:<JSON 数字>, platform:"web", source_id, device_id}
+#             → data.access_token / refresh_token / expires_in
+#         · 手机号只认中国大陆 11 位；验证码必须是 6 位纯数字（上游要求数字类型）。
+#         → 适配器契约对应 login_start / login_send_code / login_submit_code。
+#
+#      5. 国际 OAuth（z.ai / Google）
+#         · POST {GLOBAL}/userapi/overseasv1/oauth-captcha-config
+#             → 阿里云滑块配置（enabled / region / prefix / scene_id）
+#         · POST {GLOBAL}/userapi/overseasv1/{zai|google}-oauth-url
+#             body {source_id, device_id, navigate_uri, ali_captcha_verify_param}
+#             → data.oauth_url（兼容 url / login_url / auth_url / verify_url）
+#         · 回调固定为 http://localhost:<官方白名单端口>/auth/callback-<vendor>
+#             端口池：18432 / 19654 / 19723 / 53699（部分实现另有 46952）
+#         · POST {GLOBAL}/userapi/overseasv1/{zai|google}-oauth-login
+#             body {source_id, device_id, code, state, navigate_uri}
+#             → tokens
+#         → 滑块是纯服务端做不了的部分：参考实现都在本机起临时 HTTP 服务内嵌
+#           AliyunCaptcha SDK，或降级成「打开授权页 + 粘回调 URL」。
+#
+#      6. 刷新
+#         · POST {host}/userapi/v1/refresh
+#             body {source_id, device_id, refresh_token}
+#         · 业务码 400002 时回落 POST {host}/userapi/v1/agent-refresh
+#         · 400000 时 hubo 会换下一个 host 再试，全部 host 都 400000 才判失效；
+#           刷新流程不要直接套用对话的「400000 = 会话死」分级。
+#         · refresh token 一次一换：必须先落盘新的再发请求；旧值再用会被判失效。
+#         · host 顺序：国内号 [CN_ACCOUNT, GLOBAL]，国际号 [GLOBAL, CN_ACCOUNT]。
+#         · 与 AutoClaw 桌面端共用 refresh token 会互踢，适配器不要回写桌面端。
+#         → 账号记录必须持久化 device_id；JWT 里也带 device_id claim，可兜底。
+#
+#      7. 模型目录
+#         · GET {host}/autoclaw-proxy/proxy/autoclaw-model-config
+#         · 响应兼容顶层 models 与 data.models；字段：
+#             id / name / tooltip / contextWindow / maxTokens / reasoning /
+#             input[]（含 image 才算多模态）/ creditConsumptionLevel
+#         · 每个区域用自己的账号与 host 拉；没有账号时目录应为空，不要回退成
+#           「另一个区域的目录」——那会让用户以为模型可用。
+#         · 国内 2.x 实测只有 4 个：zai_auto / zai_auto-fast /
+#           zaicoding_glm-5.3 / zai_glm-5.3-flash；国际另有 glm-5-turbo 与
+#           tdpsk_deepseek-*。模型上下线以实时目录为准，不写死。
+#
+#      8. 对话
+#         · 国际：POST {GLOBAL}/autoclaw-proxy/proxy/autoclaw/v1/chat/completions
+#         · 国内：POST {CN_INFERENCE}/autoclaw-proxy/proxy/autoclaw[/v1]/chat/completions
+#             （`/v1/` 两版都出现过；国内 2.x 默认不带）
+#         · OpenAI 兼容（SSE / 非流式）；模型放在 X-Request-Model 头，部分版本
+#           也要求 body.model 保留带前缀的目录名。
+#         · 2.x 国内契约与 1.x 国际契约不是一套：请求体禁发 max_tokens /
+#           max_completion_tokens / max_output_tokens（406），system 要带 2.x
+#           banner，禁发 X-Harness-Type；正文出现特定外来的 agent 身份句可能 406。
+#           2.x 另带 X-Session-Id / X-Agent-Id。
+#         · 流式默认补 stream_options.include_usage=true，否则拿不到 usage。
+#         → 适配器不要自己改写 system / messages 去「过风控」：见「有意不跟」。
+#
+#      9. 积分 / 账单
+#         · GET {host}/agent-assetmgr/api/v2/wallets?biz_app_id=autoclaw
+#             → data.total_balance（兼容 wallets[] 分钱包）
+#         · GET {host}/agent-assetmgr/api/v1/wallet-instances?wallet_type=all&wallet_scope=all
+#             → 按用途分类的余额（daily / reward / subscription / …）
+#         · GET {host}/agent-assetmgr/api/v1/ledgers_std
+#             → 逐条账单，可按模型 + token + 时间窗匹配单请求实扣
+#         · GET {host}/agent-assetmgr/api/v1/points/expiring
+#             → 临期积分
+#         → 积分是纯积分制，没有「总额度上限」；对话消耗以账单为准，不要估算。
+#
+#     10. 签到 / 任务 / 奖励
+#         · POST {host}/autoclaw-proxy/proxy/autoclaw-task-complete
+#             body {"task_id":"daily_signin"}；hubo 还带 source_id:"autoclaw"
+#             （是否必填未定），服务端幂等，already_completed=true
+#         · GET  {host}/autoclaw-proxy/proxy/autoclaw-task-list
+#             → 任务状态；hubo 插件用它判断今日是否已签
+#         · POST {host}/userapi/v1/user-info
+#             → 客户端启动那次「登录」会触发登录奖励入账（JustCnc 实测，如 +4000）
+#         · POST {host}/autoclaw-proxy/proxy/autoclaw-newbie-guide/token
+#         · POST {host}/autoclaw-proxy/proxy/autoclaw-promotion-reward
+#             → 新人 100M / 活动奖励（JustCnc / hiro 提到）
+#         · 其他任务 id 例：daily_inspiration_center（灵感中心）；邀请类不代领。
+#         → 是否每个区域都有 daily_signin 仍未定论，见下节。
+#
+#     11. 错误分级
+#         · 410000 未登录、400000 登录过期 → 401，账号禁用 / 需重登
+#         · 402 或 810000（单模型免费额度耗尽）→ 402；810000 应只冷却
+#           「账号 + 模型」，不要冻整号
+#         · 429 → 短冷却，按 Retry-After
+#         · 5xx / 超时 → transient，可换号；不要因为链路错误冻号
+#         · WAF 表现不统一：{"message":"forbidden"} 前缀、406、以及把
+#           DANGEROUS_ACTIVITY_BLOCKED 当正常正文返回（HTTP 200 / stop）
+#
+# ---- 必须先实测的分歧（未验证，不要写死进代码）
+#      · CN chat 路径带不带 /v1：VVVVVILK/hubo 用 /v1，hj 说国内默认不带。
+#      · CN 是否还有签到：VVVVVILK/hubo/hj 都实现了 daily_signin；
+#        ZFXing 说 16 个候选端点全 404；apmengzi 明确说国内版没有签到 /
+#        灵感中心 / 新人任务，积分靠活动发放。倾向「国际有、国内没有」，
+#        但必须按区域实测后再决定 supports_checkin。
+#      · 模型名放 X-Request-Model 还是 body.model：两处都写最稳，但需实测
+#        上游是否因多余字段报错。
+#      · 鉴权头：VVVVVILK 同时发 Authorization 与 X-Authorization；
+#        hj / apmengzi 说 2.x 只认 X-Authorization（标准头 401）。
+#      · 客户端版本：1.18.x 与 2.x 的请求体、头、凭证加密都不是一套。
+#        第一版应固定一个版本矩阵，不要混用两个参考源的常量。
+#      · 国内 2.x 的 max_completion_tokens / store / reasoning_effort 与
+#        「禁发 max_tokens 族」互相矛盾；可能分「官方渠道」与「managed
+#        gateway」两套契约，需用真实账号分别验证。
+#
+# ---- 有意不跟
+#     · 不复制参考仓的 system prompt / 身份句改写（VVVVVILK 的
+#       SystemIdentityLine、ReplaceForeignIdentities）。那是在改写用户请求
+#       以绕上游 406；本仓库只做协议翻译，报错要能指回适配器。
+#     · 不做 force-model / suggested_model 静默改写：客户端要 A 回来 B 无法解释。
+#     · 不引入沙箱 relay、WebSocket 上线、/api/electron/agent/send 事件流：
+#       需要先唤醒云设备，和本仓库「服务器直连」的形态冲突；只在直连端点
+#       全部不可用时再评估。
+#     · 不解密 / 不回写桌面端凭证（2.x 是 DPAPI + AES-GCM）；不做「从本机导入」，
+#       也不和桌面端共用 refresh token。
+#     · 不做自动注册、批量注册、隐蔽浏览器、接码、绕过滑块或风控。
+#     · 不引入参考仓的代理池 / mihomo / 面板 / SQLite 状态机；选号与冷却走
+#       本仓库统一的 SWRR + 会话亲和 + 平台设置。
+#
+# ---- 同类实现（阅读用，不引入代码）
+#     · aimod-cc/Agent2API（AGPL-3.0）：支持的平台多、面板完整，但许可证与
+#       体量都不适合作为源码参考，只用于行为对照。
+#     · zhuweiyou/codearts2api（无 LICENSE）：经 dsh-providers-hub 装载
+#       AutoClaw 渠道，可用于对照渠道前缀与模型目录。
+#     · hirotomasato/autoclawpi（自定义 masantoid 许可）：国际单区、
+#       OAuth + 签到 + 100M 领取，可对照端点命名。
+#     · Zhengyuuuui/autoclaw2api（无 LICENSE）：双区模型清单与 cn/global
+#       前缀可参考，但模型统一走 CN 沙箱 relay，不适合服务器直连。
+#     · eequaled/GLMproxy（MIT）：只有模型目录与 Anthropic 别名映射，
+#       没有账号池 / 登录，可用于对照模型 id 与 credit 档位。
+#
+# ---- 升级流程
+#     clone 参考仓 → 看 internal/protocol（VVVVVILK）或 index.mjs（hubo）的
+#     diff → 先更新本文件的「必须先实测」结论 → 再改
+#     server/platforms/autoclaw/ → 跑
+#     server/tests/test_platform_autoclaw_adapter.py → 回写锚点与差异说明。

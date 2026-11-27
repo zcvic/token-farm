@@ -101,6 +101,13 @@ class RouteModelTest(unittest.TestCase):
         # 华为云 CodeArts 码道同样是单区域平台。
         self.assertEqual(platforms.route_model('codearts/GLM-5.2'),
                          ('codearts', 'GLM-5.2', None))
+        # AutoClaw 是双区平台：旧式无后缀前缀仍然有效（区域交给账号池决定）。
+        self.assertEqual(platforms.route_model('autoclaw/glm-4.6'),
+                         ('autoclaw', 'glm-4.6', None))
+        self.assertEqual(platforms.route_model('autoclawcn/glm-4.6'),
+                         ('autoclaw', 'glm-4.6', 'cn'))
+        self.assertEqual(platforms.route_model('AutoClawCOM/glm-4.6'),
+                         ('autoclaw', 'glm-4.6', 'global'))
         # 单区域平台没有区域后缀，`discoverycn/x` 不是前缀。
         self.assertIsNone(platforms.route_model('discoverycn/auto'))
         self.assertIsNone(platforms.route_model('kilocn/kilo-auto/free'))

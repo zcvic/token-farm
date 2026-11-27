@@ -208,6 +208,14 @@ export function PlatformAccountsPanel({
     () => (realmAware ? filterByPlatformRealm(accounts, realm) : accounts),
     [accounts, realm, realmAware],
   );
+  /**
+   * AutoClaw 两个区域的登录方式完全不同，而且**各只有一种**：
+   * 国内是手机号 + 短信验证码，国际是浏览器 OAuth（没有二维码、也没有短信）。
+   * 所以这里既决定默认落在哪个方式，也决定要不要显示方式切换。
+   */
+  const autoclawLogin = platform === 'autoclaw';
+  const defaultLoginMode: 'qr' | 'sms' =
+    autoclawLogin && realmScope === 'cn' ? 'sms' : 'qr';
 
   // ── 平台调度：单账号并发上限 ──────────────────────────
   //
@@ -468,8 +476,18 @@ export function PlatformAccountsPanel({
     phone?: string;
   } | null>(null);
   const [loginStarting, setLoginStarting] = useState(false);
-  /** Loomy 登录方式：扫码 / 短信验证码。 */
-  const [loginMode, setLoginMode] = useState<'qr' | 'sms'>('qr');
+  /**
+   * 登录方式：扫码 / 短信验证码。
+   *
+   * Loomy 两种都支持；AutoClaw 按区域固定一种（国内短信、国际 OAuth），
+   * 这时 `defaultLoginMode` 决定初值，界面上不显示切换按钮。
+   */
+  const [loginMode, setLoginMode] = useState<'qr' | 'sms'>(defaultLoginMode);
+
+  // 切换版本时把方式跟着换过来（AutoClaw 国内短信 / 国际 OAuth）。
+  useEffect(() => {
+    setLoginMode(defaultLoginMode);
+  }, [defaultLoginMode]);
   /** 验证码链路：手机号、验证码与发码冷却（秒）。 */
   const [smsPhone, setSmsPhone] = useState('');
   const [smsCode, setSmsCode] = useState('');
@@ -547,7 +565,7 @@ export function PlatformAccountsPanel({
     return () => clearTimeout(timer);
   }, [codeCooldown]);
 
-  async function startWebLogin(mode: 'qr' | 'sms' = 'qr') {
+  async function startWebLogin(mode: 'qr' | 'sms' = defaultLoginMode) {
     if (loginStarting) return;
     setLoginStarting(true);
     setLoginMode(mode);
@@ -676,7 +694,7 @@ export function PlatformAccountsPanel({
     const id = login?.id;
     setLogin(null);
     setCallbackUrl('');
-    setLoginMode('qr');
+    setLoginMode(defaultLoginMode);
     setSmsPhone('');
     setSmsCode('');
     setCodeCooldown(0);
@@ -740,10 +758,11 @@ export function PlatformAccountsPanel({
       // 这个形状）。能力位来自后端，新增同类平台不用改这里。
       if (supportsCookieImport && raw.includes('=')) {
         body = {cookie: raw};
-      } else if (platform === 'raccoon' && !looksLikeJson) {
-        // 小浣熊的凭证是一对 JWT：裸 JWT / `Bearer ...` / 整段 Cookie 都按
-        // access token 提交，后端会自己清洗（refresh token 只支持 JSON 字段，
-        // 因为两条裸 JWT 无法从一段文本里无歧义地分开）。
+      } else if ((platform === 'raccoon' || platform === 'autoclaw')
+                 && !looksLikeJson) {
+        // 小浣熊 / AutoClaw 的凭证是 JWT：裸 JWT / `Bearer ...` / 整段 Cookie
+        // 都按 access token 提交，后端会自己清洗（refresh token 只支持 JSON
+        // 字段，因为两条裸 JWT 无法从一段文本里无歧义地分开）。
         body = {access_token: raw};
       } else {
         notify.err(t('platforms.importInvalid'));
@@ -944,7 +963,15 @@ export function PlatformAccountsPanel({
   // 回调固定指向 `127.0.0.1:<端口>`（Trae 的授权页强校验），只有这类平台
   // 才需要提示「面板与浏览器必须同机」。Loomy 的回调落在 loomy.xunfei.cn，
   // 走的也是「粘链接」，不受这条约束。
-  const loginNeedsLoopback = supportsLoginCallback && platform !== 'loomy';
+  const loginNeedsLoopback = supportsLoginCallback && platform !== 'loomy'
+    // AutoClaw 国内是纯短信登录，压根没有浏览器回调，别提示「必须同机」。
+    && !(autoclawLogin && realmScope === 'cn');
+  /**
+   * 是否显示「扫码 / 验证码」切换：只有同一区域两种方式都能用时才显示。
+   * AutoClaw 按区域固定一种（国内短信、国际 OAuth），给了切换反而会点出
+   * 一个上游不存在的入口。
+   */
+  const loginModeSwitchable = supportsLoginCode && !autoclawLogin;
   const busyAny = busy !== '';
   // 积分来源按平台区分：Trae 走权益接口，Qoder 走内置网关的余额快照。
   // 以前这里只有一句写死「Trae 权益接口」的文案，Qoder 页会显示错误的说明。
@@ -958,7 +985,9 @@ export function PlatformAccountsPanel({
           ? t('platforms.creditsHintKilo')
           : platform === 'codearts'
             ? t('platforms.creditsHintCodearts')
-            : t('platforms.creditsHint');
+            : platform === 'autoclaw'
+              ? t('platforms.creditsHintAutoclaw')
+              : t('platforms.creditsHint');
 
   /**
    * 余额单位：Kilo 的余额是美元（`unit='usd'`），Trae 国际版也是。
@@ -1188,9 +1217,13 @@ export function PlatformAccountsPanel({
               onClick={() => void startWebLogin()}
               title={platform === 'dumate'
                 ? t('platforms.loginHintDumate')
-                : supportsLoginCallback
-                  ? t('platforms.loginHint')
-                  : t('platforms.loginHintDevice')}
+                : autoclawLogin
+                  ? (realmScope === 'cn'
+                    ? t('platforms.loginHintAutoclawSms')
+                    : t('platforms.loginHintAutoclaw'))
+                  : supportsLoginCallback
+                    ? t('platforms.loginHint')
+                    : t('platforms.loginHintDevice')}
             >
               {loginStarting ? <Loader2 className="animate-spin" /> : <LogIn />}
               {t('platforms.login')}
@@ -1373,7 +1406,9 @@ export function PlatformAccountsPanel({
                     ? t('platforms.noAccountsDescRaccoon')
                     : platform === 'codearts'
                       ? t('platforms.noAccountsDescCodearts')
-                      : t('platforms.noAccountsDesc')}
+                      : platform === 'autoclaw'
+                        ? t('platforms.noAccountsDescAutoclaw')
+                        : t('platforms.noAccountsDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
             {/* 空态里给的是**这个平台真正能用**的入口：没有本机客户端可导入的
@@ -2121,7 +2156,9 @@ export function PlatformAccountsPanel({
             <DialogTitle>{t('platforms.loginTitle', {label})}</DialogTitle>
             <DialogDescription>
               {loginMode === 'sms' && supportsLoginCode
-                ? t('platforms.loginDescSms')
+                ? (autoclawLogin
+                  ? t('platforms.loginDescAutoclawSms')
+                  : t('platforms.loginDescSms'))
                 : login?.status === 'needs_bind'
                   ? t('platforms.loginBindDesc')
                   : loginQrVisible
@@ -2132,14 +2169,16 @@ export function PlatformAccountsPanel({
                       ? t('platforms.loginDescLoomy')
                       : platform === 'dumate'
                         ? t('platforms.loginDescDumate')
-                        : loginNeedsLoopback
-                          ? t('platforms.loginDesc')
-                          : t('platforms.loginDeviceDesc')}
+                        : autoclawLogin
+                          ? t('platforms.loginDescAutoclaw')
+                          : loginNeedsLoopback
+                            ? t('platforms.loginDesc')
+                            : t('platforms.loginDeviceDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
             <div className="space-y-3 px-6 pb-2">
-              {supportsLoginCode && login?.status !== 'success' && (
+              {loginModeSwitchable && login?.status !== 'success' && (
                 <div className="flex gap-1 rounded-full bg-muted p-1 text-[11px]">
                   {(['qr', 'sms'] as const).map((mode) => (
                     <button
@@ -2165,7 +2204,9 @@ export function PlatformAccountsPanel({
                   <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
                   <span>{platform === 'codearts'
                     ? t('platforms.loginSameMachineCodearts')
-                    : t('platforms.loginSameMachine')}</span>
+                    : platform === 'autoclaw'
+                      ? t('platforms.loginSameMachineAutoclaw')
+                      : t('platforms.loginSameMachine')}</span>
                 </div>
               )}
               {loginQrVisible && (
@@ -2251,7 +2292,9 @@ export function PlatformAccountsPanel({
                   <p className="text-[11px] leading-5 text-muted-foreground">
                     {login.status === 'needs_bind'
                       ? t('platforms.loginBindHint')
-                      : t('platforms.loginCodeHint')}
+                      : autoclawLogin
+                        ? t('platforms.loginCodeHintAutoclaw')
+                        : t('platforms.loginCodeHint')}
                   </p>
                 </div>
               )}
@@ -2286,7 +2329,9 @@ export function PlatformAccountsPanel({
                         ? t('platforms.loginCallbackPlaceholderLoomy')
                         : platform === 'codearts'
                           ? t('platforms.loginCallbackPlaceholderCodearts')
-                          : t('platforms.loginCallbackPlaceholder')}
+                          : platform === 'autoclaw'
+                            ? t('platforms.loginCallbackPlaceholderAutoclaw')
+                            : t('platforms.loginCallbackPlaceholder')}
                       className="h-8 rounded-xl text-xs"
                       disabled={callbackBusy}
                       autoComplete="off"
@@ -2307,7 +2352,9 @@ export function PlatformAccountsPanel({
                       ? t('platforms.loginCallbackHintLoomy')
                       : platform === 'codearts'
                         ? t('platforms.loginCallbackHintCodearts')
-                        : t('platforms.loginCallbackHint')}
+                        : platform === 'autoclaw'
+                          ? t('platforms.loginCallbackHintAutoclaw')
+                          : t('platforms.loginCallbackHint')}
                   </p>
                 </div>
               )}
@@ -2349,7 +2396,9 @@ export function PlatformAccountsPanel({
                         ? t('platforms.importDescRaccoon')
                         : platform === 'codearts'
                           ? t('platforms.importDescCodearts')
-                          : t('platforms.importDesc')}
+                          : platform === 'autoclaw'
+                            ? t('platforms.importDescAutoclaw')
+                            : t('platforms.importDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
@@ -2374,7 +2423,9 @@ export function PlatformAccountsPanel({
                           ? t('platforms.importPlaceholderRaccoon')
                           : platform === 'codearts'
                             ? t('platforms.importPlaceholderCodearts')
-                            : t('platforms.importPlaceholder')}
+                            : platform === 'autoclaw'
+                              ? t('platforms.importPlaceholderAutoclaw')
+                              : t('platforms.importPlaceholder')}
                 className="field-sizing-fixed min-h-40 overflow-auto font-mono text-[11px]"
                 spellCheck={false}
                 autoFocus

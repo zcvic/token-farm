@@ -158,6 +158,20 @@ class DefaultsTest(_DbCase):
         self.assertFalse(codearts['credit_meter'])
         self.assertFalse(codearts['desktop_sync'])
         self.assertFalse(codearts['usage_ledger'])
+        # AutoClaw 与小浣熊同组：原生选号 / 按区域的在线目录 / 签到 / 积分
+        # 钱包。没有「保底积分」（上游按额度扣减，不是按积分挑号），也没有
+        # 桌面端回写与每请求计量口径。
+        autoclaw = runtime_settings.capabilities('autoclaw')
+        self.assertTrue(autoclaw['max_accounts_try'])
+        self.assertTrue(autoclaw['session_affinity'])
+        self.assertTrue(autoclaw['catalog_timeout'])
+        self.assertTrue(autoclaw['credits_ttl'])
+        self.assertTrue(autoclaw['cooldown_429'])
+        self.assertTrue(autoclaw['cooldown_5xx'])
+        self.assertFalse(autoclaw['min_credits'])
+        self.assertFalse(autoclaw['credit_meter'])
+        self.assertFalse(autoclaw['desktop_sync'])
+        self.assertFalse(autoclaw['usage_ledger'])
         # Qoder 的目录 / 冷却 / 换号都在内置网关里，适配器只做透传。
         self.assertFalse(qoder['catalog_ttl'])
         self.assertFalse(qoder['cooldown_429'])

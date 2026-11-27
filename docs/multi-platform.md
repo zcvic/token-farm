@@ -39,6 +39,12 @@ refresh，模型目录在线拉取，对话是标准 OpenAI Chat Completions；�
 模型目录按账号分三路合并（agent-center / 内置模型 / 限时福利），签到走
 `/v1/ops/delivery|claim|confirm` 三步。
 
+**AutoClaw（智谱 / Z.ai）**（`autoclawcn/` / `autoclawcom/` 前缀，详见 §18）：
+国内版与国际版是两套互相独立的账号体系——国内用 +86 手机号 + 短信验证码登录，
+账号面与推理面分属两个域名；国际用 Google / z.ai 网页 OAuth，第一版只做
+「打开授权页 + 粘回调」。账号是 access JWT + 一次性 refresh JWT，`810000`
+只冷却「账号 + 模型」不冻整号。
+
 ---
 
 ## 1. 目标与非目标
@@ -236,6 +242,15 @@ server/platforms/
     catalog.py           # 按账号缓存 + 来源退避 + 福利标记
     login.py             # OAuth2 PKCE 回环回调 + ticket 轮询 + 粘贴回调兜底
     adapter.py           # 实现 PlatformAdapter：选号 / 轮换 / 签到 / 积分 / 对话
+  autoclaw/
+    __init__.py
+    constants.py         # 双区基址与回退 / 版本矩阵 / 路径 / 业务码
+    protocol.py          # 区域归一 / URL / X-Auth-Sign / 鉴权头 / JWT / 错误分级
+    catalog.py           # 模型目录归一（不内置离线快照）
+    store.py             # JWT 账号文件（原子写 + 文件锁 + 脱敏 + 持久化设备号）
+    client.py            # 短信登录 / OAuth / 刷新 / 目录 / 对话 / 钱包 / 任务
+    login.py             # 国内短信会话机 + 国际 OAuth「粘回调」
+    adapter.py           # 实现 PlatformAdapter：双区选号 / 轮换 / 签到 / 积分 / 对话
   server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
 ```
 
@@ -720,6 +735,11 @@ DuMate 的每日签到奖励由服务端 00:00 自动发放，手动签到时 `h
   里的 id 就是上游注册名（区分大小写：`GLM-5.2` / `Qwen3-VL-235B` /
   `deepseek-v4-flash-0731` …）；请求名先做大小写归一与静态别名（`snap-chat` /
   `glm-5.2` → `GLM-5.2`），`default` 落到 `GLM-5.2`。
+- `autoclawcn/<model>` / `autoclawcom/<model>` 走 AutoClaw（双区域，JWT 账号
+  池）。两区模型名单不同，缓存也分开；`autoclawcn/` 只在 `realm=cn` 的账号里
+  选，`autoclawcom/` 只在 `global` 里选，一个都没有时直接报错、不回退到另一区
+  ——把国内 token 打到国际域只会 401，还会把好号标成「登录已失效」。旧式
+  `autoclaw/<model>` 两区都在池里。
 - 其他模型名 → 原样走 WorkBuddy（与今天完全一致）。
 - `/v1/models` 会把 Trae 的模型**按区域**并入列表（`traecn/` / `traecom/`），
   `owned_by` 标成 `trae`、`realm` 标出所属区域，客户端据此区分来源。
@@ -944,6 +964,7 @@ data/platforms/trae/accounts/<uid>.json
 | 灵犀 | `platforms/lingxi/` | `lx_` | `cookie`（`wps_sid`） |
 | 商汤小浣熊 | `platforms/raccoon/` | `rc_` | `token` / `refreshToken`（两个 JWT） |
 | 华为云 CodeArts 码道 | `platforms/codearts/` | `ca_` | `accessKeyId` / `secretAccessKey` / `securityToken`（STS）+ `refreshToken` + `dpopJwk` |
+| AutoClaw | `platforms/autoclaw/` | `ac_` | `accessToken` / `refreshToken`（两个 JWT）+ `deviceId` |
 
 三个新平台（Discovery / Kilo / Cline）与豆包都**没有** `desktopPath`：它们不读也
 不回写本机客户端，`import_from_desktop` 不存在，管理端的「从本机导入」入口不会
@@ -1024,6 +1045,7 @@ access token、不能刷新，也没有 userId，导入时按 token 摘要生成
 | Cline | **refreshToken** `refreshExpiredAt` | 3 天 | 与 MiniMax 同理：access token 约 10 分钟且由 `_token_for` 按需轮换；refresh token 一次性，按 access 判会反复轮换 |
 | 商汤小浣熊 | **refreshToken** `refreshExpiredAt` | 3 天 | access token 约 3 小时且由 `_token_for` 按需轮换；refresh token 一次性、约 30 天，按 access 判会每小时轮换一遍 |
 | 华为云 CodeArts 码道 | **STS 凭据** `expiredAt` | 10 分钟（`TOKEN_SKEW_SECONDS`） | STS 临时凭据只有约 1 小时，且刷新本身就要做一次 DPoP 签名请求；按 10 分钟余量提前换新，与 `_token_for` 的判据一致，避免巡检与第一次请求各刷一遍 |
+| AutoClaw | **refreshToken** `refreshExpiredAt` | 3 天 | access token 约 5 小时且由 `_token_for` 按需轮换；refresh token 一次性，按 access 判会每小时轮换一遍 |
 
 三条共同口径：
 
@@ -1084,6 +1106,7 @@ Cline 是同一个问题、同一个做法：access token 约 10 分钟且由适
 | 灵犀 | 有（每日签到） | 有（智点 + 赠送批次） | 无 | Cookie 无 refresh；余额来自 `credits/balance`，15 天内到期批次单列；401 换号、429/5xx 按设置冷却 |
 | 商汤小浣熊 | 有（触发每日积分） | 有（积分 + 明细） | 有（一次性 refresh） | 余额来自 `points/v1/balance`；签到靠桌面端 `setting_info` 触发后核对账单；401 换号、200108 按 25 分钟冷却 |
 | 华为云 CodeArts 码道 | 有（`/v1/ops/*` 三步） | 无（只有累计签到领取量） | 有（一次性 refresh + DPoP） | 上游没有积分余额接口，`credits()` 给的是累计领取量；签到 claim 成功才算数；401 换号、429 冷却 |
+| AutoClaw | 有（`daily_signin`，按任务列表判断） | 有（钱包 `total_balance`） | 有（一次性 refresh） | 余额来自 `/agent-assetmgr/api/v2/wallets`；国内站可能没有签到任务，这时返回「没有可签到的任务」而不是失败；`810000` 只冷却「账号 + 模型」 |
 
 Discovery 的「额度」在界面上是**三态**，不是数字：`ok` / `rate_limited` /
 `quota_exhausted`。把 `429 quota_exceeded` 当成普通限流（几十秒冷却）会让已经
@@ -2311,3 +2334,198 @@ token 的寿命上游不回，无法当判据。
 - **浏览器自动化 / TLS 指纹伪造**：项目红线；登录走回环回调 + 粘贴兜底。
 - **`/v1/chat/chat` 与 `/v1/chat/start-chat` 那套旧通道**：`/api/v2/chat/
   completions` 已是原生 OpenAI 形状，旧通道只是多一层翻译。
+
+---
+
+## 18. AutoClaw（智谱 / Z.ai）
+
+原生实现，包在 `server/platforms/autoclaw/`，不引入第三方运行时（只用 httpx +
+标准库）。AutoClaw（中文名「澳龙」）是智谱基于 OpenClaw 封装的桌面端 AI Agent，
+积分制，模型为 GLM 系列 + DeepSeek 系列。它没有开放平台 API，协议事实来自
+社区实现与真机抓包，核对自 `VVVVVILK` / `ZFXing-lite` / `hubo1989` /
+`hj01857655` 等参考仓（取用范围与「有意不跟」见 `deploy/autoclaw-ref.txt`）。
+
+**国内版与国际版是两套完全独立的账号体系**：域名、客户端版本、登录方式、
+模型名单都不同，token 不通用。国内 token 打国际域只会 401，反之亦然。
+
+### 18.1 双区对照
+
+| | 国内版 `cn` | 国际版 `global` |
+| --- | --- | --- |
+| 模型前缀 | `autoclawcn/` | `autoclawcom/` |
+| 登录 | +86 手机号 + 短信验证码 | Google / z.ai 网页 OAuth |
+| 账号面 | `autoglm-api.zhipuai.cn`（回退 `autoglm-acceleration-api`） | `autoglm-api.autoglm.ai` |
+| 推理面 | `autoglm-acceleration-api.zhipuai.cn`（回退 `autoglm-api`） | `autoglm-api.autoglm.ai` |
+| 客户端版本 | 2.1.0（`X-Channel: AutoClaw26`） | 1.18.1（`X-Channel: AutoClaw4`） |
+| 请求体 | 2.x，**禁发** `max_tokens` / `X-Harness-Type`（406） | 1.x，可用 `max_tokens` |
+| 签到 | 按任务列表判断（可能没有 `daily_signin`） | 固定有 `daily_signin` |
+
+国内为什么要拆两个域名：账号 / 积分 / 任务仍在 `autoglm-api`，模型推理被迁到
+加速域 `autoglm-acceleration-api`。**参考实现在这一点上互相矛盾**（有的把两处
+都写成 acceleration，有的写 api），所以 `constants.SITES` 把两处都保留成
+「主地址 + 回退」，不在常量层赌一个答案。国内 chat 路径带不带 `/v1` 同样有
+分歧，`protocol.chat_paths()` 给「首选 + 回退」，联调后再收敛。
+
+旧式 `autoclaw/` 前缀继续可用（按账号池里有什么选什么），但**不猜区域**：
+区域只来自账号记录的 `realm` 与模型前缀。把国内 token 发到国际域只会 401，
+而 401 会把好号标成「登录已失效」。
+
+### 18.2 凭据与导入
+
+| 字段 | 说明 |
+| --- | --- |
+| `realm` | `cn` / `global`；决定域名、版本、请求体形状与登录方式 |
+| `accessToken` | 上游 JWT；`exp` 优先，否则 `expires_in`，都没有按 5 小时保守记 |
+| `refreshToken` | **一次性轮换**，刷新必须先落盘再使用 |
+| `deviceId` | 贯穿登录 / 刷新 / 积分 / 任务；JWT 里也可能有 `device_id` claim |
+| `phone` / `email` / `nickname` | 展示与去重；**不用来选域** |
+| `source` | `sms` / `oauth` / `manual` |
+
+- uid 由「区域 + 用户标识」派生（`ac_<sha256 前缀 24>`），同一手机号 / 同一
+  用户重登覆盖同一条账号。**不能用 refresh token 哈希**：它每次刷新都会变。
+- 同一手机号在两区是**两条**账号（seed 含区域），这与上游「两套账号体系」一致。
+- `deviceId` 必须持久化：`store.device_id_for()` 的优先级是记录值 → JWT claim →
+  `'ac-' + sha256 前缀 32`。设备号每次变会被上游当成新设备。
+- 凭据明文只落盘（`data/platforms/autoclaw/accounts/<uid>.json`，文件锁 + 原子
+  替换 + 0600），接口只回摘要与 `has_token` / `has_refresh_token`。
+- **第一版不做「从本机导入」**：2.x 桌面端凭证是 DPAPI + AES-GCM，解密与设备
+  绑定是另一条链路，且与桌面端共用 refresh token 会互踢。
+
+### 18.3 登录
+
+**国内：手机号 + 短信**
+
+1. `login_start(mode='sms')` 只建会话（不发短信），前端就地收手机号；
+2. `POST /userapi/v1/agent-send-code` 下发验证码，body 含 `source_id:"autoclaw"`、
+   `device_id`、`platform:"web"`；
+3. `POST /userapi/v1/agent-login/`（**末尾斜杠必须保留**，少了就是另一个路由）
+   提交 `phone` + `code`。验证码必须 6 位纯数字，且以 **JSON 数字类型**提交。
+
+发码冷却 60 秒、单会话最多 5 条、验证码最多错 5 次、同时挂起上限 6 个，与 Loomy
+的短信模式同一套口径（界面级约束，不是上游契约）。会话 TTL 15 分钟，只存在内存。
+
+**国际：OAuth「打开授权页 + 粘回调」**
+
+1. `login_start(mode='zai'|'google')` 申请授权页（`POST
+   /userapi/overseasv1/{vendor}-oauth-url`），返回 `url`；
+2. 用户在浏览器里完成授权，浏览器会跳到
+   `http://localhost:<端口>/auth/callback-<vendor>`；
+3. 把地址栏里的完整链接粘回来（`login_submit_callback`），后端取出 `code` 与
+   `state`，state 与授权页 URL 里的 state 比对后调 `{vendor}-oauth-login` 兑换。
+
+回调端口是官方 client 的**白名单**（`18432 / 19654 / 19723 / 53699`），随便挑会
+得到 `Redirect URI not registered for this client`，所以固定取第一个。vendor 只有
+`zai` / `google`。
+
+**第一版不内嵌阿里云滑块**：纯服务端做不了，内嵌浏览器自动化又违反项目红线
+（不引入 playwright、不做 TLS 指纹伪造）。上游要求人机校验时会明确提示「第一版
+不支持内嵌滑块，请稍后重试」，而不是假装成功。
+
+### 18.4 请求签名与请求体
+
+所有账号面请求都带：
+
+- `X-Auth-Sign = MD5("100003&<unix秒>&38d2391985e2369a5fb8227d8e6cd5e5")`
+- `X-Product: autoclaw`、`X-Client-Type: pc`、`X-Version`（按区域）、
+  `X-Tm: win`（`linux` 在部分实现里会被 **403**）、`X-Channel`（按区域）、
+  `X-Trace-Id`（16 hex）、`X-Lang`
+- 鉴权头 `Authorization` 与 `X-Authorization` 都可能被用到（`bearer_headers`
+  可以只发一个或两个都发）。
+
+对话请求：`POST {inference}/autoclaw-proxy/proxy/autoclaw/v1/chat/completions`。
+国内 2.x **禁发** `max_tokens`（会 406）与 `X-Harness-Type`；国际 1.x 可以用
+`max_tokens`。流式补 `stream_options.include_usage=true`，否则拿不到 usage。
+
+### 18.5 错误分级
+
+信封是 `{code,msg,time,trace,data}`，`code=0` 才算成功。**HTTP 200 + 非零 code
+是常态**，不能只看状态码。`protocol.classify_error()` 把结果映射成
+`Failure(kind, status, code, message, retry_after, model_scoped, disable_account,
+biz_code)`：
+
+| 上游 | 处理 |
+| --- | --- |
+| `410000` / `400000` | 会话失效（401），停用账号 |
+| `400002`（刷新时） | 不是失效：回落 `agent-refresh` 再试 |
+| `810000` | **单模型额度耗尽**：只冷却「账号 + 模型」，不冻整号 |
+| 403 | 风控 / 指纹错误：换号，但**不**冻号（`X-Tm` 写错也会 403） |
+| 402 | 额度耗尽：冻 10 分钟 |
+| 5xx | 统一报 502（与其它平台一致） |
+| `DANGEROUS_ACTIVITY_BLOCKED` | 内容拦截（403），不换号 |
+
+刷新还有一条单独的分级：`400002` 回落 `agent-refresh`；`400000` 只说明「这个域名
+不认」，要换下一个 host 再试，**全部 host 都失败**才判会话失效。国内账号面主备
+双域名正是为这条服务的。
+
+### 18.6 令牌轮换
+
+`_token_for` 是唯一的取 token 入口：
+
+- access token 还有 120 秒余量就直接复用；否则用磁盘上的 refresh 去换。
+- **先落盘再使用**：新 access / refresh / 到期时间写回账号文件成功后才更新内存。
+  进程崩在中间时，新的 refresh 已在文件里，不会把账号永久踢下线。
+- 上游没回 `refresh_expires_at` 时，用 JWT `exp`；两者都没有就**清空**旧的
+  `refreshExpiredAt`——旧值描述的是已经作废的那一枚。
+- 刷新失败按 60 秒冷却（`REFRESH_FAIL_COOLDOWN`），并把原因落 `lastRefreshError`：
+  上游抖动时不该每个请求都去轮换一次性 token。
+- 巡检（§6.2）只看 `refreshExpiredAt`（3 天窗口），只调
+  `adapter.refresh_account(uid, force=True)`。
+
+### 18.7 模型目录
+
+`GET {inference}/autoclaw-proxy/proxy/autoclaw-model-config`，兼容顶层 `models`
+与 `data.models`。字段按驼峰 / 下划线 / 几种旧写法归一（`id` / `name` /
+`contextWindow` / `maxTokens` / `reasoning` / `input[]` / `creditConsumptionLevel`）。
+
+- **按区域独立缓存**（`platforms.autoclaw.models.<realm>`），不共用：两区模型名单
+  不同，共用一份会让国际站显示国内模型名。
+- **不内置离线快照**：模型上下线以实时目录为准。某区没有可用账号时目录就是
+  空表，**不**把另一区的借过来。
+- 缓存过目录时本地校验模型名（`_assert_known_model`）；缓存为空时该检查是 no-op
+  ——拿不到清单时一切名字都会被判错，那是假警报。
+- `_live_models` 换号时**只在本区内换**，跨区拿 token 只会 401。
+
+### 18.8 对话
+
+- 非流式：上游回 JSON，直接透传。
+- 流式：SSE 原样转 OpenAI chunk，`stream_options.include_usage=true` 拿 usage；
+  `relay` 检测到空响应（只有 role-only 帧）时报 `empty_response`，不当成功。
+- 租约（`AccountLimiter`）在 `closer` 里幂等释放：流读完、异常、客户端断开都
+  只释放一次。
+- 401 时强制刷新一次同号重试（refresh 可能只是过期），仍失败才换号。
+- **不改写 system / messages** 去过 2.x 的 406，也不做 force-model 静默改写：
+  那是在改用户请求。
+
+### 18.9 积分与签到
+
+- 余额：`GET /agent-assetmgr/api/v2/wallets?biz_app_id=autoclaw` 取
+  `data.total_balance`；另有 `wallet-instances` / `ledgers_std` / `points/expiring`。
+  缓存 `credits_ttl`，签到前后各读一次算差额。
+- 签到：`POST /autoclaw-proxy/proxy/autoclaw-task-complete
+  {"task_id":"daily_signin"}`，幂等（`already_completed=true`）；先读
+  `GET .../autoclaw-task-list` 判断本区有没有这个任务。
+- **没有任务不是失败**：国内站可能没有 `daily_signin`，这时返回
+  `ok=True, checked_in=False` 的「本区没有每日签到任务」，而不是让每天的批量
+  签到记一串失败。任务接口 404 / 路径不对同样按「本区没有签到」处理；
+  只有 401 才上抛。
+
+### 18.10 账号调度
+
+与 DuMate / Discovery / 灵犀 / 小浣熊 / CodeArts 同一套 `_NATIVE_POOL`：权重
+SWRR + LRU、会话亲和（`session_affinity`）、单账号并发闸门、`max_accounts_try`
+换号、`cooldown_429` / `cooldown_5xx` 冷却。`min_credits` / `credit_meter` /
+`desktop_sync` 不适用（上游按额度扣减，不是按积分挑号，也没有桌面端回写）。
+
+选号按区域过滤：`autoclawcn/` 只挑 `realm=cn` 的账号，`autoclawcom/` 只挑
+`global`；旧式 `autoclaw/` 两区都在池里。单模型冷却表在内存里，不落盘——它是
+上游配额的短期事实，进程重启后重试一次没有代价。
+
+### 18.11 有意不跟
+
+- **参考实现的 Go 运行时 / 账号池 / 面板 / 轮询调度**：选号 / 冷却 / 亲和全部按
+  token-farm 口径。
+- **内嵌阿里云滑块 / 浏览器自动化 / TLS 指纹伪造**：项目红线；国际 OAuth 只做
+  「打开授权页 + 粘回调」。
+- **从本机桌面端导入凭证**：DPAPI + AES-GCM 与设备绑定，且会与桌面端互踢。
+- **写死离线模型快照**、**跨区借用目录**、**改写 system prompt 绕 406**、
+  **force-model 静默改写**：都会让用户看到一个上游并不支持的模型 / 请求。
