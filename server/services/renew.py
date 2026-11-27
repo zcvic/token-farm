@@ -735,6 +735,63 @@ async def refresh_raccoon_all(force: bool = False, now: int | None = None) -> di
     return stats
 
 
+async def refresh_codearts_all(force: bool = False, now: int | None = None) -> dict:
+    """巡检一遍 CodeArts 账号并按需轮换 STS 临时凭据。
+
+    与其它平台不同，CodeArts 的「access token」是一组 **STS 临时 AK/SK +
+    `security_token`**，寿命只有 1 小时。所以巡检看的是**这组凭据的到期时间**
+    （`expiredAt`），而不是 refresh token 的寿命——后者只是凭据的来源，到期
+    还有 30 天，按它判断等于永远不刷新，账号在一小时后集体掉线。
+
+    `refresh_token` 是一次性轮换的：刷新成功必须由适配器**先落盘再使用**，
+    所以这里只调用 `refresh_account`，不绕过它直接打 `/v1/oauth2/tokens`。
+
+    余量用 `TOKEN_SKEW_SECONDS`（10 分钟）：与适配器 `_token_for` 的判据一致，
+    否则巡检刚跳过、下一个请求又立刻触发一次刷新。
+    """
+    from ..platforms.codearts import constants as codearts_constants
+
+    stats = {'checked': 0, 'renewed': 0, 'failed': 0, 'skipped': 0}
+    adapter = _platform_adapter('codearts')
+    if adapter is None:
+        return stats
+    now_ts = int(time.time()) if now is None else int(now)
+    skew = int(codearts_constants.TOKEN_SKEW_SECONDS)
+    for account in adapter.list_accounts():
+        uid = str(account.get('uid') or '').strip()
+        if not uid:
+            continue
+        # 「仅签到」的号照常续期：它只是不参与对话，凭据必须保持活跃。
+        if account.get('disabled'):
+            stats['skipped'] += 1
+            continue
+        if not account.get('has_refresh_token'):
+            # 只有手工粘贴的 STS 凭据：没法续期，到期后重新导入即可。
+            stats['skipped'] += 1
+            continue
+        if not force:
+            expires = _parse_expiry(account.get('expiredAt'))
+            if expires is None:
+                # 解不出凭据寿命：不臆测，交给「刷新」按钮。
+                stats['skipped'] += 1
+                continue
+            if expires - now_ts > skew:
+                continue
+        stats['checked'] += 1
+        try:
+            await adapter.refresh_account(uid, force=True)
+        except Exception as exc:  # noqa: BLE001
+            _note_failure(f'codearts/{uid}', err_text(exc))
+            stats['failed'] += 1
+            continue
+        stats['renewed'] += 1
+        _last_fail_log.pop(f'codearts/{uid}', None)
+        logger.info('CodeArts STS 凭据已续期: %s', uid)
+        _record({'uid': uid, 'nickname': str(account.get('nickname') or ''),
+                 'file': uid}, 1, 'token 自动续期成功（华为云 CodeArts 码道）')
+    return stats
+
+
 #: 平台账号的续期入口：`(平台名, 日志标签, 巡检函数)`。新增平台只加一行——
 #: 巡检循环、计划任务与「立即执行一次」都从这里遍历，避免三处各写一份清单。
 _PLATFORM_RENEWERS = (
@@ -743,6 +800,7 @@ _PLATFORM_RENEWERS = (
     ('minimax', 'MiniMax Code', refresh_minimax_all),
     ('cline', 'Cline', refresh_cline_all),
     ('raccoon', '商汤小浣熊', refresh_raccoon_all),
+    ('codearts', '华为云 CodeArts 码道', refresh_codearts_all),
 )
 
 

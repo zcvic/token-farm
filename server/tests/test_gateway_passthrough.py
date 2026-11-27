@@ -165,14 +165,16 @@ class GatewayPassthroughTest(unittest.TestCase):
         #   · platforms/raccoon/client.py：小浣熊要「强制流式 + 本地聚合」——
         #     客户端要非流式时聚合必须把 `delta.tool_calls` 收进
         #     `message.tool_calls`，否则工具调用会静默丢失。只作用于 `raccoon/`。
+        #   · platforms/codearts/client.py：CodeArts 上游**永远**走流式，非流式
+        #     由适配器本地聚合，同样必须把分片的 `delta.tool_calls` 按 `index`
+        #     聚合成完整调用。只作用于 `codearts/`。
         allow = {'routers/anthropic.py', 'routers/responses.py', 'services/tencent.py',
                  'platforms/trae/chat.py', 'platforms/trae/client.py',
                  'platforms/trae/text_tools.py',
                  'platforms/minimax/translate.py', 'platforms/minimax/adapter.py',
                  'platforms/cline/client.py',
                  'platforms/lingxi/chat.py', 'platforms/lingxi/adapter.py',
-                 'platforms/raccoon/client.py'}
-
+                 'platforms/raccoon/client.py', 'platforms/codearts/client.py'}
         root = Path(__file__).resolve().parents[2] / 'server'
         # Qoder 的内置网关是**第三方源码副本**（vendor 自 qoder2api-hub），它的
         # `tool_calls` 处理属于 Qoder 私有协议 ↔ OpenAI 的翻译层，与 trae/chat.py

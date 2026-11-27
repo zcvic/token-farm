@@ -956,7 +956,9 @@ export function PlatformAccountsPanel({
         ? t('platforms.creditsHintLoomy')
         : platform === 'kilo'
           ? t('platforms.creditsHintKilo')
-          : t('platforms.creditsHint');
+          : platform === 'codearts'
+            ? t('platforms.creditsHintCodearts')
+            : t('platforms.creditsHint');
 
   /**
    * 余额单位：Kilo 的余额是美元（`unit='usd'`），Trae 国际版也是。
@@ -1369,7 +1371,9 @@ export function PlatformAccountsPanel({
                   ? t('platforms.noAccountsDescLingxi')
                   : platform === 'raccoon'
                     ? t('platforms.noAccountsDescRaccoon')
-                    : t('platforms.noAccountsDesc')}
+                    : platform === 'codearts'
+                      ? t('platforms.noAccountsDescCodearts')
+                      : t('platforms.noAccountsDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
             {/* 空态里给的是**这个平台真正能用**的入口：没有本机客户端可导入的
@@ -2159,7 +2163,9 @@ export function PlatformAccountsPanel({
               {loginNeedsLoopback && (
                 <div className="flex items-start gap-2 rounded-[12px] bg-muted/60 p-3 text-[11px] leading-5 text-muted-foreground">
                   <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-                  <span>{t('platforms.loginSameMachine')}</span>
+                  <span>{platform === 'codearts'
+                    ? t('platforms.loginSameMachineCodearts')
+                    : t('platforms.loginSameMachine')}</span>
                 </div>
               )}
               {loginQrVisible && (
@@ -2278,7 +2284,9 @@ export function PlatformAccountsPanel({
                       onChange={(e) => setCallbackUrl(e.target.value)}
                       placeholder={platform === 'loomy'
                         ? t('platforms.loginCallbackPlaceholderLoomy')
-                        : t('platforms.loginCallbackPlaceholder')}
+                        : platform === 'codearts'
+                          ? t('platforms.loginCallbackPlaceholderCodearts')
+                          : t('platforms.loginCallbackPlaceholder')}
                       className="h-8 rounded-xl text-xs"
                       disabled={callbackBusy}
                       autoComplete="off"
@@ -2297,7 +2305,9 @@ export function PlatformAccountsPanel({
                   <p className="text-[11px] leading-5 text-muted-foreground">
                     {platform === 'loomy'
                       ? t('platforms.loginCallbackHintLoomy')
-                      : t('platforms.loginCallbackHint')}
+                      : platform === 'codearts'
+                        ? t('platforms.loginCallbackHintCodearts')
+                        : t('platforms.loginCallbackHint')}
                   </p>
                 </div>
               )}
@@ -2337,7 +2347,9 @@ export function PlatformAccountsPanel({
                       ? t('platforms.importDescLingxi')
                       : platform === 'raccoon'
                         ? t('platforms.importDescRaccoon')
-                        : t('platforms.importDesc')}
+                        : platform === 'codearts'
+                          ? t('platforms.importDescCodearts')
+                          : t('platforms.importDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
@@ -2360,7 +2372,9 @@ export function PlatformAccountsPanel({
                         ? t('platforms.importPlaceholderLingxi')
                         : platform === 'raccoon'
                           ? t('platforms.importPlaceholderRaccoon')
-                          : t('platforms.importPlaceholder')}
+                          : platform === 'codearts'
+                            ? t('platforms.importPlaceholderCodearts')
+                            : t('platforms.importPlaceholder')}
                 className="field-sizing-fixed min-h-40 overflow-auto font-mono text-[11px]"
                 spellCheck={false}
                 autoFocus

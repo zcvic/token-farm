@@ -3,8 +3,9 @@
 **多平台 token 农场**：一套面板同时管理 **WorkBuddy（腾讯 CodeBuddy）**、
 **Trae**、**Qoder**、**Loomy（讯飞星火）**、**DuMate（百度搭子）**、
 **MiniMax Code**、**Discovery（Intern TokenPlan）**、**Kilo**、**Cline**、
-**豆包（Doubao）**、**WPS 灵犀（Lingxi）** 与 **商汤小浣熊（Raccoon）**
-十二类账号，统一对外提供 OpenAI 兼容接口。
+**豆包（Doubao）**、**WPS 灵犀（Lingxi）**、**商汤小浣熊（Raccoon）** 与
+**华为云 CodeArts 码道（CodeArts Agent）** 十三类账号，统一对外提供 OpenAI
+兼容接口。
 
 本项目派生自 [`workbuddy-manager`](https://github.com/ithtelab/workbuddy-manager)
 （MIT）。上游的全部能力都保留且行为不变 —— 账号池、扫码纳管、签到保活、密钥分发、
@@ -12,7 +13,7 @@ IP / 模型白名单、用量与日志。在此之上新增：
 
 | 新增 | 位置 | 说明 |
 |---|---|---|
-| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline / 豆包 / 灵犀 / 小浣熊 为原生实现，Qoder 用内置网关 |
+| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline / 豆包 / 灵犀 / 小浣熊 / CodeArts 为原生实现，Qoder 用内置网关 |
 | Trae 适配器 | `server/platforms/trae/` | 账号存储 / 令牌刷新 / 签到 / 额度 / 模型 / 对话（SSE → OpenAI chunk） |
 | Qoder 适配器 | `server/platforms/qoder/` | 账号 / 签到 / 额度 / 模型 / 对话；协议层内置在 `_vendor/`，无需额外部署 |
 | Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录（含手机号补绑）/ 手机验证码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
@@ -24,7 +25,8 @@ IP / 模型白名单、用量与日志。在此之上新增：
 | 豆包适配器 | `server/platforms/doubao/` | 账号（网页 Cookie，抓包导入）/ 设备指纹 / 签到 / 额度（`window_limits` 汇总）/ 模型（内置快照）/ 对话（固定 SSE → OpenAI chunk）；上游无 usage，按字符 ÷1.7 估算；单区域前缀 `doubao/`，无扫码登录 |
 | 灵犀适配器 | `server/platforms/lingxi/` | 账号（网页 Cookie `wps_sid`）/ 客户端设备指纹 / 三步握手（建会话 → 领 run → SSE 对话）/ run 缓存 1 小时 / 签到（每日签到任务）/ 余额（赠送批次与到期）/ 模型（`/sessions/plans` + 内置快照）/ 对话（`text` 字段 → OpenAI chunk）；单区域前缀 `lingxi/`，无扫码登录 |
 | 小浣熊适配器 | `server/platforms/raccoon/` | 账号（JWT access + 一次性 refresh）/ token 轮换（先落盘再使用）/ 本机客户端 `auth.json` 导入 / 在线模型目录 / 签到（触发桌面端每日积分后核对账单）/ 积分余额与流水 / 对话（v2 流式，失败降级 v1 非流式合成 SSE）；单区域前缀 `raccoon/`，未知模型本地拒绝 |
-| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` / `doubao/` / `lingxi/` / `raccoon/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
+| CodeArts 适配器 | `server/platforms/codearts/` | 账号（华为云 STS 临时 AK/SK + `security_token` + 一次性 refresh + DPoP 私钥）/ AK/SK 请求签名 / DPoP（ES256）/ 网页登录（OAuth2 PKCE 回环回调 + ticket 轮询 + 粘贴兜底）/ token 轮换（先落盘再使用）/ 按账号的三路模型目录（agent-center + 内置 + 限时福利）/ 签到（`/v1/ops` 三步）/ 对话（`text` 累计全文 → OpenAI chunk，非流式本地聚合）；单区域前缀 `codearts/` |
+| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` / `doubao/` / `lingxi/` / `raccoon/` / `codearts/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` 继续兼容），其余保持原样走 WorkBuddy |
 | 多平台接口 | `server/routers/platforms.py` | `/api/platforms/*`：账号、导入、刷新、签到、额度、模型 |
 | 多平台页面 | `web/app/(main)/accounts/page.tsx`、`models/page.tsx` | 顶部平台下拉切换；账号 / 模型页随平台更换数据源，分版本的平台（Trae / Qoder / MiniMax Code）再按国内版 / 国际版过滤，统计与日志按平台过滤 |
 | 设计文档 | [`docs/multi-platform.md`](docs/multi-platform.md) | 契约、路由、凭据安全、已知限制 |
@@ -62,6 +64,7 @@ token-farm/
 │  ├─ doubao-ref.txt    # 豆包参考源的 Cookie / SSE 事件 / 签到 / 额度事实
 │  ├─ lingxi-ref.txt    # 灵犀参考源的三步握手 / SSE 翻译 / 目录 / 签到事实
 │  ├─ raccoon-ref.txt   # 小浣熊参考源的 JWT 轮换 / 目录 / 对话 / 积分事实
+│  ├─ codearts-ref.txt  # CodeArts 参考源的签名 / DPoP / 目录 / 对话 / 签到事实
 │  ├─ install.sh        # 上游原版：装依赖 + systemd（Linux 服务器）
 │  └─ windows-native/   # 上游原版：原生 Windows（无需 Docker）
 ├─ docs/                # 用户文档与维护者手册
@@ -349,6 +352,7 @@ MANAGER_REPO = os.environ.get('WB_MANAGER_REPO') or 'zcvic/token-farm'
 | `doubao-ref` | [doubao2api](https://github.com/yyydsz/doubao2api)（MIT） | 豆包协议事实来源，**原生重写**、无副本 | 对照 Cookie 鉴权 / SSE 事件 / 签到 / 额度，改 `server/platforms/doubao/` |
 | `lingxi-ref` | [dsh-connect-lingxi](https://github.com/xinstart-1/dsh-connect-lingxi)（MIT）、[dsh-router-wpslingxi](https://github.com/xfyang728/dsh-router-wpslingxi)（MIT） | 灵犀桌面端私有协议事实来源，**原生重写**、无副本 | 对照三步握手 / 请求体约束 / SSE 翻译 / 目录 / 签到，改 `server/platforms/lingxi/` |
 | `raccoon-ref` | [xiaohuanxiong2api](https://github.com/haoxinyu1/xiaohuanxiong2api)、[pi-provider-xhx](https://github.com/flying-dragon-ai/pi-provider-xhx)、[dsh-raccoon-connect](https://github.com/zhlcba/dsh-raccoon-connect)、[Coding2API](https://github.com/RobbsLuo/Coding2API) | 小浣熊网页 / 桌面端协议事实来源，**原生重写**、无副本 | 对照 JWT 一次性轮换 / 在线目录 / 对话降级 / 积分账单，改 `server/platforms/raccoon/` |
+| `codearts-ref` | [codearts2api](https://github.com/HITZY2002/codearts2api)（MIT） | 华为云 CodeArts 码道协议事实来源，**原生重写**、无副本 | 对照 AK/SK 签名 / DPoP / OAuth2 PKCE / 三路目录 / SSE 重拼 / 签到三步，改 `server/platforms/codearts/` |
 
 上游 Go 源码（workbuddy2api）已经并入本仓库的 `upstream/`，日常直接在这里改，
 不再从外部仓库 fetch / merge。面板侧新能力的参考来源是
@@ -439,6 +443,16 @@ refresh JWT，对话是标准 OpenAI Chat Completions，目录在线拉取，签
 桌面端 `setting_info` 触发每日积分后核对账单。已核对范围与「有意不跟」见
 `deploy/raccoon-ref.txt`，用户向的说明见
 [`docs/multi-platform.md`](docs/multi-platform.md) §16。
+
+华为云 CodeArts 码道（CodeArts Agent）没有开放平台 API，协议事实来自官方
+CodeArts Agent 插件的 `resources/app/extensions/vscode-codebot` 与真机抓包，
+核对自 [`HITZY2002/codearts2api`](https://github.com/HITZY2002/codearts2api)
+（MIT）。本仓库为**原生重写**：凭证是约 1 小时的华为云 STS 临时 AK/SK
+（每个请求再做一次 `SDK-HMAC-SHA256` 签名），登录是 OAuth2 PKCE + DPoP，
+`refresh_token` 与 DPoP 私钥绑定且一次性轮换；模型目录按账号分三路合并
+（agent-center / 内置 / 限时福利），签到走 `/v1/ops` 三步。已核对范围与
+「有意不跟」见 `deploy/codearts-ref.txt`，用户向的说明见
+[`docs/multi-platform.md`](docs/multi-platform.md) §17。
 
 所有参考源都没有共享提交历史，`git merge` / `git pull` 不成立 ——
 只能挑单个提交，导出成补丁再应用。流程与注意事项见

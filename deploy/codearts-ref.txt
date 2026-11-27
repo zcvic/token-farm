@@ -1,0 +1,227 @@
+# 已人工核对过的华为云 CodeArts 码道（CodeArts Agent）协议事实 —— 本仓库 codearts 适配层的参考
+#
+# 参考仓（只作**协议事实来源**，本仓库没有 vendor 任何源码，也没有共享历史）：
+#
+#   · https://github.com/HITZY2002/codearts2api （MIT；协议主体：Go）
+#       internal/upstream/{const,signer,dpop,client,models,sse,checkin}.go
+#       internal/auth/auth.go / internal/server/oauth.go
+#       internal/pool/{pool,checkin}.go / internal/scheduler/scheduler.go
+#       cmd/{login,credit}/main.go / docs/reverse-engineering.md
+#       基线：ee754d8849bd71e02b8255d1621f5801c52e66e4（2026-11-11）
+#
+# 形态：原生重写（httpx + 标准库，不新增依赖）。落点：
+#   server/platforms/codearts/
+#     {constants,signer,dpop,store,client,catalog,adapter,login}.py
+#
+# 记录方式与 deploy/cline-ref.txt、deploy/trae-ref.txt 同一约定：一次同步写一段；
+# 未核对的提交号不要提前写进来。
+#
+# ---- 2026-11 首次接入
+#
+#      上游（商业版 cn-north-4）：
+#        · SNAP_HOST  https://snap-access.cn-north-4.myhuaweicloud.com
+#          （官方 product.json 里 chatDomain = codeGenDomain = snapEngineDomain）
+#        · SNAP_MANAGER = SNAP_HOST + /snap-manager（登录 ticket、current/user）
+#        · PORTAL_HOST  https://codearts.huaweicloud.com/portal（OAuth authorize）
+#        · BENEFIT_HOST https://opengw.developer.huaweicloud.com（限时福利网关）
+#        · STS_HOST     https://sts.cn-north-4.myhuaweicloud.com（换 / 刷令牌）
+#        · 只有商业版一套，账号与模型统一 realm = cn；`realm_aware=False`。
+#          → constants、store.REALM
+#
+#      AK/SK 签名（每个业务请求都要重算）：
+#        · 算法名 SDK-HMAC-SHA256；头 X-Sdk-Date（%Y%m%dT%H%M%SZ，UTC）、
+#          Host、X-Security-Token、X-Sdk-Content-Sha256、
+#          Authorization: SDK-HMAC-SHA256 Access=<AK>, SignedHeaders=..., Signature=...
+#        · SignedHeaders = 请求里**全部**头的小写名排序拼接。也就是说：
+#          maas_type 必须在**签名前**加（否则上游按未签名头处理），
+#          Chat-Id / Session-Id 必须在**签名后**加（上游不校验它们）。
+#        · canonicalURI：每段 percent-encode，末尾补 `/`。
+#        · canonicalQuery：按 key 排序、同 key 按 value 排序后 quote_plus。
+#        · stringToSign = "SDK-HMAC-SHA256\n" + X-Sdk-Date + "\n"
+#                         + sha256hex(canonicalRequest)
+#        · Signature = HMAC-SHA256(SK, stringToSign) 的 hex。
+#        · GET 空 body 的 payload hash 取 sha256(b"")；Content-Length **不**计入
+#          签名（客户端发送时才补）。
+#        → signer.sign / canonical_uri / canonical_query
+#
+#      DPoP（token 端点强制）：
+#        · JWT header {alg:"ES256", typ:"dpop+jwt",
+#          jwk:{kty:"EC", crv:"P-256", x, y}}；payload
+#          {htm:"POST", htu:<token 端点完整 URL>, iat:<秒>, jti:<32 字节 hex>}。
+#        · 签名 = ES256 over b64url(header)+"."+b64url(payload)，低 S 归一化，
+#          签名值用 r||s 各 32 字节（**不是 DER**）。
+#        · 私钥持久化 {kty,crv,x,y,d}（base64url raw，各 32 字节）；
+#          normalize_jwk 校验 d 范围、点在曲线上、d·G == (x,y)。
+#        · 私钥必须长期复用：refresh_token 与它绑定，换一把就是
+#          InvalidDPoPHeader（终态失效，只能重新登录）。
+#        → dpop.generate_jwk / normalize_jwk / proof / verify_proof
+#
+#      登录（OAuth2 PKCE，与官方 CodeArts Agent 插件一致）：
+#        · client_id = "codearts-agent"（= uri_scheme）；refresh_token 与它绑定，
+#          换 client_id 刷新回 invalid client id。
+#        · code_challenge_method 只认字符串 "SHA-256"（不是标准写法 S256）。
+#          verifier = 64 随机字节 base64url（86 字符），
+#          challenge = base64url(sha256(verifier))（43 字符）。
+#        · authorize URL = PORTAL_HOST + "/authorize?" + urlencode({
+#            theme:"2", locale:"zh-cn", uri_scheme:CLIENT_ID, client_id:CLIENT_ID,
+#            port, code_challenge, code_challenge_method:"SHA-256",
+#            ticket_id, plugin-name:"snap_AIIDE", plugin-version:"5.2.0" })
+#        · 本机回环 127.0.0.1:<随机端口>/oauth/callback，与 redirect_uri 严格一致。
+#        · Portal **两次**回调：第一次带 secret + redirect（不带 code，需 307
+#          跳到 redirect）；第二次**只带 code**（实测 2026-09-16：
+#          has_code=true has_secret=false has_redirect=false）。
+#        · 因此候选顺序：secret 命中 → ticket_id 命中 → 全部活跃会话按创建时间
+#          倒序逐个试。授权码与 PKCE verifier 一对一，用错只回 STS5.1805 且
+#          **不消耗**授权码，所以逐个试是安全的。带了 secret 却不命中即放弃。
+#        · 会话 TTL 15 分钟；同时挂起上限 8 个（每个占一个本机端口 + 一条线程）。
+#        · 远程部署浏览器回不到服务器 127.0.0.1：面板兜底让用户粘贴地址栏完整
+#          链接（submit_callback），走同一套校验与兑换。
+#        → login.start / parse_callback_url / candidates / submit_callback
+#
+#      ticket 兜底通道（只在收到过 portal secret 的会话上跑）：
+#        · GET {SNAP_MANAGER}/v1/login/ticket?ticket_id=&secret=
+#          带 plugin-name / plugin-version 头。
+#        · 只有收到过 secret 才轮询：否则并行轮询会抢在授权码之前存下一份
+#          **不含 refresh_token** 的临时凭据，把账号变成「一小时后必须重新登录」。
+#        → login._poll_ticket、client.poll_ticket
+#
+#      换 / 刷令牌：
+#        · POST {STS_HOST}/v1/oauth2/tokens（form-urlencoded + DPoP 头）
+#          授权码：grant_type=authorization_code + code + redirect_uri +
+#                  code_verifier + client_id
+#          刷新：  grant_type=refresh_token + client_id + code_verifier +
+#                  refresh_token
+#        · 响应 {user_id, user_name, domain_id, refresh_token,
+#                credentials:{access_key_id, secret_access_key,
+#                             security_token, expiration}}
+#          旧 ticket 通道回 {credential:{access, secret, securitytoken,
+#          expires_at}}，字段名完全不同，必须归一化。
+#          security_token 就是对话用的 x-auth-token。
+#        · STS 临时凭证约 1 小时；refresh token 寿命上游不回，按 30 天保守估算
+#          （只用于巡检，不参与选路）。
+#        · refresh_token **一次性轮换**：刷新成功必须**先原子落盘再使用**；
+#          同一账号刷新串行。终态失效判据 invalid_grant / ExpiredRefreshToken /
+#          InvalidDPoPHeader / invalid client id / 消息含 has been used —— 命中
+#          即标「登录已失效」，不再重试。
+#        · 非鉴权类刷新失败冷却 60 秒（一次性 token 不能每个请求都打一次）。
+#        → client.normalize_token_response / exchange_code / refresh、
+#          adapter._token_for、store.patch_account
+#
+#      身份：
+#        · GET {STS}/v5/caller-identity → account_id / principal_id /
+#          principal_urn（尾段 :user: 之后是用户名）。只在 sts.cn-north-4 域
+#          可用（iam.myhuaweicloud.com/v5/caller-identity 回 APIGW.0101）。
+#        · GET {SNAP_MANAGER}/v1/current/user → user_id / user_name / domain_id。
+#          必须带 /snap-manager 前缀，否则 APIG.0101。
+#        → client.caller_identity / current_user
+#
+#      模型目录（三路合并，**按账号**）：
+#        · agent-center：
+#            GET {SNAP_HOST}/v1/agent-center/agents/useragents
+#                ?offset=0&limit=100&is_primary_agent=true
+#            GET {SNAP_HOST}/v1/agent-center/agents/detail?agent_id=
+#          取 gpts.models，字段 model_alias / model_name / model_id /
+#          model_parameters.{context_window,max_tokens,model_id,model_desc}。
+#          默认 agent 口径与官方客户端一致：agent_name=="CodeAgent" 且
+#          alias.alias_zh_cn=="智能体" 且 show_in_ide；退化 is_primary_agent，
+#          再退化首个。
+#        · 内置模型：GET {SNAP_HOST}/v1/model/builtin（Agent-Type: PromptCenter）
+#          → {builtinModels:[{model_id, model_name, model_desc,
+#                            context_window, max_tokens}]}
+#        · 限时福利网关：GET {BENEFIT_HOST}/api/v1/gateway/config
+#          → {error_code:"0000", result:{base_url, models:[...]}}
+#          返回的模型全部标 benefit=True，对话时必须带 maas_type: benefit。
+#        · 模型 ID **区分大小写**（上游按注册名精确匹配）；目录里按小写去重。
+#        · 福利是按账号授予的，所以缓存键是 uid，落库
+#          platforms.codearts.catalog = {"<uid>":{fetched_at, models:[...]}}；
+#          对外给并集（福利标记取或），真正决定带不带头的仍是选中账号。
+#        · 某一路连续失败退避 5 分钟（srcFail / noteSrcFail / srcBlocked /
+#          clearSrcFail）；福利源失败时保留上一轮的福利标记（keepBenefit）。
+#          漏标 = 漏头 = 404，宁可多带。
+#        · 合并：按小写 ID 去重、福利标记取或、参数更全者优先、按小写 ID 排序。
+#        · 目录 TTL 1 小时。SetAccountModels 是**整体替换**而非增补。
+#        · 本地模型名校验只在**真发现过目录**时启用（has_live_catalog）：冷启动
+#          只有种子，拿种子判「未知」会把合法模型误拒成 400。
+#        · 静态别名（客户端习惯小写）：snap-chat / glm-5.2 → GLM-5.2，
+#          glm-5.1 / glm-4.7 / qwen3-vl-235b / qwen3.5-397b-a17b-vl /
+#          qwen3.6-27b-vl 各自映射；DEFAULT_MODEL = GLM-5.2。
+#        · 种子：GLM-5.2、GLM-5.2-ArkTS-SPARK、GLM-5.1、GLM-4.7、
+#          OpenPangu-2.0-Pro、OpenPangu-2.0-Flash、Qwen3-VL-235B、
+#          Qwen3.5-397B-A17B-VL、Qwen3.6-27B-VL；
+#          福利种子 deepseek-v4-flash-0731、deepseek-v4-pro-0813、glm-5.3-flash。
+#        · 模型目录**不自动领取福利**（参考实现 claimAuto 默认 true）：领取是
+#          写操作，只允许在显式 checkin / 平台任务时执行。
+#        → client.fetch_agent_models / fetch_builtin_models /
+#          fetch_benefit_models / merge_models / canonical_model、
+#          catalog.discover / is_benefit / has_live_catalog
+#
+#      对话：
+#        · POST {SNAP_HOST}/api/v2/chat/completions（原生 OpenAI 形状）
+#          头：x-auth-token: <security_token>（**同时**做 AK/SK 签名）、
+#              x-snap-traceid、X-Language: zh-cn、app-id: CodeAgent3.0、
+#              is_confidential: false、Accept: text/event-stream、
+#              Chat-Id、Session-Id；福利模型另加 maas_type: benefit。
+#          body：model / stream:true / messages / prompt_cache_key: chat_id /
+#                tool_stream:true / chat_id。
+#        · chat_id 必须 32 位 hex；Session-Id = sha256("codearts-session:"+chatID)
+#          取前 32 hex。
+#        · 上游**永远**走流式：客户端要非流式时在适配器本地聚合
+#          （client.aggregate），不向上游要 JSON。
+#        · SSE 逐行 `data:` JSON（也兼容 event: + data:、裸 JSON 行）。
+#          {"text": ...} 是**累计全文**（替换语义），不能当增量透传；
+#          {"delta":{"content","reasoning_content"}} 才是增量；
+#          event: reasoning/thinking 追加思考；结束帧 {"text":"[DONE]"} 或
+#          event: done|end|finish；error_code 非 "0" 是业务错误（HTTP 200 里
+#          也可能内嵌）。output 数组的 output_text 是兜底；
+#          结构化 QA {question,options,answer} 只在正文为空时取 answer；
+#          工具调用分片按 index 聚合；unwrap_qa 剥 ```markdown / ```json 包装。
+#        · open_chat 的 preflightSSE：在首个非 role-only 事件前把业务错误抛成
+#          HTTP 错误（role-only chunk 先缓存继续读；模型 ID 类错误即使已见 role
+#          也要抛）。
+#        · 错误映射：429 / tm.00001041 / tpm / 并发会话 → 429；
+#          InferHub.002002009 / not registered / 4004.200 / benefit not found /
+#          tm.000010051 / 无权调用该模型 → 400（模型或权限，不是账号故障）；
+#          InferHub.001001005 / request param is invalid → 400；其余 → 502。
+#        · 模型 ID 拼写错误换一种写法重试一次（全大写 / 全小写里挑不同的），
+#          成功后记住这个拼写。
+#        → client.build_chat_body / open_chat / iter_events /
+#          StreamTranslator / aggregate / classify、adapter._chat_once
+#
+#      签到 / 积分：
+#        · GET {SNAP_HOST}/v1/ops/delivery?channel=IDE
+#          → {code:0, data:{items:[{campaignId,title,status,claimable,
+#             benefitUnit,benefitAmount,pendingTotalAmount,
+#             extra:{startTime,endTime}}]}}
+#        · POST {SNAP_HOST}/v1/ops/claim
+#          {campaignId, channel:"IDE", idempotentKey:"claim_<ID>_<毫秒>"}
+#        · POST {SNAP_HOST}/v1/ops/confirm  {campaignId}
+#        · 三个都是 snap 根路径（不是 /snap-manager），头 Content-Type /
+#          Agent-Type: PromptCenter / X-Language: zh-cn，并做 AK/SK 签名。
+#        · 只处理 campaignId 1（每日签到）与 4（新用户）；benefitUnit 非空且
+#          非 CREDIT 跳过；按 extra.startTime / endTime（RFC3339Nano）判未开始 /
+#          已结束。状态 ELIGIBLE 且 claimable 才 claim；CLAIMED 只补 confirm
+#          （不得重复领取）；CONFIRMED / CONSUMED 直接「已领取」。
+#        · 只有 code == 0 才算成功。积分只能来自 claim 结果
+#          （pendingTotalAmount 优先，否则 benefitAmount）——上游没有余额接口，
+#          credits 给的是累计签到领取量，不是真实余额。
+#        · 同一账号领取必须串行（幂等键按毫秒生成，并发会各领一次）。
+#        → client.fetch_campaigns / checkin、adapter.checkin / credits
+#
+#      账号导入：
+#        · 手工导入：STS 临时凭据 +（推荐）refresh token + DPoP 私钥。
+#          接受 {account:{...}} 与扁平对象两种形状，也兼容参考实现的
+#          {user_id, refresh_token, credentials:{...}, dpop_private_key}。
+#          导入不联网，首次刷新 / 探活在 refresh_account 或第一次对话时发生。
+#        · uid 派生优先 user_id，其次 user_name，最后凭证哈希；前缀 ca_。
+#          不能用 refresh token 哈希：它每次轮换都会变。
+#        → store.normalize_credentials / derive_uid、adapter.import_account
+#
+#      刻意不做：
+#        · 不跟参考实现的 Go 运行时 / 账号池 / 轮询 / 冷却 / 前缀改写，那些由
+#          token-farm 自己负责。
+#        · 不自动领取福利（claimAuto）：写操作只在显式 checkin / 平台任务里做。
+#        · 不做浏览器自动化、不做 TLS 指纹伪造（项目红线）。
+#
+# ---- 同步实现（阅读用，不参与运行）----
+#   · 官方 CodeArts Agent 插件的 /api/v2/chat/completions 与 /v1/ops/* 协议
+#     原始来源：插件安装目录里的 resources/app/extensions/vscode-codebot

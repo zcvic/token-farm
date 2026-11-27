@@ -146,6 +146,18 @@ class DefaultsTest(_DbCase):
         self.assertFalse(raccoon['min_credits'])
         self.assertFalse(raccoon['credit_meter'])
         self.assertFalse(raccoon['desktop_sync'])
+        # CodeArts 码道与小浣熊同组：原生选号 / 按账号的在线目录 / 签到。
+        # 区别在「余额」——上游没有积分余额接口，`credits` 给的是累计签到
+        # 领取量，因此同样没有 `min_credits`（不能按余额挑号）。
+        codearts = runtime_settings.capabilities('codearts')
+        self.assertTrue(codearts['max_accounts_try'])
+        self.assertTrue(codearts['session_affinity'])
+        self.assertTrue(codearts['catalog_timeout'])
+        self.assertTrue(codearts['credits_ttl'])
+        self.assertFalse(codearts['min_credits'])
+        self.assertFalse(codearts['credit_meter'])
+        self.assertFalse(codearts['desktop_sync'])
+        self.assertFalse(codearts['usage_ledger'])
         # Qoder 的目录 / 冷却 / 换号都在内置网关里，适配器只做透传。
         self.assertFalse(qoder['catalog_ttl'])
         self.assertFalse(qoder['cooldown_429'])

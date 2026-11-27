@@ -98,10 +98,14 @@ class RouteModelTest(unittest.TestCase):
         # 小浣熊是单区域平台，模型名本身不带斜杠，前缀只剥一层。
         self.assertEqual(platforms.route_model('raccoon/sn-glm-5-3'),
                          ('raccoon', 'sn-glm-5-3', None))
+        # 华为云 CodeArts 码道同样是单区域平台。
+        self.assertEqual(platforms.route_model('codearts/GLM-5.2'),
+                         ('codearts', 'GLM-5.2', None))
         # 单区域平台没有区域后缀，`discoverycn/x` 不是前缀。
         self.assertIsNone(platforms.route_model('discoverycn/auto'))
         self.assertIsNone(platforms.route_model('kilocn/kilo-auto/free'))
         self.assertIsNone(platforms.route_model('raccooncn/sn-glm-5-3'))
+        self.assertIsNone(platforms.route_model('codeartscn/GLM-5.2'))
 
     def test_registered_names_are_stable(self) -> None:
         self.assertIn('trae', platforms.names())

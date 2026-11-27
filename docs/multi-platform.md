@@ -33,6 +33,12 @@
 refresh，模型目录在线拉取，对话是标准 OpenAI Chat Completions；签到没有独立
 领取接口，靠读一次桌面端 `setting_info` 触发后核对积分账单。
 
+最新接入的是 **华为云 CodeArts 码道（CodeArts Agent）**（`codearts/` 前缀，
+详见 §17）：华为云 OAuth2 + PKCE 登录，凭证是约 1 小时的 STS 临时 AK/SK
+（每个请求再做一次 AK/SK 签名），`refresh_token` 与 DPoP 私钥绑定且一次性轮换；
+模型目录按账号分三路合并（agent-center / 内置模型 / 限时福利），签到走
+`/v1/ops/delivery|claim|confirm` 三步。
+
 ---
 
 ## 1. 目标与非目标
@@ -219,6 +225,16 @@ server/platforms/
     catalog.py           # 在线目录归一 + 内置快照兜底
     client.py            # 刷新 / 目录 / 对话 / 积分 / 账单 / 每日发放触发
     desktop.py           # 从本机 `.box-agent/config/auth.json` 读登录态（只读）
+    adapter.py           # 实现 PlatformAdapter：选号 / 轮换 / 签到 / 积分 / 对话
+  codearts/
+    __init__.py
+    constants.py         # 各主机 / 端点 / 模型种子与别名 / 错误码分类
+    signer.py            # 华为云 SDK-HMAC-SHA256 的 AK/SK 请求签名
+    dpop.py              # ES256 DPoP 证明 + P-256 密钥归一 + PKCE（纯标准库）
+    store.py             # 账号文件（STS 凭据 + refresh + DPoP 私钥，原子写）
+    client.py            # 换 / 刷令牌 / 目录三路 / SSE 重拼 / 签到
+    catalog.py           # 按账号缓存 + 来源退避 + 福利标记
+    login.py             # OAuth2 PKCE 回环回调 + ticket 轮询 + 粘贴回调兜底
     adapter.py           # 实现 PlatformAdapter：选号 / 轮换 / 签到 / 积分 / 对话
   server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
 ```
@@ -700,6 +716,10 @@ DuMate 的每日签到奖励由服务端 00:00 自动发放，手动签到时 `h
   `name`（`sn-glm-5-3` / `sn-kimi-k3` / `sn-deepseek-v4-1-flash` …）；`default`
   落到内置默认模型，未收录的名字在本地就拒绝（上游会对未知模型静默回落默认
   模型并返回 200）。
+- `codearts/<model>` 走华为云 CodeArts 码道（单区域，STS 临时凭据池）。目录
+  里的 id 就是上游注册名（区分大小写：`GLM-5.2` / `Qwen3-VL-235B` /
+  `deepseek-v4-flash-0731` …）；请求名先做大小写归一与静态别名（`snap-chat` /
+  `glm-5.2` → `GLM-5.2`），`default` 落到 `GLM-5.2`。
 - 其他模型名 → 原样走 WorkBuddy（与今天完全一致）。
 - `/v1/models` 会把 Trae 的模型**按区域**并入列表（`traecn/` / `traecom/`），
   `owned_by` 标成 `trae`、`realm` 标出所属区域，客户端据此区分来源。
@@ -923,6 +943,7 @@ data/platforms/trae/accounts/<uid>.json
 | 豆包 | `platforms/doubao/` | `db_` | `cookie`（`sessionid` 为稳定标识） |
 | 灵犀 | `platforms/lingxi/` | `lx_` | `cookie`（`wps_sid`） |
 | 商汤小浣熊 | `platforms/raccoon/` | `rc_` | `token` / `refreshToken`（两个 JWT） |
+| 华为云 CodeArts 码道 | `platforms/codearts/` | `ca_` | `accessKeyId` / `secretAccessKey` / `securityToken`（STS）+ `refreshToken` + `dpopJwk` |
 
 三个新平台（Discovery / Kilo / Cline）与豆包都**没有** `desktopPath`：它们不读也
 不回写本机客户端，`import_from_desktop` 不存在，管理端的「从本机导入」入口不会
@@ -1002,6 +1023,7 @@ access token、不能刷新，也没有 userId，导入时按 token 摘要生成
 | MiniMax Code | **refreshToken** `refreshExpiredAt` | 3 天 | access token 只有约 1 小时，由适配器按需刷新；拿它判会每小时轮换一遍一次性 refresh token |
 | Cline | **refreshToken** `refreshExpiredAt` | 3 天 | 与 MiniMax 同理：access token 约 10 分钟且由 `_token_for` 按需轮换；refresh token 一次性，按 access 判会反复轮换 |
 | 商汤小浣熊 | **refreshToken** `refreshExpiredAt` | 3 天 | access token 约 3 小时且由 `_token_for` 按需轮换；refresh token 一次性、约 30 天，按 access 判会每小时轮换一遍 |
+| 华为云 CodeArts 码道 | **STS 凭据** `expiredAt` | 10 分钟（`TOKEN_SKEW_SECONDS`） | STS 临时凭据只有约 1 小时，且刷新本身就要做一次 DPoP 签名请求；按 10 分钟余量提前换新，与 `_token_for` 的判据一致，避免巡检与第一次请求各刷一遍 |
 
 三条共同口径：
 
@@ -1061,6 +1083,7 @@ Cline 是同一个问题、同一个做法：access token 约 10 分钟且由适
 | 豆包 | 有 | 有（额度汇总） | 无 | Cookie 无 refresh；额度来自 `window_limits` 汇总，401 换号、429/5xx 按设置冷却 |
 | 灵犀 | 有（每日签到） | 有（智点 + 赠送批次） | 无 | Cookie 无 refresh；余额来自 `credits/balance`，15 天内到期批次单列；401 换号、429/5xx 按设置冷却 |
 | 商汤小浣熊 | 有（触发每日积分） | 有（积分 + 明细） | 有（一次性 refresh） | 余额来自 `points/v1/balance`；签到靠桌面端 `setting_info` 触发后核对账单；401 换号、200108 按 25 分钟冷却 |
+| 华为云 CodeArts 码道 | 有（`/v1/ops/*` 三步） | 无（只有累计签到领取量） | 有（一次性 refresh + DPoP） | 上游没有积分余额接口，`credits()` 给的是累计领取量；签到 claim 成功才算数；401 换号、429 冷却 |
 
 Discovery 的「额度」在界面上是**三态**，不是数字：`ok` / `rate_limited` /
 `quota_exhausted`。把 `429 quota_exceeded` 当成普通限流（几十秒冷却）会让已经
@@ -2083,3 +2106,208 @@ refresh token 是**一次性轮换**的——上游换发后旧的立即作废�
 - **参考仓的 Go 运行时 / 账号池 / 面板**：选号 / 冷却 / 亲和全部按 token-farm
   口径。
 - **按目录 vision 标签决定接受图片**：标签实测两个方向都错过。
+
+---
+
+## 17. 华为云 CodeArts 码道（CodeArts Agent）
+
+原生实现，包在 `server/platforms/codearts/`，不引入第三方运行时（只用 httpx +
+标准库），也没有 vendor 任何参考仓源码。CodeArts 码道没有开放平台 API，协议
+事实来自官方 CodeArts Agent 插件（`resources/app/extensions/vscode-codebot`）与
+真机抓包，核对自 `HITZY2002/codearts2api`（MIT，Go）。取用范围与「有意不跟」
+见 `deploy/codearts-ref.txt`。
+
+### 17.1 凭据与导入
+
+一个账号是**一组绑定的凭据**，少一个都不完整：
+
+| 字段 | 含义 |
+| --- | --- |
+| `accessKeyId` / `secretAccessKey` / `securityToken` | 华为云 STS 临时凭据，约 1 小时；`securityToken` 同时是对话的 `x-auth-token` |
+| `refreshToken` | **一次性轮换**，每次刷新上游换发新的，旧的立即作废 |
+| `dpopJwk` | DPoP 私钥（P-256，`{kty,crv,x,y,d}`）；refresh_token 与它**绑定** |
+| `codeVerifier` | 登录时的 PKCE verifier，刷新时上游也要求带上 |
+| `clientId` | 签发 refresh_token 的 OAuth client，默认 `codearts-agent` |
+
+- refresh_token 与 **client_id + DPoP 私钥**三者绑定：换一个 client_id 刷新回
+  `invalid client id`，换一把私钥回 `InvalidDPoPHeader`，都是终态失效，只能
+  重新登录。所以 DPoP 私钥必须与 refresh token 一起持久化、长期复用。
+- uid 派生优先 `user_id`，其次 `user_name`，最后凭证哈希；前缀 `ca_`。
+  **不能用 refresh token 哈希**：它每次轮换都会变。
+- 面板「网页登录」走 §17.2；「手工导入」接受本面板导出的账号文件、参考实现的
+  `{user_id, refresh_token, credentials:{...}, dpop_private_key}`，以及抓包里
+  抄的扁平字段，也接受 `{account: {...}}` 包装。导入阶段**不联网**，首次刷新 /
+  探活发生在 `refresh_account` 或第一次对话时。
+- 只有 STS 临时凭据也能导入：能用，但约 1 小时后需要重新导入（界面按
+  `token_auto_refresh` 区分）。
+- 凭据明文只落盘（`data/platforms/codearts/accounts/<uid>.json`，文件锁 +
+  原子替换 + 0600），接口只回摘要与 `has_token` / `has_refresh_token` /
+  `has_dpop_key`。
+
+### 17.2 网页登录（OAuth2 PKCE + DPoP）
+
+与官方插件一致：`client_id` = `codearts-agent`（= `uri_scheme`），
+`code_challenge_method` 只认字符串 `SHA-256`（**不是**标准写法 `S256`）。
+
+1. 生成 `ticket_id` / `secret`（各 16 字节 hex）、PKCE
+   `(verifier, challenge)`、以及一把新的 DPoP 私钥；
+2. 在 `127.0.0.1:<随机端口>` 起临时 HTTP 服务，回调路径 `/oauth/callback`
+   （与 `redirect_uri` 严格一致）；
+3. 让用户打开 `{PortalHost}/authorize?...`；
+4. Portal **两次**回调本机：第一次带 `secret` + `redirect`、不带 `code`（按 307
+   跳去登录页）；第二次**只带 `code`**（实测 2026-09-16：
+   `has_code=true has_secret=false has_redirect=false`）；
+5. 用 `code` + 本机 `verifier` 调 STS `/v1/oauth2/tokens`（带 DPoP 头）换 STS
+   临时凭据与 refresh_token。
+
+第二次回调无法自证属于哪个会话，所以候选顺序是：`secret` 命中 → `ticket_id`
+命中 → 全部活跃会话按创建时间**倒序**逐个试。授权码与 PKCE verifier 一对一，
+用错只回 `STS5.1805` 且**不消耗**授权码，逐个试是安全的；带了 `secret` 却不
+命中即放弃，不再往下猜。会话 TTL 15 分钟，同时挂起上限 8 个（每个占一个本机
+端口 + 一条线程）。
+
+远程部署时浏览器回不到服务器上的 `127.0.0.1`：面板兜底让用户把地址栏里的完整
+链接粘回来（`submit_callback`），走同一套校验与兑换。
+
+另外保留 ticket 通道（`GET {snap-manager}/v1/login/ticket?ticket_id=&secret=`），
+**只在收到过 portal `secret` 的会话上跑**：否则并行轮询会抢在授权码之前存下一份
+不含 refresh_token 的临时凭据，把账号变成「一小时后必须重新登录」。
+
+### 17.3 请求签名与 DPoP
+
+每个业务请求都要用 AK/SK 做一次华为云 `SDK-HMAC-SHA256` 签名（`signer.py`）：
+
+- `SignedHeaders` = 请求里**全部**头的小写名排序拼接。因此 `maas_type` 必须在
+  **签名前**加上（漏了上游按未签名头处理），`Chat-Id` / `Session-Id` 必须在
+  **签名后**加（上游不校验它们）。
+- `canonicalURI` 每段 percent-encode 且末尾补 `/`；`canonicalQuery` 按 key
+  排序、同 key 按 value 排序后 `quote_plus`；`stringToSign` 是
+  `"SDK-HMAC-SHA256\n" + X-Sdk-Date + "\n" + sha256hex(canonicalRequest)`。
+- GET 空 body 的 payload hash 取 `sha256(b"")`；`Content-Length` **不**计入
+  签名（客户端发送时才补）。
+
+DPoP 证明（`dpop.py`，纯标准库 P-256）：JWT header 带
+`{alg:"ES256", typ:"dpop+jwt", jwk:{kty,crv,x,y}}`，payload
+`{htm:"POST", htu:<token 端点>, iat, jti}`；签名值是 `r||s` 各 32 字节
+（**不是 DER**），低 S 归一化。私钥归一化校验 `d` 范围、点在曲线上、
+`d·G == (x,y)`——三个条件都过才写进账号。
+
+### 17.4 令牌轮换
+
+`_token_for` 是唯一的取 token 入口：
+
+- 内存缓存 STS 凭据的到期时刻，按 10 分钟余量提前刷新；refresh token 永远以
+  磁盘为准，因为它一次性、轮换后内存副本立刻过期。
+- 刷新由**账号级锁**串行，避免并发请求拿同一个旧 refresh 去换两次。
+- `POST {STS_HOST}/v1/oauth2/tokens`（form-urlencoded + DPoP 头），
+  `grant_type=refresh_token` + `client_id` + `code_verifier` + `refresh_token`。
+- **先落盘再使用**：把新 AK/SK、security_token、refresh_token 与到期时间写回
+  账号文件成功后才更新内存并返回。进程崩在中间时，新的 refresh 已在文件里，不会
+  把账号永久踢下线。
+- 终态失效判据：`invalid_grant` / `ExpiredRefreshToken` / `InvalidDPoPHeader` /
+  `invalid client id` / 消息含 `has been used`。命中即标「登录已失效」并停用，
+  不再重试。
+- 非鉴权类刷新失败冷却 60 秒（`REFRESH_FAIL_COOLDOWN`），避免上游抖动时每个
+  请求都去轮换一次性 token、放大丢链窗口。
+- 刷新回了 200 却没有 STS 凭据：旧 refresh 可能已经轮换掉了，只剩重新登录一条
+  路，**不能**把空凭据写进账号。
+
+巡检（§6.2）看的是 **STS 凭据的 `expiredAt`**，阈值 10 分钟（与 `_token_for`
+的余量一致）：凭据只有约 1 小时，按天判会让账号在两次巡检之间掉线；refresh
+token 的寿命上游不回，无法当判据。
+
+### 17.5 对话协议
+
+对话是原生 OpenAI 形状：`POST /api/v2/chat/completions`。头里
+`x-auth-token: <security_token>`（**同时**还要做 AK/SK 签名）、`x-snap-traceid`、
+`X-Language: zh-cn`、`app-id: CodeAgent3.0`、`is_confidential: false`、
+`Accept: text/event-stream`、`Chat-Id`、`Session-Id`；福利模型另加
+`maas_type: benefit`。
+
+- `chat_id` 必须 32 位 hex；`Session-Id` = `sha256("codearts-session:"+chatID)`
+  取前 32 hex。
+- **上游永远走流式**：客户端要非流式时在适配器本地聚合（`client.aggregate`），
+  不向上游要 JSON。
+- SSE 逐行 `data:` JSON（也兼容 `event:` + `data:`、裸 JSON 行）。
+  `{"text": ...}` 是**累计全文**（替换语义），不能当增量透传——必须经
+  `StreamTranslator` 重拼成 OpenAI chunk；`{"delta":{"content",
+  "reasoning_content"}}` 才是增量；`event: reasoning` / `thinking` 追加思考；
+  结束帧是 `{"text":"[DONE]"}` 或 `event: done|end|finish`。
+- HTTP 200 里也可能内嵌业务错误（`error_code` 非 `"0"`）：`open_chat` 的
+  preflight 在首个非 role-only 事件前把它抛成 HTTP 错误（role-only chunk 先
+  缓存继续读，但模型 ID 类错误即使已见 role 也要抛）。
+- 错误映射：429 / `tm.00001041` / `tpm` / 并发会话 → 429；
+  `InferHub.002002009` / `not registered` / `4004.200` / `benefit not found` /
+  `tm.000010051` / 无权调用该模型 → 400（模型或权限问题，不是账号故障）；
+  `InferHub.001001005` / `request param is invalid` → 400；其余 → 502。
+- **模型名大小写**：上游按注册名**精确匹配**（`GLM-5.2` 与 `glm-5.2` 不是
+  同一个），客户端习惯写小写。适配器先做大小写归一 + 静态别名
+  （`snap-chat` / `glm-5.2` → `GLM-5.2`），并在首次模型 ID 类错误时换一种拼写
+  （全大写 / 全小写）重试一次，成功后记住这个拼写。
+- **未知模型**：本地按目录校验（`_assert_known_model`）。校验只在**真发现过
+  目录**时启用（`catalog.has_live_catalog()`）：冷启动只有种子，拿种子去判
+  「未知」会把账号其实有的模型误拒成 400。
+
+### 17.6 模型目录（三路合并，按账号）
+
+目录是**按账号**的：福利是授予到账号的，所以缓存键是 `uid`，落库
+`platforms.codearts.catalog`；对外给并集（福利标记取或），真正决定带不带
+`maas_type` 头的仍是**选中的那个账号**（`is_benefit(uid, model)`）。
+
+| 来源 | 端点 | 说明 |
+| --- | --- | --- |
+| agent-center | `GET /v1/agent-center/agents/useragents?offset=0&limit=100&is_primary_agent=true` → `detail?agent_id=` | 取 `gpts.models`；默认 agent 口径与官方客户端一致（`agent_name=="CodeAgent"` 且 `alias.alias_zh_cn=="智能体"` 且 `show_in_ide`），退化 `is_primary_agent`，再退化首个 |
+| 内置模型 | `GET /v1/model/builtin`（`Agent-Type: PromptCenter`） | `{builtinModels:[{model_id, model_name, model_desc, context_window, max_tokens}]}` |
+| 限时福利 | `GET {BENEFIT_HOST}/api/v1/gateway/config` | `{error_code:"0000", result:{base_url, models:[...]}}`；返回的模型全部标 `benefit=True` |
+
+- 某一路连续失败退避 5 分钟（`srcFail` / `noteSrcFail` / `srcBlocked` /
+  `clearSrcFail`）；福利源失败时保留上一轮的福利标记（`keepBenefit`）——漏标
+  就是漏头，宁可多带。
+- 合并按小写 ID 去重、福利标记取或、参数更全者优先、按小写 ID 排序，保证
+  `/v1/models` 刷新前后顺序一致。目录 TTL 1 小时；每个账号的目录是**整体
+  替换**而非增补。
+- **模型目录不自动领取福利**（参考实现的 `claimAuto` 默认 true）：领取是写
+  操作，只允许在显式 `checkin` / 平台任务时执行。
+- 读不到目录时回退 `constants.SEED_MODELS`（9 个常用模型）与
+  `SEED_BENEFIT_MODELS`（3 个福利模型）；福利种子决定首次对话是否带
+  `maas_type`，少带一次就是一次 `model is not registered`。
+
+### 17.7 签到与积分
+
+三步走，都在 snap 根路径（不是 `/snap-manager`），头
+`Content-Type` / `Agent-Type: PromptCenter` / `X-Language: zh-cn`，并做 AK/SK
+签名：
+
+1. `GET /v1/ops/delivery?channel=IDE` 查活动列表（只读）；
+2. `POST /v1/ops/claim` `{campaignId, channel:"IDE",
+   idempotentKey:"claim_<ID>_<毫秒>"}`；
+3. `POST /v1/ops/confirm` `{campaignId}`。
+
+- 只处理 `campaignId` 1（每日签到）与 4（新用户）；`benefitUnit` 非空且非
+  `CREDIT` 跳过；按 `extra.startTime` / `endTime`（RFC3339Nano）判未开始 /
+  已结束。
+- 状态 `ELIGIBLE` 且 `claimable` 才 claim；`CLAIMED` **只补 confirm**（不得
+  重复领取）；`CONFIRMED` / `CONSUMED` 直接按「已领取」。
+- 只有 `code == 0` 才算成功。**同一账号领取必须串行**：幂等键按毫秒生成，两个
+  并发请求会各领一次。
+- 积分只能来自 claim 结果（`pendingTotalAmount` 优先，否则
+  `benefitAmount`）。**上游没有积分余额接口**，所以 `credits()` 返回的是累计
+  签到领取量，`remain` 为 `None`、`source` 为 `checkin`；一次都没领过时给
+  `credits_unsupported` 错误，而不是画一个假余额。
+- 签到失败只记签到结果，不计入推理错误、不冷却、不停用账号。
+
+### 17.8 账号调度
+
+与 DuMate / Discovery / 灵犀 / 小浣熊同一套 `_NATIVE_POOL`：权重 SWRR + LRU、
+会话亲和（`session_affinity`）、单账号并发闸门、`max_accounts_try` 换号、
+`cooldown_429` / `cooldown_5xx` 冷却。401 只换号、不冷却；`min_credits` /
+`credit_meter` 不适用（没有余额接口，也无法按本次对话精确计量）。
+
+### 17.9 有意不跟
+
+- **参考实现的 Go 运行时 / 账号池 / 面板 / 轮询调度**：选号 / 冷却 / 亲和
+  全部按 token-farm 口径。
+- **模型目录自动领福利**（`claimAuto`）：写操作只在显式签到 / 平台任务里做。
+- **浏览器自动化 / TLS 指纹伪造**：项目红线；登录走回环回调 + 粘贴兜底。
+- **`/v1/chat/chat` 与 `/v1/chat/start-chat` 那套旧通道**：`/api/v2/chat/
+  completions` 已是原生 OpenAI 形状，旧通道只是多一层翻译。
