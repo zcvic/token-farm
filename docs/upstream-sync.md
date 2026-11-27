@@ -313,6 +313,17 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 > `test_tool_call_only_stream_is_not_killed`，转换层补两条工具帧用例，
 > `test_platform_sse.py` 补 `test_tool_call_only_stream_is_not_idle`。
 
+> **续期失败日志 uid 批（2026-11-27，`423d697acb` → `aac5cff8d0`）**：1 个提交
+> （issue #477）。旧版 `_note_failure` 只传 `{'uid': '', 'file': name}`，而 `_record`
+> 取 `uid or file`，于是历史行的 uid 是账号**文件名**；任务记录页的版本筛选按 uid
+> 查账号表，文件名永远查不到，那条失败记录在两个版本视图里都被整段过滤掉。
+>
+> 本仓的写入端早已修好（`renew.py` 的四个 WorkBuddy 失败分支都传真实账号 dict），
+> 所以这次只补**读端**：`accounts._account_meta_resolvers` 增加 file → nickname
+> 反向表、`_realm_uid_filter` 把文件名也映射到版本，两种形态（`x.json` 与去掉
+> `.json` 的 `x`）都收、都用 `setdefault`，真实 uid 的映射与前缀匹配逻辑不动。
+> 测试：`test_issue51_realm_summary_rows.py` 新增 `LegacyFileUidCompatTest` 两条。
+
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
 

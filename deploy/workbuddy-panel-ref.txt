@@ -1163,3 +1163,28 @@ e39c2528ba2cea8eeb9cedac8caefdd8d9b1b3f5
 #      上一次基线：a83d93738b1d6ebbd38f3dae1c5a90bf222e9280
 423d697acbeb539f3bf78a31971ff98686ca03bb
 
+# ---- 2026-11 第二十五批：上游 manager 423d697acb → aac5cff8d0（1 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 1 项：续期失败日志的 uid 口径（issue #477）。
+#      已取（按本仓结构重写）：
+#        · aac5cff8d0 续期失败日志写真实 uid，并兼容历史上的文件名形态。
+#          旧版 _note_failure 只传 {'uid': '', 'file': name}，而 _record 取
+#          uid or file —— 于是历史行的 uid 是账号**文件名**。任务记录页的版本
+#          筛选按 uid 查账号表，文件名永远查不到，那条失败记录会在「国内版 /
+#          国际版」视图里被整段过滤掉（用户看不到账号为什么掉线）。
+#          本仓的**写入端**早已是修好的形态（renew.py 的四个 WorkBuddy 失败分支
+#          都传真实账号 dict，`_note_failure(..., acct)`），所以本次只补**读端**：
+#            - server/routers/accounts.py 的 _account_meta_resolvers 增加
+#              file → nickname 反向表（同时收 `workbuddy-x.json` 与去掉 .json 的
+#              `workbuddy-x` 两种形态，都用 setdefault，不覆盖真实 uid 的映射）；
+#              resolve_nick 在「完整 uid 命中」之后、「前缀命中」之前查这张表。
+#            - _realm_uid_filter 把文件名也映射到版本（同样两种形态、setdefault），
+#              这样 _uid_matches_realm 的精确匹配就能覆盖历史行；真实 uid 的
+#              映射仍然优先，前缀匹配逻辑一行没动。
+#          测试：server/tests/test_issue51_realm_summary_rows.py 新增
+#          LegacyFileUidCompatTest 两条（文件名匹配版本、文件名解析昵称）。
+#      未取：无（该提交只有这三处）。
+#      锚点提交：aac5cff8d0bf5957ff3bbbeb8a7164bd018c26f8（本批只同步这一个提交）
+#      上一次基线：423d697acbeb539f3bf78a31971ff98686ca03bb
+aac5cff8d0bf5957ff3bbbeb8a7164bd018c26f8
+

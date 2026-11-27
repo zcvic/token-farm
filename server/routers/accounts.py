@@ -1862,6 +1862,10 @@ def _account_meta_resolvers():
     """
     nick_by_uid: dict[str, str] = {}
     nick_by_prefix: dict[str, str] = {}
+    # 旧版续期失败行把 uid 落成了**账号文件名**（`_record` 取 `uid or file`，
+    # 而当时 uid 为空）。读端必须兼容，否则历史行在版本视图下被过滤掉、
+    # 或显示成一串文件名（PR #477）。这里按文件名（含去掉 .json 的形态）建反向表。
+    nick_by_file: dict[str, str] = {}
     nick_ambiguous: set[str] = set()
     uid_by_prefix: dict[str, str] = {}
     uid_ambiguous: set[str] = set()
@@ -1875,6 +1879,13 @@ def _account_meta_resolvers():
         for base_dir in _all_group_auth_dirs():
             for acc in wb2api.list_auth_accounts(base_dir):
                 auid = str(acc.get('uid') or '')
+                nick = str(acc.get('nickname') or '')
+                fname = str(acc.get('file') or '')
+                if nick and fname:
+                    nick_by_file.setdefault(fname, nick)
+                    base_name = fname[:-5] if fname.endswith('.json') else fname
+                    if base_name:
+                        nick_by_file.setdefault(base_name, nick)
                 if not auid:
                     continue
                 prefix = auid[:8]
@@ -1882,7 +1893,6 @@ def _account_meta_resolvers():
                     uid_ambiguous.add(prefix)
                 else:
                     uid_by_prefix[prefix] = auid
-                nick = str(acc.get('nickname') or '')
                 if not nick:
                     continue
                 nick_by_uid[auid] = nick
@@ -1898,6 +1908,8 @@ def _account_meta_resolvers():
             return ''
         if uid in nick_by_uid:
             return nick_by_uid[uid]
+        if uid in nick_by_file:
+            return nick_by_file[uid]
         prefix = uid[:8]
         return '' if prefix in nick_ambiguous else nick_by_prefix.get(prefix, '')
 
@@ -1947,8 +1959,19 @@ def _realm_uid_filter(realm: str | None) -> dict[str, str] | None:
         for base_dir in _all_group_auth_dirs():
             for a in wb2api.list_auth_accounts(base_dir):
                 auid = str(a.get('uid') or '')
-                if auid:
-                    out[auid] = str(a.get('realm') or 'cn')
+                if not auid:
+                    continue
+                realm_of_account = str(a.get('realm') or 'cn')
+                out[auid] = realm_of_account
+                # 旧版续期失败行把 uid 落成了文件名（见 `_account_meta_resolvers`
+                # 的注释）。把文件名也映射到版本，`_uid_matches_realm` 的精确匹配
+                # 就能覆盖它们。
+                fname = str(a.get('file') or '')
+                if fname:
+                    out.setdefault(fname, realm_of_account)
+                    base_name = fname[:-5] if fname.endswith('.json') else fname
+                    if base_name:
+                        out.setdefault(base_name, realm_of_account)
     except Exception:  # noqa: BLE001
         return out
     return out
