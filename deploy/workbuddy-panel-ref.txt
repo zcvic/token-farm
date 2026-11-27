@@ -1321,3 +1321,51 @@ e846aa27b6b7a4ee0531c7cb8d7d9ee8865b3dd4
 #      上一次基线：aac5cff8d0bf5957ff3bbbeb8a7164bd018c26f8
 9290eeac39aa0caf4cc5a7cf4ef43aabfec17ce7
 
+# ---- 2026-11 第二十九批：上游 manager ad1d9b9ac5 → 2d35cb339c（1 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 1 项：成本账本从 per-1k 改 per-request 口径（#491 / 补丁 0059）。
+#      已取（按本仓结构重写）：
+#        · 2d35cb339c 选号的成本分层不再按「每千 token 单价」，改按「每次请求
+#          平均扣费」。现场：credit 主要是每次请求的固定底价，几乎不随 token
+#          增长；per1k 实际度量的是「这个号平均接到多长的请求」，跨账号能差
+#          1300 倍 —— 结果长请求号被当成「便宜」，越选越长，形成正反馈。
+#          internal/pool/entry.go：
+#            - stateModelCost / modelCostEntry 增加累计量 TotalCredit /
+#              TotalRequests / TotalTokens（老 state.json 没有，读出来是 0）；
+#            - costPerReq()：TotalRequests>0 时取 TotalCredit/TotalRequests；
+#              ==0 是老数据迁移形态，沿用旧 CostPer1k，**绝不置 0** —— 否则
+#              升级后全池瞬间按 0 成本挤进 tier 0；
+#            - per1k()：由累计量现算，降级为**诊断值**（TotalTokens==0 时返回
+#              持久化的旧值）；ModelCostStatus 新增 cost_per_req 字段；
+#            - costTier()：0 = 累计免费（TotalCredit==0 且至少 2 笔），
+#              1 = 无观测/单笔 0 未知（单笔 0 可能只是短请求的固定底价豁免），
+#              2 = 已累计收费；TotalRequests==0 时按旧 CostPer1k + Samples 迁移；
+#            - modelCostMinTokens=2000：tokens 低于该值的请求**只扣余额、不更新
+#              账本**（不创建条目、不刷 LastSeen），否则 max_tokens=5 的短探测
+#              会污染排序很久。
+#          internal/pool/state.go：
+#            - NoteModelCost 去掉 EMA（alpha=0.3），改累计量相加；负 credit 按 0
+#              防御；CostPer1k 由累计量现算；「限免结束」日志改判 prev.knownFree()
+#              且本次 credit>0，日志同时打 per1k 与 per-req；
+#            - 余额扣减与记账门槛解耦：短请求也是真实消费，必须扣余额。
+#          internal/pool/pick.go：
+#            - costTier 闭包改用 mc.costTier()，tier 2 取 mc.costPerReq()；
+#              weighted.cost1k 改名 costReq，比较器按 per-req 升序。
+#          internal/pool/persist.go：
+#            - 恢复侧剔除负累计量；落盘侧 CostPer1k 写 mc.per1k() 并带上三个
+#              累计量字段。老文件（只有 cost_per_1k）恢复后 Requests==0，走
+#              迁移语义，升级不改变现有分层结论。
+#          测试：cost_test.go 新增 noteFreeTier 辅助（两笔 0 才进 tier 0）与
+#          TestModelCostCumulativeNotEMA / TestModelCostShortRequestIgnored /
+#          TestModelCostZeroCreditTierRequiresTwo / TestModelCostPerRequestOrdering
+#          / TestModelCostPerRequestTotals；modelcost_persist_test.go 新增
+#          TestModelCostRestoreLegacyPer1kNotZeroed；handler_cost_test.go /
+#          handler_cost_explore_test.go / global_e2e_test.go 的 SSE 用量与断言
+#          跟着改成 2000 token 门槛与累计量口径。
+#      未取：无（上游同批的 dev/upstream-patches/0059-*.patch 本仓没有那个目录，
+#            补丁内容已逐条落进源码）。
+#      锚点提交：2d35cb339c7915f82c9f96688311a98007cc3b30（本批只同步这一个提交）
+#      上一次基线：9290eeac39aa0caf4cc5a7cf4ef43aabfec17ce7
+2d35cb339c7915f82c9f96688311a98007cc3b30
+
+

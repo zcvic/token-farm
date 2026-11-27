@@ -388,6 +388,27 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 > `keepalive_due_test.go`（统一走 `runKeepalive(ctx, true)`）。
 > 逐条见 `deploy/workbuddy-panel-ref.txt` 第二十八批。
 
+> **成本账本口径批（2026-11-27，`ad1d9b9ac5` → `2d35cb339c`，补丁 0059）**：1 个提交
+> （issue #491）。选号的成本分层从「每千 token 单价」改成「每次请求平均扣费」：
+> credit 主要是每次请求的固定底价，几乎不随 token 增长，旧的 per-1k 实际度量的是
+> 「这个号平均接到多长的请求」，跨账号能差 1300 倍——长请求号被当成「便宜」，越选
+> 越长，形成正反馈。
+>
+> 落点：`pool/modelCostEntry` 增加累计量 `TotalCredit` / `TotalRequests` /
+> `TotalTokens`，`costPerReq()` 为选号权威口径、`per1k()` 降级为诊断值；
+> `NoteModelCost` 去掉 EMA（alpha=0.3）改累计量相加，负 credit 按 0 防御；
+> `costTier()` 的三层语义改为「0 = 累计两笔以上 0 / 1 = 无观测或单笔 0 未知 /
+> 2 = 已累计收费」，单笔 credit=0 不再直接判免费（可能只是短请求的固定底价豁免）；
+> 新增 `modelCostMinTokens = 2000`，低于该 token 数的请求**只扣余额、不记账**
+> （不建条目、不刷 `LastSeen`），否则 `max_tokens=5` 的短探测会长期污染排序；
+> `pick.go` 的 `weighted.cost1k` 改名 `costReq`，tier 2 内按 per-req 升序。
+>
+> 迁移语义是这批最容易踩的地方：老 `state.json` 只有 `cost_per_1k`
+> （`TotalRequests == 0`），`costPerReq()` / `costTier()` 一律沿用旧的
+> `CostPer1k` + `Samples` 结论，**绝不把 `CostPerReq` 置 0**——否则升级瞬间全池按
+> 0 成本挤进 tier 0。恢复侧同时剔除负累计量，落盘侧写现算的 `per1k()`。
+> 逐条见 `deploy/workbuddy-panel-ref.txt` 第二十九批。
+
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
 
