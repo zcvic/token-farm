@@ -153,9 +153,10 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批、第五批、
 第七批、第十二批、第十四批、第十六批、第十九批、第二十二批段落里；Web 搜索的
 协议与错误语义单独写在 [web-search-passthrough.md](web-search-passthrough.md)。
-`a83d93738b` 之后的同步按**上游父链逐个提交**推进（第二十三批起，当前到
-`93395e16f1`），每批在 `deploy/workbuddy-panel-ref.txt` 里各占一个带哈希锚点的
-段落，进度以该文件最后一行哈希为准。
+`a83d93738b` 之后的同步按**上游父链逐个提交**推进（第二十三批起，已扫到
+`93395e16f1`），每批在 `deploy/workbuddy-panel-ref.txt` 里各占一个段落：取到东西的
+批次以 40 位哈希行收尾，进度以**最后一个哈希行**为准；判定不取的批次只写提交号与
+理由，不追加哈希（避免把没同步的提交记成已同步）。
 
 > **面板批（2026-11-19，`d780cab` → `2b6b386`）**：这一批是 panel / Web /
 > Docker 改动，没有 Go `upstream/` 改动。落点与三处有意偏离：
