@@ -398,13 +398,13 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
         if isinstance(item, dict) and item.get('uid'):
             pool[str(item['uid'])] = item
 
+    dead = _session_dead_cached()
     for a in accounts:
         p = pool.get(a['uid'])
         a['in_pool'] = p is not None
         # 登录态失效（issue #490）：单独给一个布尔字段，前端据此渲染「需重登」。
         # 不能只塞中文 invalid_reason —— 前端原来只在「未加载」分支用它，
         # 池内账号看到的是「在线」+ 积分空白的误导组合。
-        dead = _session_dead_cached()
         a['needs_relogin'] = a['uid'] in dead
         if a['needs_relogin']:
             a['credits'] = None
