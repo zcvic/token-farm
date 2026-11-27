@@ -132,7 +132,9 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 >   整条数据面不存在。两个 README 提交（加代理广告位）与本项目无关。
 
 **`ithtelab/workbuddy-manager`**（Go 网关 + 面板一体，本文简称「上游 manager 仓」）
-已核对的范围是 `80b4b21`（v2.11.10）→ `a83d93738b`：
+已核对的范围是 `80b4b21`（v2.11.10）→ `93395e16f1`（v2.11.23 之后的未发版段）。
+下表是 `80b4b21` → `a83d93738b` 这一段的分批汇总，更晚的批次（第二十三批起）
+以表后的 `>` 段逐批记录：
 
 | 区间 | 取到的能力 |
 |---|---|
@@ -151,6 +153,9 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 「未取原因」记录在 `deploy/workbuddy-panel-ref.txt` 的第二批、第四批、第五批、
 第七批、第十二批、第十四批、第十六批、第十九批、第二十二批段落里；Web 搜索的
 协议与错误语义单独写在 [web-search-passthrough.md](web-search-passthrough.md)。
+`a83d93738b` 之后的同步按**上游父链逐个提交**推进（第二十三批起，当前到
+`93395e16f1`），每批在 `deploy/workbuddy-panel-ref.txt` 里各占一个带哈希锚点的
+段落，进度以该文件最后一行哈希为准。
 
 > **面板批（2026-11-19，`d780cab` → `2b6b386`）**：这一批是 panel / Web /
 > Docker 改动，没有 Go `upstream/` 改动。落点与三处有意偏离：
