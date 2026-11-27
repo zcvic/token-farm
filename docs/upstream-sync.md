@@ -364,6 +364,30 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 > 测试：新增 `server/tests/test_session_dead.py` 8 项，`web/lib/account-status.test.mjs`
 > 补两项。
 
+> **保活闸门批（2026-11-27，`aac5cff8d0` → `9290eeac39`，补丁 0058）**：1 个提交
+> （issue #489）。refresh 响应实测 `expiresIn=5184000` 秒（60 天），而旧行为每天把
+> 全池刷一遍——每个令牌一生要打 60 倍于必要的刷新请求，30+ 个号挤在同一分钟，正是
+> 上游判「过频」的诱因；429 还会被记成 `failed` 并推进 session_dead 计数，三轮就能
+> 把健康号禁用。
+>
+> 本仓早就有 selective 窗口闸门（G-P1-15 / `764293b8` 的
+> `Config.KeepaliveRefreshWindow` + `a.NeedsRefresh(window)`），所以只补增量：
+> `auth.ExpiresAtValue()` 加锁访问器（锁外直读 `ExpiresAt` 是数据竞争，且必须能区分
+> 「到期未知」与「已过期」——`NeedsRefresh` 对两者都为真）；
+> `scheduler.keepaliveRefreshDue()` 三条判据（临期 / 到期未知且距上次刷新 ≥24h /
+> 距上次刷新 ≥14 天保证 RT 轮换）；「上次刷新时刻」用 auth 文件 mtime 近似
+> （`authLastWrite`，不新增会被任一条写路径静默丢掉的 `last_refresh` 字段）；
+> 账号间基础间隔 0 → 2 秒；失败分支先判 `ErrSoftRate`，记 `skipped` 而不算失败、
+> 不进 session_dead 计数。
+>
+> 两处有意偏离：手动「全部保活」仍是**全量**（`RunKeepaliveNow` 传 `selective=false`，
+> 人点了按钮就是要立刻全刷，也是运维唯一明确的强制轮换手段）；闸门跳过的号记
+> `not_due` 而不是 `skipped`，否则日志看不出是窗口在起作用还是池里没号。
+> 上游把 56 行的 `keepalive_window_test.go` 整份换成 185 行并全改调 `RunKeepaliveNow`，
+> 本仓保留原文件的两条 `NeedsRefresh` 锚点、新增 8 条闸门用例另放
+> `keepalive_due_test.go`（统一走 `runKeepalive(ctx, true)`）。
+> 逐条见 `deploy/workbuddy-panel-ref.txt` 第二十八批。
+
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
 

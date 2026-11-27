@@ -1261,3 +1261,63 @@ e846aa27b6b7a4ee0531c7cb8d7d9ee8865b3dd4
 #      上一次基线：e846aa27b6b7a4ee0531c7cb8d7d9ee8865b3dd4
 79d6977d4237904405be67895ce7b969149a9da2
 
+# ---- 2026-11 第二十八批：上游 manager aac5cff8d0 → 9290eeac39（1 个非 merge 提交）----
+#      注：按**父链**补齐，不是按记录顺序。链上是
+#      423d697acb → 79d6977d42 → aac5cff8d0 → 9290eeac39 → 16e16e6c4f →
+#      e846aa27b6；第二十五/二十六/二十七批先按价值做了 aac5cff8d0 /
+#      e846aa27b6 / 79d6977d42，本批回到 9290eeac39 补上链中间那一格。
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 1 项：保活只刷临近到期的号，补 RT 轮换兜底与 429 不杀号（#489 / 补丁 0058）。
+#      已取（按本仓结构重写）：
+#        · 9290eeac39 保活从「每轮全池刷新」改成「按需刷新」。
+#          现场：refresh 响应实测 expiresIn=5184000 秒（60 天），旧行为每天把全池号
+#          刷一遍 —— 每个令牌一生要打 60 倍于必要的刷新请求，30+ 个号集中在同一分钟，
+#          正是上游判「过频」的诱因；刷新失败还会被记成 failed 甚至推进 session_dead
+#          计数（429 不是账号故障，三轮 429 就能把健康号禁用）。
+#          **本仓早就有 selective 窗口闸门**（G-P1-15 / 764293b8 的
+#          Config.KeepaliveRefreshWindow + a.NeedsRefresh(window)），所以本批只补
+#          真正缺的增量，不重复引入窗口过滤：
+#            - internal/auth/auth.go 新增 ExpiresAtValue()：与 AccessTokenValue /
+#              DomainValue / RefreshTokenValue 同族的加锁访问器。RefreshToken 在
+#              a.mu 内写回 ExpiresAt，闸门在锁外直读就是数据竞争；而且必须能区分
+#              「到期未知（<=0）」与「已过期」，NeedsRefresh 对两者都返回 true。
+#            - internal/scheduler/scheduler.go 新增三条判据的 keepaliveRefreshDue
+#              （三条任一成立即刷）：
+#                1. AT 剩余有效期 < 窗口（含已过期）；
+#                2. 到期未知（ExpiresAt<=0）且距上次刷新 >= 24h；
+#                3. 距上次刷新 >= 14 天（保证 refresh-token 至少两周轮换一次）。
+#              「上次刷新时刻」用 auth 文件 mtime 近似（authLastWrite）：上游
+#              SaveAtomic 与管理端 write_auth_file / tencent.update_auth_tokens 都是
+#              整份重写该文件，任何一次刷新都会前移 mtime；不新增 last_refresh 字段，
+#              因为它在任一条写路径上都可能被静默丢掉。FilePath 为空或 stat 失败时
+#              只保留判据 1（宁可少刷，也不退回每轮全刷）。
+#              常量 keepaliveRefreshWindow=72h 只作零值 Config 的运行期回落值 ——
+#              配置了正值就**原样采用**（运维配 24h 想要更勤地刷，不该被常量改宽）。
+#            - 循环体把 selective && window > 0 && !a.NeedsRefresh(window) 换成
+#              selective && !keepaliveRefreshDue(a, window, now)；账号间基础间隔从
+#              accountGap(ctx, 0) 提到 2 秒（刷的号少了，不必再贴着一秒一发）。
+#            - 刷新失败分支先判 upstream.ErrSoftRate（429 及其文案变体）：记 skipped、
+#              打一条「rate limited upstream, skip」，**不**算 failed、**不**推进
+#              session_dead 计数，也不进禁用判定。12153 的连续计数语义原样保留。
+#          本地偏离（有意）：
+#            - 手动「全部保活」仍然是**全量**刷新：RunKeepaliveNow 传 selective=false。
+#              上游 0058 把手动入口也一起过滤了，但那与本仓「人点了按钮就是要立刻全刷」
+#              的既有语义冲突，且会让运维失去一个明确的强制轮换手段。
+#            - 闸门跳过的号记 not_due（fresh++）而不是 skipped：日志里 skipped 与
+#              not_due 分开才能看出「只刷了 2 个号」是窗口在起作用还是池里本来没号。
+#            - 上游把 56 行的 keepalive_window_test.go 整份换成 185 行、并全部改调
+#              RunKeepaliveNow；本仓保留该文件原有的两条 NeedsRefresh 锚点（只改
+#              TestKeepaliveWindowConfigValidation 的注释：零值不再等于「不过滤」），
+#              新增的 8 条闸门用例另放 keepalive_due_test.go，统一走
+#              runKeepalive(ctx, true)（手动入口是全量，用它会把这批断言全部作废）。
+#          测试：新增 internal/scheduler/keepalive_due_test.go 8 项 —— 远期号不刷、
+#          手动保活仍全量、已过期号照刷、连续 429 不禁用、连续 12153 仍禁用、
+#          超过 14 天必刷、expiresAt=0 按 24h 兜底、无 FilePath 只按到期判据。
+#          另：refresh_race_test.go 里的 ExpiresAt=9999999999 用例**不用改** ——
+#          它走 RunKeepaliveNow（不过滤），这正是保留手动全量语义带来的好处。
+#      未取：无（该提交的其余改动是补丁文件本身与上游 dev/upstream-patches 目录，
+#            本仓没有那个目录；补丁内容已按上面逐条落进源码）。
+#      锚点提交：9290eeac39aa0caf4cc5a7cf4ef43aabfec17ce7（本批只同步这一个提交）
+#      上一次基线：aac5cff8d0bf5957ff3bbbeb8a7164bd018c26f8
+9290eeac39aa0caf4cc5a7cf4ef43aabfec17ce7
+

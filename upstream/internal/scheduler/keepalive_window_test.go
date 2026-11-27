@@ -47,10 +47,14 @@ func TestNeedsRefreshNoExpiryIsTrap(t *testing.T) {
 
 // TestKeepaliveWindowConfigValidation 窗口配置：空回落 168h，非法/<=0 fail fast。
 func TestKeepaliveWindowConfigValidation(t *testing.T) {
-	// 该测试只验证 scheduler 侧的窗口字段语义（0 = 不过滤），
+	// 该测试只验证 scheduler 侧**原样保留**配置值（不在 New 里改写），
 	// 配置校验在 internal/config 的 Normalize 里，见 config 包测试。
+	//
+	// 零值不再等于「不过滤」：keepaliveRefreshDue 会把 <=0 回落到内部 72h
+	// （见同目录 keepalive_due_test.go）。保留这条断言是为了锁住「New 不改写
+	// 配置」这一点，避免两处各有一套归一逻辑。
 	s := New(Config{KeepaliveRefreshWindow: 0})
 	if s.cfg.KeepaliveRefreshWindow != 0 {
-		t.Fatalf("窗口 = %v，期望 0（不过滤）", s.cfg.KeepaliveRefreshWindow)
+		t.Fatalf("窗口 = %v，期望 0（New 不改写配置）", s.cfg.KeepaliveRefreshWindow)
 	}
 }
