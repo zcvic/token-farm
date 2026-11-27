@@ -162,12 +162,17 @@ class GatewayPassthroughTest(unittest.TestCase):
         #   · platforms/lingxi/adapter.py：上一条的**收尾判定器**——非流式出口
         #     用 `StreamTranslator.has_tool_calls` 区分「只有工具调用、没有正文」
         #     与真正的空响应，不改写内容；翻译仍全在 chat.py。
+        #   · platforms/raccoon/client.py：小浣熊要「强制流式 + 本地聚合」——
+        #     客户端要非流式时聚合必须把 `delta.tool_calls` 收进
+        #     `message.tool_calls`，否则工具调用会静默丢失。只作用于 `raccoon/`。
         allow = {'routers/anthropic.py', 'routers/responses.py', 'services/tencent.py',
                  'platforms/trae/chat.py', 'platforms/trae/client.py',
                  'platforms/trae/text_tools.py',
                  'platforms/minimax/translate.py', 'platforms/minimax/adapter.py',
                  'platforms/cline/client.py',
-                 'platforms/lingxi/chat.py', 'platforms/lingxi/adapter.py'}
+                 'platforms/lingxi/chat.py', 'platforms/lingxi/adapter.py',
+                 'platforms/raccoon/client.py'}
+
         root = Path(__file__).resolve().parents[2] / 'server'
         # Qoder 的内置网关是**第三方源码副本**（vendor 自 qoder2api-hub），它的
         # `tool_calls` 处理属于 Qoder 私有协议 ↔ OpenAI 的翻译层，与 trae/chat.py

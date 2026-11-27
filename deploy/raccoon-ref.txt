@@ -1,0 +1,148 @@
+# 已人工核对过的小浣熊（Raccoon / 商汤）协议事实 —— 本仓库 raccoon 适配层的参考
+#
+# 参考仓（都只作**协议事实来源**，本仓库没有 vendor 任何源码，也没有共享历史）：
+#
+#   · https://github.com/haoxinyu1/xiaohuanxiong2api （协议主体：Go）
+#       client.go / refresh.go / balance.go / catalog.go / checkin.go /
+#       chat.go / oauth.go / jwt.go
+#   · https://github.com/flying-dragon-ai/pi-provider-xhx
+#       stream.ts / constants.ts（v1/v2 差异、OAuth、思考档位）
+#   · https://github.com/zhlcba/dsh-raccoon-connect
+#       upstream-protocol.md（实测头、目录、对话、刷新、识图、风控）
+#   · https://github.com/RobbsLuo/Coding2API （网页 JWT 交叉核对）
+#   · https://github.com/xxhhlk/raccoon2api
+#       仓库只有 README.md / LICENSE，没有源码；只作协议摘要参考。
+#
+# 形态：原生重写（httpx + 标准库，不新增依赖）。落点：
+#   server/platforms/raccoon/{constants,store,client,catalog,adapter,desktop}.py
+#
+# 记录方式与 deploy/cline-ref.txt、deploy/trae-ref.txt 同一约定：一次同步写一段；
+# 未核对的提交号不要提前写进来。
+#
+# ---- 2026-11 首次接入
+#      基线：各参考仓首次接入时的 HEAD（具体提交号待补）。
+#
+#      上游与鉴权：
+#        · 目标站点 https://xiaohuanxiong.com（网页 / 桌面客户端共用后端）。
+#        · 鉴权头 `Authorization: Bearer <access_token>`；access 是 JWT，
+#          约 3 小时；refresh 也是 JWT，约 30 天。
+#        · 常用头：Content-Type、Accept、User-Agent（Chrome 131 Windows）、
+#          X-Org-Code（个人版空串）、X-Raccoon-Language: zh。
+#          桌面端接口（每日积分触发）另要 X-Client-Platform /
+#          X-Client-Version / X-Client-Device-ID；普通对话不带，少带指纹。
+#          → constants、client._headers
+#        · 鉴权失败：401 {"code":200003,"message":"authorization_verify_error"}；
+#          refresh 旧 token 重放：400 {"code":200822,"message":"refresh_conflict"}；
+#          授权码失效：业务码 200035。
+#          → client.classify、constants.AUTH_CODES / LOGIN_EXPIRED_CODES
+#
+#      刷新（一次性轮换）：
+#        · POST /api/web/auth/v1/refresh
+#            body 只有 {"refresh_token":"<jwt>"}，不带 Authorization；
+#            参数名写错回 100002 params_invalid_error。
+#          → 200 {code:0,data:{access_token,refresh_token}}。
+#        · access 与 refresh **一起轮换**，旧 refresh 单次使用；上游也可能
+#          不回 refresh_token（此时沿用旧值）。
+#        · 刷新成功必须**先原子落盘再使用**；同一账号的刷新用账号级锁串行。
+#          → adapter._token_for、store.patch_account
+#
+#      模型目录：
+#        · GET /api/web/llm/v2/model_catalog
+#          根上有 data 就用 data；**平铺所有 categories[].models[]**，不按
+#          category.type 过滤（参考实现口径）；同名模型首次出现者胜；
+#          `raccoon-work` 是应用内建 agent 路由位，跳过。
+#        · 模型 id 在 `name`（也兼容 model_name）；展示名优先
+#          display_description（截 64）> description > name。
+#        · context_window / max_tokens 先看顶层再看 params；
+#          billing_multiplier / billing_effective_multiplier / billing_status；
+#          billing_effective_multiplier=0 为限免。
+#        · params.raccoon_thinking = {supported, can_disable,
+#          display_levels[].value, default_level}；上游思考字段同名。
+#        · **识图标签不可靠**：sn-glm-5-3 标 vision 实际丢图；
+#          sn-glm-5-3-flash / sn-deepseek-v4-1-flash 无标签却能识图。
+#          已实测模型以 constants.MEASURED_VISION 为准，未测过才回退标签。
+#          → client.parse_catalog、catalog.normalize
+#        · **未知模型上游静默回落默认模型并返回 200**：必须本地按目录校验，
+#          并在首帧比对 `model` 回显。
+#          → adapter._assert_known_model、adapter._chat_once 的 relay
+#
+#      对话：
+#        · POST /api/web/llm/v2/chat/completions（v1 同路径在 /llm/v1）。
+#          标准 OpenAI Chat Completions 形状；流式是真增量 SSE，末尾
+#          `data: [DONE]`；思考在 choices[].delta.reasoning_content；
+#          非流式在 choices[0].message。
+#        · v1 **流式**实测报 invalid upstream stream response；v1 非流式可用。
+#          v2 非官网客户端可能被风控 429 code 200108。
+#          策略：流式先走 v2；非鉴权类失败退回 v1 非流式，再由
+#          synthesize_stream 合成 OpenAI chunk。非流式先 v2、失败再 v1。
+#          → client.chat / open_chat / synthesize_stream、adapter._complete
+#        · `reasoning_effort` 只做半套校验（垃圾值也可能 200），默认剥离；
+#          控制思考请用 raccoon_thinking。
+#        · `verbose: true` 是官方客户端会带的字段；max_tokens 缺省补 16384
+#          （留太小会得到「只有思考没有正文」）。客户端只发 OpenAI 新字段
+#          max_completion_tokens 时沿用它的值。
+#          → client.chat_body
+#        · 并发上限约 5；第 6 个回 429 user_model_rate_limited。
+#          账号×模型频率窗口恢复中位约 25 分钟；200108 按 25 分钟冷却。
+#          → constants.RISK_CONTROL_COOLDOWN、adapter._cool_down
+#
+#      积分 / 签到：
+#        · 余额：GET /api/web/points/v1/balance
+#            data.{available_points,daily_points,monthly_points,
+#                  reward_points,topup_points}（数字或字符串）。
+#          → client.balance、adapter.credits
+#        · 账单：GET /api/web/points/v1/bills?paging.limit=&paging.offset=0
+#            列表在 data.items[]；字段 bill_id/client_type/event_name/
+#            biz_type/points/created_at。
+#          → client.bills
+#        · 每日积分没有独立领取接口：桌面端打开时读一次
+#            GET /api/web/office/v3/setting_info
+#          服务端就会发放；响应 data.point_grant_popups /
+#          data.point_grant_toast 是提示。
+#          → client.claim_daily_grant
+#        · 签到判定：先触发发放，再查 bills；只汇总 points > 0 且
+#          created_at 属于北京时间当天（01:30 前按前一天宽限）的条目。
+#          → client.bill_is_today / daily_reward、adapter.checkin
+#        · 计费口径：每笔请求扣 1 积分（与 token 无关）；每日 00:00 发 300 分
+#          （7 天有效）。
+#
+#      账号导入：
+#        · 桌面客户端登录态：%USERPROFILE%\.box-agent\config\auth.json
+#          （BOX_AGENT_CONFIG_DIR 可覆盖），字段 access_token / refresh_token /
+#          office_identity / office_org_name / office_org_role；也兼容
+#          token / auth_token 作为 access 别名。
+#          → desktop.read_accounts、adapter.import_from_desktop
+#        · 手工导入支持裸 JWT、Bearer 前缀、整段 Cookie 里的 xhx_token /
+#          access_token。导入不联网，首次刷新 / 探活在 refresh_account 或第一次
+#          对话时发生。
+#        · uid 派生优先 JWT 里的 user_id / userId / uid / userID / sub；
+#          拿不到才退回凭证哈希。不能用 refresh token 哈希：它每次轮换都会变。
+#          → store.derive_uid
+#
+#      设备绑定（记录，不在本轮实现）：
+#        · POST /api/web/auth/v1/devices_current_bind；
+#          user_info.trusted_device.device_bind_state 区分 unbound（可绑一次
+#          自愈）与 suspicious（需网页重登）；已绑会话重复 bind 会永久锁死；
+#          派生 device_id 必须 ≤64 字符。
+#
+#      OAuth（记录，不在本轮实现；账户页用「手工导入 / 本机导入」）：
+#        · GET /code/authorize?login_source=desktop&desktop_callback=loopback
+#            &appname=办公小浣熊客户端&state=<64 hex>&redirect=http://127.0.0.1:<port>/auth/callback
+#        · POST /api/web/auth/v1/login_with_authorization_code
+#            body {"authorization_code": code}
+#          → data.{access_token,refresh_token,office_identity,
+#                  office_org_name,office_org_role}
+#        · 桌面回调 scheme：office-raccoon://auth/callback
+#
+#      有意不跟：
+#        · 不引入参考仓的 Go 运行时 / 账号池 / 面板；选号 / 冷却 / 亲和按
+#          token-farm 口径。
+#        · 不实现网页扫码登录：OAuth 回环回调需要常驻回调端口，面板已有手工
+#          导入与本机客户端导入两条路径。
+#        · 不做设备绑定自愈：重复 bind 会永久锁死，风险高于收益；需要时由用户
+#          在网页重新登录。
+#        · 不按目录的 vision 标签决定是否接受图片（标签实测两个方向都错过）。
+#
+# ---- 同类实现（阅读用，不引入代码）----
+#   · 官方网页 / 桌面客户端的 /api/web/llm/v2 与 /api/web/points/v1 是协议
+#     原始来源；版本号与客户端头按官方客户端抄。

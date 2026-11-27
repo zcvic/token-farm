@@ -29,6 +29,10 @@
 （抓包导入，没有扫码登录），对话端点固定返回 SSE，模型表是内置快照而不是
 在线目录，上游不返回 usage（按字符 ÷ 1.7 估算）。
 
+**商汤小浣熊（Raccoon）**（`raccoon/` 前缀，详见 §16）：JWT access + 一次性
+refresh，模型目录在线拉取，对话是标准 OpenAI Chat Completions；签到没有独立
+领取接口，靠读一次桌面端 `setting_info` 触发后核对积分账单。
+
 ---
 
 ## 1. 目标与非目标
@@ -208,6 +212,14 @@ server/platforms/
     chat.py              # 请求体归一 + SSE → OpenAI chunk / chat.completion
     client.py            # 三步握手 / run 缓存 / 余额 / 任务 / 探活
     adapter.py           # 实现 PlatformAdapter：选号 / 冷却 / 签到 / 余额 / 对话
+  raccoon/
+    __init__.py
+    constants.py         # 站点 / 路径 / 请求头 / 令牌寿命 / 内置模型快照
+    store.py             # JWT 账号文件（原子写 + 文件锁 + 脱敏 + 设备号）
+    catalog.py           # 在线目录归一 + 内置快照兜底
+    client.py            # 刷新 / 目录 / 对话 / 积分 / 账单 / 每日发放触发
+    desktop.py           # 从本机 `.box-agent/config/auth.json` 读登录态（只读）
+    adapter.py           # 实现 PlatformAdapter：选号 / 轮换 / 签到 / 积分 / 对话
   server/services/wbforward.py  # WorkBuddy 反代传输层（网关直连与组合成员共用）
 ```
 
@@ -684,6 +696,10 @@ DuMate 的每日签到奖励由服务端 00:00 自动发放，手动签到时 `h
   `model_id`（`deepseek-v4.1-flash` / `GLM-5.3` / `kimi-k3` / `plan_pro` …），
   只剥 `wps-lingxi/` / `lingxi/` 前缀；`default` 落到默认模型，未收录的名字
   原样透传。
+- `raccoon/<model>` 走商汤小浣熊（单区域，JWT 账号池）。目录里的 id 就是上游
+  `name`（`sn-glm-5-3` / `sn-kimi-k3` / `sn-deepseek-v4-1-flash` …）；`default`
+  落到内置默认模型，未收录的名字在本地就拒绝（上游会对未知模型静默回落默认
+  模型并返回 200）。
 - 其他模型名 → 原样走 WorkBuddy（与今天完全一致）。
 - `/v1/models` 会把 Trae 的模型**按区域**并入列表（`traecn/` / `traecom/`），
   `owned_by` 标成 `trae`、`realm` 标出所属区域，客户端据此区分来源。
@@ -905,6 +921,8 @@ data/platforms/trae/accounts/<uid>.json
 | Kilo | `platforms/kilo/` | `kl_` | `token`（一年期，无 refresh） |
 | Cline | `platforms/cline/` | `cl_` | `refreshToken`（+ 缓存的 `token`） |
 | 豆包 | `platforms/doubao/` | `db_` | `cookie`（`sessionid` 为稳定标识） |
+| 灵犀 | `platforms/lingxi/` | `lx_` | `cookie`（`wps_sid`） |
+| 商汤小浣熊 | `platforms/raccoon/` | `rc_` | `token` / `refreshToken`（两个 JWT） |
 
 三个新平台（Discovery / Kilo / Cline）与豆包都**没有** `desktopPath`：它们不读也
 不回写本机客户端，`import_from_desktop` 不存在，管理端的「从本机导入」入口不会
@@ -983,6 +1001,7 @@ access token、不能刷新，也没有 userId，导入时按 token 摘要生成
 | Qoder | `expiredAt`（网关 `expiresAt`） | 6 小时 | jobToken 约 24 小时，按天判会让刚签发的令牌立刻进窗口 |
 | MiniMax Code | **refreshToken** `refreshExpiredAt` | 3 天 | access token 只有约 1 小时，由适配器按需刷新；拿它判会每小时轮换一遍一次性 refresh token |
 | Cline | **refreshToken** `refreshExpiredAt` | 3 天 | 与 MiniMax 同理：access token 约 10 分钟且由 `_token_for` 按需轮换；refresh token 一次性，按 access 判会反复轮换 |
+| 商汤小浣熊 | **refreshToken** `refreshExpiredAt` | 3 天 | access token 约 3 小时且由 `_token_for` 按需轮换；refresh token 一次性、约 30 天，按 access 判会每小时轮换一遍 |
 
 三条共同口径：
 
@@ -1041,6 +1060,7 @@ Cline 是同一个问题、同一个做法：access token 约 10 分钟且由适
 | Cline | 无 | 无 | 有（refresh token） | 余额不足由 402 `insufficient_credits` 表达 |
 | 豆包 | 有 | 有（额度汇总） | 无 | Cookie 无 refresh；额度来自 `window_limits` 汇总，401 换号、429/5xx 按设置冷却 |
 | 灵犀 | 有（每日签到） | 有（智点 + 赠送批次） | 无 | Cookie 无 refresh；余额来自 `credits/balance`，15 天内到期批次单列；401 换号、429/5xx 按设置冷却 |
+| 商汤小浣熊 | 有（触发每日积分） | 有（积分 + 明细） | 有（一次性 refresh） | 余额来自 `points/v1/balance`；签到靠桌面端 `setting_info` 触发后核对账单；401 换号、200108 按 25 分钟冷却 |
 
 Discovery 的「额度」在界面上是**三态**，不是数字：`ok` / `rate_limited` /
 `quota_exhausted`。把 `429 quota_exceeded` 当成普通限流（几十秒冷却）会让已经
@@ -1923,3 +1943,143 @@ run 生命周期（`running → completed`）后才结算，不上报的 run 永
 - **图片输入**：`content` 只接受字符串，分段里的图片会被丢弃（日志记数量），
   模型条目仍如实标 `attachment` 供界面展示。
 - **扫码登录**：见 §15.1。
+
+---
+
+## 16. 商汤小浣熊（Raccoon）
+
+原生实现，包在 `server/platforms/raccoon/`，不引入第三方运行时，也没有 vendor
+任何参考仓源码。小浣熊（`xiaohuanxiong.com`，商汤「办公小浣熊」）没有开放平台
+API，协议事实来自其网页 / 桌面客户端共用的私有后端，核对自四份社区实现：
+`haoxinyu1/xiaohuanxiong2api`（协议主体，Go）、
+`flying-dragon-ai/pi-provider-xhx`（v1 / v2 差异、OAuth、思考档位）、
+`zhlcba/dsh-raccoon-connect`（实测头、目录、对话、刷新、识图、风控）与
+`RobbsLuo/Coding2API`（网页 JWT 交叉核对）。取用范围与「有意不跟」见
+`deploy/raccoon-ref.txt`。
+
+### 16.1 凭据与导入
+
+凭证是**两个 JWT**：access token（约 3 小时）与 refresh token（约 30 天）。
+refresh token 是**一次性轮换**的——上游换发后旧的立即作废，所以刷新成功必须
+**先原子落盘再使用**（§16.2）。
+
+- uid 派生优先读 JWT 里的 `user_id` / `userId` / `uid` / `userID` / `sub`，
+  前缀 `rc_`；拿不到才退回凭证哈希。**不能用 refresh token 哈希**：它每次
+  轮换都会变，会把同一个账号拆成多条。
+- 面板「手工导入」接受裸 JWT、`Bearer` 前缀、整段 Cookie（里面的 `xhx_token`
+  / `access_token` 会被抽出来），也支持 `{account: {...}}` 与扁平对象两种形状。
+  导入阶段**不联网**，首次刷新 / 探活发生在 `refresh_account` 或第一次对话时。
+- **本机客户端一键导入**：只读 `%USERPROFILE%\.box-agent\config\auth.json`
+  （`BOX_AGENT_CONFIG_DIR` 可覆盖），兼容嵌套 `auth` / `tokens` 与 `token` /
+  `auth_token` 作为 access 别名；不回写客户端。`import_from_desktop` 因此
+  存在，「从本机导入」入口会出现。
+- 凭据明文只落盘（`data/platforms/raccoon/accounts/<uid>.json`，文件锁 +
+  原子替换 + 0600），接口只回摘要与 `has_token` / `has_refresh_token`。
+- 请求头默认只带 `Content-Type` / `Accept` / `User-Agent`（Chrome 131
+  Windows）/ `X-Org-Code`（个人版空）/ `X-Raccoon-Language: zh`，少带指纹；
+  桌面端专用接口（每日积分触发）另补 `X-Client-Platform` /
+  `X-Client-Version` / `X-Client-Device-ID`。
+
+### 16.2 令牌轮换
+
+`_token_for` 是唯一的取 token 入口：
+
+- 内存缓存 access token 过期时刻（`exp`），按 5 分钟余量提前刷新；refresh
+  token 永远以磁盘为准，因为它一次性、轮换后内存副本立刻过期。
+- 刷新由**账号级锁**串行，避免并发请求拿同一个旧 refresh 去换两次。
+- `POST /api/web/auth/v1/refresh`，body 只有 `{"refresh_token":"<jwt>"}`，
+  不带 `Authorization`。响应 `{code:0,data:{access_token,refresh_token}}`；
+  上游可能不回 `refresh_token`，此时沿用旧值。
+- **先落盘再使用**：把新 access / refresh 与到期时间写回账号文件成功后才更新
+  内存并返回。进程崩在中间时，至少新的 refresh 已在文件里，不会把账号永久
+  踢下线。
+- 刷新失败（非 401）先冷却一段时间（`REFRESH_FAIL_COOLDOWN`），避免上游抖动
+  时每个请求都去轮换一次性 token、放大丢链窗口；401 则标记登录失效。
+
+巡检（§6.2）看的是 **refresh token 的到期时间**，不是 access：access 只有约
+3 小时且由 `_token_for` 按需换，拿它当判据会每小时轮换一遍一次性 refresh。
+
+### 16.3 对话协议与端点降级
+
+对话是标准 OpenAI Chat Completions 形状，路径 `POST /api/web/llm/v2/chat/completions`
+（v1 同路径在 `/llm/v1`）。流式是真增量 SSE，末尾 `data: [DONE]`，思考在
+`choices[].delta.reasoning_content`；非流式在 `choices[0].message`。
+
+参考实现与真机抓包共同确认的三条事实决定了降级策略：
+
+| 端点 | 流式 | 非流式 |
+| --- | --- | --- |
+| v2 | 官方客户端路径，最完整；非官网客户端偶被风控 `429 code 200108` | 可用 |
+| v1 | 实测报 `invalid upstream stream response` | 可用 |
+
+- 客户端要流式：先走 v2 流式；非鉴权类失败（401/402/403 除外）退回 v1
+  **非流式**，再由 `synthesize_stream` 合成 OpenAI chunk——客户端仍然拿到 SSE，
+  只是正文一次性到达。
+- 非流式请求：先 v2、失败再 v1，不合成。
+- **未知模型**：上游会**静默回落默认模型并返回 200**。所以本地先按目录校验
+  （`_assert_known_model`），并在首帧比对上游回显的 `model`：不一致判
+  `model_fallback`（502），绝不把「默认模型的回答」当成用户请求的模型。
+- 请求体归一（`chat_body`）：`reasoning_effort` 只做半套校验（垃圾值也可能
+  200），默认剥离；控制思考用 `raccoon_thinking`；`verbose: true` 是官方
+  客户端会带的字段；`max_tokens` 缺省补 16384（太小会得到「只有思考没有
+  正文」），客户端只发 OpenAI 新字段 `max_completion_tokens` 时沿用它的预算。
+
+### 16.4 模型目录
+
+在线目录是 `GET /api/web/llm/v2/model_catalog`：
+
+- 根上有 `data` 就用 `data`；**平铺所有 `categories[].models[]`**，不按
+  `category.type == "chat"` 过滤（参考实现口径）；同名模型首次出现者胜；
+  `raccoon-work` 是应用内建 agent 路由位，跳过。
+- 模型 id 在 `name`（也兼容 `model_name`）；展示名优先 `display_description`
+  （截 64）> `description` > `name`。
+- `context_window` / `max_tokens` 先看顶层再看 `params`；倍率字段
+  `billing_multiplier` / `billing_effective_multiplier` / `billing_status`，
+  `billing_effective_multiplier=0` 为限免。
+- 思考：`params.raccoon_thinking`（`supported` / `can_disable` /
+  `display_levels[].value` / `default_level`），上游思考字段同名。
+- **识图标签不可靠**：`sn-glm-5-3` 标 vision 实际丢图；`sn-glm-5-3-flash` /
+  `sn-deepseek-v4-1-flash` 无标签却能识图。已实测模型以
+  `constants.MEASURED_VISION` 为准，未测过才回退标签；只作展示参考，不用它
+  决定是否接受图片。
+
+读不到目录时回退 `constants.DEFAULT_MODELS`（逐字段抄自一次真实响应）。
+目录缓存与刷退避走 `catalog_ttl` / `catalog_retry_ttl` / `catalog_timeout`。
+
+### 16.5 签到与积分
+
+积分口径：每笔请求扣 1 积分（与 token 无关），每日 00:00 发 300 分（7 天
+有效）。
+
+- 余额 = `GET /api/web/points/v1/balance` →
+  `data.{available_points,daily_points,monthly_points,reward_points,topup_points}`
+  （数字或字符串，统一转数值）。`credits()` 返回 `credits` / `remain` /
+  `daily_points` / `monthly_points` 等，默认 60 秒缓存。
+- 明细 = `GET /api/web/points/v1/bills?paging.limit=&paging.offset=0`，列表在
+  `data.items[]`，字段 `bill_id/client_type/event_name/biz_type/points/created_at`。
+- **签到没有独立领取接口**：桌面客户端打开时读一次
+  `GET /api/web/office/v3/setting_info`，服务端就会把当天积分发下来；响应
+  `data.point_grant_popups` / `data.point_grant_toast` 是领取提示。所以
+  `checkin` 先触发发放、再查 `bills`，只汇总 `points > 0` 且 `created_at`
+  属于**北京时间当天**（01:30 前按前一天宽限）的条目。触发了提示才算「本次
+  发放」，积分早已在账上时按 `already` 处理，而不是失败。
+
+### 16.6 账号调度
+
+与 DuMate / Discovery / 灵犀同一套 `_NATIVE_POOL`：权重 SWRR + LRU、会话
+亲和（`session_affinity`）、单账号并发闸门、`max_accounts_try` 换号、
+`cooldown_429` / `cooldown_5xx` 冷却。**401 只换号、不冷却**；账号并发默认 2
+（上游约 5 并发，第 6 个回 `429 user_model_rate_limited`）。风控 `200108` 按
+约 25 分钟冷却；积分耗尽按 402 冻 10 分钟。`min_credits` / `credit_meter`
+不适用：上游每请求扣固定 1 分，账单延迟归账，无法按本次对话精确计量。
+
+### 16.7 有意不跟
+
+- **网页 OAuth 扫码登录**：回环回调需要常驻回调端口，面板已有「手工导入 +
+  本机客户端导入」两条路径。授权码换 token
+  （`POST /auth/v1/login_with_authorization_code`）已记录协议，但本轮不接。
+- **设备绑定自愈**：`POST /auth/v1/devices_current_bind` 在已绑会话上重复
+  bind 会永久锁死，风险高于收益；需要时由用户在网页重新登录。
+- **参考仓的 Go 运行时 / 账号池 / 面板**：选号 / 冷却 / 亲和全部按 token-farm
+  口径。
+- **按目录 vision 标签决定接受图片**：标签实测两个方向都错过。

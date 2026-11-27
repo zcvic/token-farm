@@ -80,8 +80,11 @@ export function seriesOfModelId(modelId: string): string {
   // 平台模型对外名带前缀（`trae/deepseek-v4.1-flash`），推导前先剥掉，
   // 否则每条都会落到「其他」。
   const bare = mid.includes('/') ? mid.slice(mid.indexOf('/') + 1) : mid;
+  // 商汤小浣熊的模型 id 又带一层 `sn-`（`sn-glm-5-3` / `sn-kimi-k3`）：剥掉
+  // 之后才能与其它平台的同名厂商归到同一个系列。
+  const name = bare.startsWith('sn-') ? bare.slice(3) : bare;
   for (const [prefixes, label] of SERIES_RULES) {
-    if (prefixes.some((prefix) => bare.startsWith(prefix))) return label;
+    if (prefixes.some((prefix) => name.startsWith(prefix))) return label;
   }
   return '其他';
 }

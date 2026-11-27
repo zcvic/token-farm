@@ -163,8 +163,9 @@ class QoderRenewTest(unittest.TestCase):
 class PlatformRenewersTest(unittest.TestCase):
     def test_qoder_is_in_the_shared_roster(self) -> None:
         names = [name for name, _label, _fn in renew._PLATFORM_RENEWERS]
-        self.assertEqual(names, ['trae', 'qoder', 'minimax', 'cline'],
-                         '巡检循环 / 计划任务 / 立即执行都从这里取平台清单')
+        self.assertEqual(
+            names, ['trae', 'qoder', 'minimax', 'cline', 'raccoon'],
+            '巡检循环 / 计划任务 / 立即执行都从这里取平台清单')
 
     def test_every_renewer_is_async(self) -> None:
         """清单里的函数必须都能 `await`：循环里直接 `await runner(...)`。"""

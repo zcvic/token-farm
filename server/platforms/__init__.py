@@ -38,6 +38,10 @@
     `lingxi/` 为前缀。凭证是**网页 Cookie**（`wps_sid`，抓包导入，没有扫码
     登录）。一次对话是「建会话 → 领 run → SSE 对话」三步握手；正文在
     `choices[].text`、没有 `[DONE]`，适配器内部翻译成 OpenAI chunk。
+  · 商汤小浣熊（raccoon）—— 原生实现（xiaohuanxiong.com），单区域平台，
+    模型名以 `raccoon/` 为前缀。凭证是 JWT（access + **一次性 refresh**），
+    对话是 OpenAI Chat Completions；目录在线拉取，签到靠触发桌面端
+    `setting_info` 后按积分账单核对。
   · 组合（combo）—— **虚拟平台**：没有账号，只把 `combo/<name>` 按权重
     分发给上面这些真实平台。因此不在界面里露出（`ui_visible=False`）。
 """
@@ -59,6 +63,7 @@ from .kilo import adapter as kilo_adapter
 from .cline import adapter as cline_adapter
 from .doubao import adapter as doubao_adapter
 from .lingxi import adapter as lingxi_adapter
+from .raccoon import adapter as raccoon_adapter
 from .combo import adapter as combo_adapter
 
 # 注册内置平台。放在 import 之后而不是模块顶层逐个 register，是为了让
@@ -74,6 +79,7 @@ register(kilo_adapter)
 register(cline_adapter)
 register(doubao_adapter)
 register(lingxi_adapter)
+register(raccoon_adapter)
 register(combo_adapter)
 
 __all__ = [

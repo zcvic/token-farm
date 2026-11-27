@@ -230,6 +230,10 @@ _DOUBAO = _NATIVE_POOL - {'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout'}
 # `credit_meter` 是每请求实扣积分口径（见 config.LINGXI_CREDIT_METER）：灵犀
 # 必须靠网关上报 run 生命周期才会扣费，所以这个开关同时决定「是否计费」。
 _LINGXI = _NATIVE_POOL | {'credit_meter'}
+# 商汤小浣熊是原生选号 / 在线目录 / 签到 / 积分余额，与 Loomy 同一组策略；
+# 没有「保底积分」选号实现，也没有桌面端回写。`credit_meter` 不适用：小浣熊
+# 上游每笔请求扣 1 分，但账单延迟归账，无法按本次对话精确计量。
+_RACCOON = _NATIVE_POOL
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -245,6 +249,7 @@ _BY_PLATFORM: dict[str, frozenset[str]] = {
     'cline': _NATIVE_POOL,
     'doubao': _DOUBAO,
     'lingxi': _LINGXI,
+    'raccoon': _RACCOON,
     'combo': _COMBO,
 }
 

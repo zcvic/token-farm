@@ -135,6 +135,17 @@ class DefaultsTest(_DbCase):
             self.assertTrue(caps['credits_ttl'], name)
             self.assertFalse(caps['min_credits'], name)
             self.assertFalse(caps['desktop_sync'], name)
+        # 小浣熊与它们同组：原生选号 / 在线目录 / 积分余额 / 签到，一次性
+        # refresh token 由适配器按需轮换。`credit_meter` 不适用（每请求扣 1 分，
+        # 账单延迟归账），桌面端只读导入因此没有 `desktop_sync`。
+        raccoon = runtime_settings.capabilities('raccoon')
+        self.assertTrue(raccoon['max_accounts_try'])
+        self.assertTrue(raccoon['session_affinity'])
+        self.assertTrue(raccoon['catalog_timeout'])
+        self.assertTrue(raccoon['credits_ttl'])
+        self.assertFalse(raccoon['min_credits'])
+        self.assertFalse(raccoon['credit_meter'])
+        self.assertFalse(raccoon['desktop_sync'])
         # Qoder 的目录 / 冷却 / 换号都在内置网关里，适配器只做透传。
         self.assertFalse(qoder['catalog_ttl'])
         self.assertFalse(qoder['cooldown_429'])

@@ -416,6 +416,10 @@ def _cline_adapter():
     return _platform_adapter('cline')
 
 
+def _raccoon_adapter():
+    return _platform_adapter('raccoon')
+
+
 def _trae_expires_at(account: dict) -> int | None:
     """账号的 accessToken 到期时刻（epoch 秒）；解不出返回 None。"""
     from ..platforms.trae.client import parse_epoch
@@ -680,6 +684,57 @@ async def refresh_cline_all(force: bool = False, now: int | None = None) -> dict
     return stats
 
 
+async def refresh_raccoon_all(force: bool = False, now: int | None = None) -> dict:
+    """巡检一遍小浣熊账号并按需轮换 refresh token。
+
+    access token 约 3 小时，由适配器的 `_token_for` 在每次使用前按 5 分钟余量
+    自己换；巡检只看 **refresh token 的到期时间**（约 30 天），否则每小时都会
+    落在 access 的窗口里，等于每小时轮换一遍一次性 refresh token。
+
+    refresh token 是一次性轮换的：刷新成功必须由适配器先落盘再使用，所以这里
+    只调用 `refresh_account`，不绕过它直接打 `/auth/v1/refresh`。
+    """
+    stats = {'checked': 0, 'renewed': 0, 'failed': 0, 'skipped': 0}
+    adapter = _raccoon_adapter()
+    if adapter is None:
+        return stats
+    now_ts = int(time.time()) if now is None else int(now)
+    for account in adapter.list_accounts():
+        uid = str(account.get('uid') or '').strip()
+        if not uid:
+            continue
+        # 「仅签到」的号照常续期：它只是不参与对话，凭证必须保持活跃。
+        if account.get('disabled'):
+            stats['skipped'] += 1
+            continue
+        if not account.get('has_refresh_token'):
+            # 只有手工粘贴的 access token：没法续期，也不算故障（到期后用户
+            # 重新导入即可）。
+            stats['skipped'] += 1
+            continue
+        if not force:
+            expires = _parse_expiry(account.get('refreshExpiredAt'))
+            if expires is None:
+                # 解不出 refresh token 的寿命：不臆测，交给刷新计划与「刷新」按钮。
+                stats['skipped'] += 1
+                continue
+            if expires - now_ts > _MINIMAX_RENEW_BEFORE_SECONDS:
+                continue
+        stats['checked'] += 1
+        try:
+            await adapter.refresh_account(uid, force=True)
+        except Exception as exc:  # noqa: BLE001
+            _note_failure(f'raccoon/{uid}', err_text(exc))
+            stats['failed'] += 1
+            continue
+        stats['renewed'] += 1
+        _last_fail_log.pop(f'raccoon/{uid}', None)
+        logger.info('小浣熊 token 已续期: %s', uid)
+        _record({'uid': uid, 'nickname': str(account.get('nickname') or ''),
+                 'file': uid}, 1, 'token 自动续期成功（商汤小浣熊）')
+    return stats
+
+
 #: 平台账号的续期入口：`(平台名, 日志标签, 巡检函数)`。新增平台只加一行——
 #: 巡检循环、计划任务与「立即执行一次」都从这里遍历，避免三处各写一份清单。
 _PLATFORM_RENEWERS = (
@@ -687,6 +742,7 @@ _PLATFORM_RENEWERS = (
     ('qoder', 'Qoder', refresh_qoder_all),
     ('minimax', 'MiniMax Code', refresh_minimax_all),
     ('cline', 'Cline', refresh_cline_all),
+    ('raccoon', '商汤小浣熊', refresh_raccoon_all),
 )
 
 

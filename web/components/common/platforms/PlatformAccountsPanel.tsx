@@ -730,6 +730,8 @@ export function PlatformAccountsPanel({
       return;
     }
     let body: unknown;
+    // 以 `{` / `[` 开头却解析失败 = JSON 写坏了，不能当成 token 存进去。
+    const looksLikeJson = raw.startsWith('{') || raw.startsWith('[');
     try {
       body = JSON.parse(raw);
     } catch {
@@ -738,6 +740,11 @@ export function PlatformAccountsPanel({
       // 这个形状）。能力位来自后端，新增同类平台不用改这里。
       if (supportsCookieImport && raw.includes('=')) {
         body = {cookie: raw};
+      } else if (platform === 'raccoon' && !looksLikeJson) {
+        // 小浣熊的凭证是一对 JWT：裸 JWT / `Bearer ...` / 整段 Cookie 都按
+        // access token 提交，后端会自己清洗（refresh token 只支持 JSON 字段，
+        // 因为两条裸 JWT 无法从一段文本里无歧义地分开）。
+        body = {access_token: raw};
       } else {
         notify.err(t('platforms.importInvalid'));
         return;
@@ -1360,7 +1367,9 @@ export function PlatformAccountsPanel({
                 ? t('platforms.noAccountsDescDoubao')
                 : platform === 'lingxi'
                   ? t('platforms.noAccountsDescLingxi')
-                  : t('platforms.noAccountsDesc')}
+                  : platform === 'raccoon'
+                    ? t('platforms.noAccountsDescRaccoon')
+                    : t('platforms.noAccountsDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
             {/* 空态里给的是**这个平台真正能用**的入口：没有本机客户端可导入的
@@ -2326,7 +2335,9 @@ export function PlatformAccountsPanel({
                     ? t('platforms.importDescDoubao')
                     : platform === 'lingxi'
                       ? t('platforms.importDescLingxi')
-                      : t('platforms.importDesc')}
+                      : platform === 'raccoon'
+                        ? t('platforms.importDescRaccoon')
+                        : t('platforms.importDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
@@ -2347,7 +2358,9 @@ export function PlatformAccountsPanel({
                       ? t('platforms.importPlaceholderDoubao')
                       : platform === 'lingxi'
                         ? t('platforms.importPlaceholderLingxi')
-                        : t('platforms.importPlaceholder')}
+                        : platform === 'raccoon'
+                          ? t('platforms.importPlaceholderRaccoon')
+                          : t('platforms.importPlaceholder')}
                 className="field-sizing-fixed min-h-40 overflow-auto font-mono text-[11px]"
                 spellCheck={false}
                 autoFocus
