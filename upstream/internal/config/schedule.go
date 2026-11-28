@@ -54,9 +54,9 @@ type Schedule struct {
 	// 次日签到继续补——连登天数不会因此丢，只是分几天补齐。
 	// 负值 fail fast（与 KeepaliveRefreshWindow 同口径：不猜语义）。
 	MakeupCardsPerRound int `json:"makeup_cards_per_round"`
-	// KeepaliveRefreshWindow 周期保活只刷新「剩余有效期 <= 该窗口」的凭证（如 "168h"）。
+	// KeepaliveRefreshWindow 周期保活只刷新「剩余有效期 <= 该窗口」的凭证（如 "720h"）。
 	//
-	// 空 = 默认 168h（7 天）；非法或 <= 0 **fail fast**——一个写错的值（例如 "168"，
+	// 空 = 默认 720h（30 天）；非法或 <= 0 **fail fast**——一个写错的值（例如 "168"，
 	// 少写单位）会让保活全量刷新或全不刷新，两种都是静默错误。要「不过滤」请显式
 	// 配一个很大的值（如 "876000h"），不要用 0 表意：0 在运行期被解释为「不过滤」，
 	// 在配置校验里却要求 > 0，两处口径不一致正是参考仓的历史遗留，本地不复制。
@@ -85,9 +85,10 @@ func DefaultSchedule() Schedule {
 		SchoolEnabled:       true,
 		CatEnabled:          true,
 		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
-		// 默认 7 天：官方活动奖励积分多在两周内过期，token 有效期通常更短，
-		// 7 天窗口既能覆盖临期凭证，又不会每天全量轮换。
-		KeepaliveRefreshWindow: "168h",
+		// 默认 30 天（覆盖整个 AT 寿命）：上游可以让 refresh token 提前失效
+		// （实测一批号不到 12 天就 refresh 不动了），窗口只有 7 天时刚登录的号
+		// 前 21 天一次都不会去试 refresh，等它进窗口时早就是死的，只能重登。
+		KeepaliveRefreshWindow: "720h",
 	}
 }
 
@@ -135,11 +136,11 @@ func (s *Schedule) Normalize() error {
 	if s.MakeupCardsPerRound < 0 {
 		return fmt.Errorf("schedule.makeup_cards_per_round: 不能为负（0 = 不限，正数 = 每轮上限）")
 	}
-	// keepalive_refresh_window：空回落默认 168h；非法或 <= 0 fail fast。
+	// keepalive_refresh_window：空回落默认 720h；非法或 <= 0 fail fast。
 	// 不用 0 表意「不过滤」——那会让「少写单位」（"168" 之类）静默变成全量刷新，
 	// 而全量刷新每天都轮换一遍 refresh token，是无谓风险。要不过滤请配大值。
 	if strings.TrimSpace(s.KeepaliveRefreshWindow) == "" {
-		s.KeepaliveRefreshWindow = "168h"
+		s.KeepaliveRefreshWindow = "720h"
 	}
 	d, err := time.ParseDuration(s.KeepaliveRefreshWindow)
 	if err != nil {

@@ -15,7 +15,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	if c.Server.MaxPayloadBytes != 64<<20 {
 		t.Fatalf("max_payload_bytes=%d", c.Server.MaxPayloadBytes)
 	}
-	if c.KeepaliveRefreshWindowDur.Hours() != 168 {
+	if c.KeepaliveRefreshWindowDur.Hours() != 720 {
 		t.Fatalf("keepalive window=%v", c.KeepaliveRefreshWindowDur)
 	}
 	if c.ReadTimeoutDur.Seconds() != 300 {

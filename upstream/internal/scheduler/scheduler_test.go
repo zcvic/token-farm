@@ -882,3 +882,32 @@ func TestCheckinPathIncludesManualDisabled(t *testing.T) {
 		t.Fatalf("签到后应保留手动位且回填余额: %+v", st)
 	}
 }
+
+// TestManualKeepaliveCoversDisabledAccount 手动「立即保活」必须问遍禁用号：
+// 禁用是自动判定，运维点这个按钮就是想知道 RT 还能不能救（#296）。
+// 排程路径仍尊重 disabled 过滤。
+func TestManualKeepaliveCoversDisabledAccount(t *testing.T) {
+	f := &fakeUpstream{}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	a := &auth.Auth{UID: "u1", AccessToken: "old", RefreshToken: "rt", ExpiresAt: 1}
+	p.Add(a)
+	p.Disable("u1", "12153 session dead")
+
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.runKeepalive(context.Background(), true, false)
+	if f.refreshCalls.Load() != 0 {
+		t.Fatalf("排程保活不该碰禁用号: refresh=%d", f.refreshCalls.Load())
+	}
+	s.RunKeepaliveNow()
+	if f.refreshCalls.Load() != 1 {
+		t.Fatalf("手动保活应覆盖禁用号: refresh=%d", f.refreshCalls.Load())
+	}
+	if a.AccessToken != "new" {
+		t.Fatalf("禁用号 refresh 成功后 token 应更新: %q", a.AccessToken)
+	}
+}

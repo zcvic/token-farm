@@ -47,7 +47,7 @@ type Config struct {
 	ExpiringSoonWindow time.Duration
 
 	// KeepaliveRefreshWindow 周期保活只刷新「剩余有效期 <= 该窗口」或已过期的凭证
-	// （schedule.keepalive_refresh_window，默认 168h）。零值（未注入配置）在运行期
+	// （schedule.keepalive_refresh_window，默认 720h）。零值（未注入配置）在运行期
 	// 回落到 keepaliveRefreshWindow。
 	//
 	// 为什么需要它：全量保活每天轮换一遍全池的 refresh token，无谓轮换等于无谓风险
@@ -520,7 +520,7 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
 	case taskKeepalive:
 		// 排程路径传 selective=true：只刷临期，避免每天全量轮换 refresh token
 		// （无谓轮换 = 无谓风险，且上游对 refresh 有频次限制）。
-		s.runKeepalive(ctx, true)
+		s.runKeepalive(ctx, true, false)
 	case taskSchool:
 		s.runSchool(ctx)
 	case taskCat:
@@ -988,7 +988,7 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 // 限流/风控暴露，并让 keepalive 日志不再被 429 噪声淹没。
 //
 // 注意与 Config.KeepaliveRefreshWindow 的分工：那个是**可配置**的排程闸门（默认
-// 168h），这里是零值 Config（测试 / 未注入配置）时的运行期回落值。两者都在
+// 720h），这里是零值 Config（测试 / 未注入配置）时的运行期回落值。两者都在
 // keepaliveRefreshDue 里作为 window 传入，配置了正值就按配置走。
 const keepaliveRefreshWindow = 72 * time.Hour
 
@@ -1077,14 +1077,18 @@ func keepaliveRefreshDue(a *auth.Auth, window time.Duration, now time.Time) bool
 // 12153 已不现实。死会话由聊天路径的 401 触发：handler 在 ErrSessionDead /
 // ErrAuthRejected 分支调 Pool.NoteSessionDead，仍是连续 3 次才禁用。keepalive 侧保留
 // 12153 计数，只是让「恰好被刷到的号」不丢原有语义。
-func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(context.Background(), false) }
+//
+// 手动入口覆盖禁用号（force=true）：禁用是自动判定，运维点「立即保活」就是在问
+// 「这些号到底还救不救得回来」，此时跳过禁用号等于不回答（#296）。
+func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(context.Background(), false, true) }
 
 // runKeepalive 周期保活。selective=true 时只刷新「按需判定为到期」的凭证（排程
-// 路径）；selective=false 时全量刷新（手动路径）。
+// 路径）；selective=false 时全量刷新（手动路径）。force=true（手动入口）时无视
+// disabled 过滤。
 //
 // 用参数而不是「配置值 + 一个全局 bool」表达这个差别：两条路径的意图完全不同，
 // 参数化后调用点一眼能看出走的是哪条语义，也不会出现「手动入口被窗口意外过滤」。
-func (s *Scheduler) runKeepalive(ctx context.Context, selective bool) {
+func (s *Scheduler) runKeepalive(ctx context.Context, selective, force bool) {
 	checked, okN, failed, skipped, fresh := 0, 0, 0, 0, 0
 	defer func() {
 		// fresh 与 skipped 分开计数：否则日志里看不出「只刷了 2 个号」是窗口在起作用
@@ -1095,7 +1099,11 @@ func (s *Scheduler) runKeepalive(ctx context.Context, selective bool) {
 	window := s.cfg.KeepaliveRefreshWindow
 	first := true
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
+		if st.Disabled && !force {
+			skipped++
+			continue
+		}
+		if s.cfg.Pool.RiskPaused(st.UID) {
 			skipped++
 			continue
 		}

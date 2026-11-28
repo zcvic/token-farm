@@ -6,17 +6,17 @@ import (
 	"time"
 )
 
-// TestKeepaliveRefreshWindowDefault 空值回落 168h（7 天）。
+// TestKeepaliveRefreshWindowDefault 空值回落 720h（30 天）。
 func TestKeepaliveRefreshWindowDefault(t *testing.T) {
 	s := DefaultSchedule()
-	if s.KeepaliveRefreshWindow != "168h" {
-		t.Fatalf("默认 %q，期望 168h", s.KeepaliveRefreshWindow)
+	if s.KeepaliveRefreshWindow != "720h" {
+		t.Fatalf("默认 %q，期望 720h", s.KeepaliveRefreshWindow)
 	}
 	if err := s.Normalize(); err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
 	d, err := time.ParseDuration(s.KeepaliveRefreshWindow)
-	if err != nil || d != 168*time.Hour {
+	if err != nil || d != 720*time.Hour {
 		t.Fatalf("解析 %v err=%v", d, err)
 	}
 }
@@ -28,8 +28,8 @@ func TestKeepaliveRefreshWindowEmptyFallsBack(t *testing.T) {
 	if err := s.Normalize(); err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
-	if s.KeepaliveRefreshWindow != "168h" {
-		t.Fatalf("空串应回落 168h，got %q", s.KeepaliveRefreshWindow)
+	if s.KeepaliveRefreshWindow != "720h" {
+		t.Fatalf("空串应回落 720h，got %q", s.KeepaliveRefreshWindow)
 	}
 }
 
@@ -54,7 +54,7 @@ func TestKeepaliveRefreshWindowRejectsBad(t *testing.T) {
 
 // TestKeepaliveRefreshWindowAcceptsPositive 正常正时长放行。
 func TestKeepaliveRefreshWindowAcceptsPositive(t *testing.T) {
-	for _, ok := range []string{"24h", "168h", "8760h", "30m"} {
+	for _, ok := range []string{"24h", "168h", "720h", "8760h", "30m"} {
 		s := DefaultSchedule()
 		s.KeepaliveRefreshWindow = ok
 		if err := s.Normalize(); err != nil {

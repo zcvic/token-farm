@@ -35,7 +35,7 @@ const testDay = 24 * time.Hour
 
 // runKeepaliveScheduled 跑一轮**排程**保活（selective=true）。
 func runKeepaliveScheduled(s *Scheduler) {
-	s.runKeepalive(context.Background(), true)
+	s.runKeepalive(context.Background(), true, false)
 }
 
 // newRefreshRecorder 起一个只处理 refresh 的假上游，返回服务与刷新调用计数。

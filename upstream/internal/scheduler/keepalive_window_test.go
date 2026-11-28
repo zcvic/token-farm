@@ -45,7 +45,7 @@ func TestNeedsRefreshNoExpiryIsTrap(t *testing.T) {
 	}
 }
 
-// TestKeepaliveWindowConfigValidation 窗口配置：空回落 168h，非法/<=0 fail fast。
+// TestKeepaliveWindowConfigValidation 窗口配置：空回落 720h，非法/<=0 fail fast。
 func TestKeepaliveWindowConfigValidation(t *testing.T) {
 	// 该测试只验证 scheduler 侧**原样保留**配置值（不在 New 里改写），
 	// 配置校验在 internal/config 的 Normalize 里，见 config 包测试。
