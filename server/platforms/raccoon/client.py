@@ -153,6 +153,13 @@ def classify(status: int, payload: object,
     if status >= 400 or code not in (None, 0):
         return PlatformError(message, status=400, code='bad_request',
                              payload=payload)
+    # HTTP 200 也可能是 LiteLLM 风格错误信封（没有顶层 code，只有 error）：
+    # 不当成成功继续找 choices，否则只会报一句指不到上游原因的「缺少 choices」。
+    # 带非空 choices 的响应优先当成功，避免正常回复里的错误字段被误判。
+    if isinstance(payload, dict) and _choices_of(payload) is None \
+            and payload.get('error') not in (None, '', {}, []):
+        return PlatformError(message, status=502, code='upstream_error',
+                             payload=payload)
     return None
 
 
@@ -419,6 +426,60 @@ async def fetch_catalog(token: str, *, proxy: str | None = None,
 
 
 # ── 对话 ────────────────────────────────────────────────────
+def _choices_of(payload: object) -> list | None:
+    """取非空 choices 列表；缺字段、空列表与其它类型都算没有。"""
+    if not isinstance(payload, dict):
+        return None
+    choices = payload.get('choices')
+    if isinstance(choices, list) and choices:
+        return choices
+    return None
+
+
+def completion_of(payload: object) -> dict | None:
+    """从响应信封里取出真正带 choices 的完成对象。
+
+    正常回复就在根上。有的账号 / 网关会再包一层 `data`（偶尔是 JSON
+    字符串），直接读根就会误报「缺少 choices」。这里只认非空 choices，避免
+    把 `{code:0}` 这类业务信封当成完成响应。命中内层时把外层的 id / model
+    等元信息补回去，保持和正常响应同形。
+    """
+    if isinstance(payload, dict) and _choices_of(payload) is not None:
+        return payload
+    if not isinstance(payload, dict):
+        return None
+    for key in ('data', 'result'):
+        inner = payload.get(key)
+        if isinstance(inner, str):
+            text = inner.strip()
+            if not text:
+                continue
+            try:
+                inner = json.loads(text)
+            except ValueError:
+                continue
+        if _choices_of(inner) is None or not isinstance(inner, dict):
+            continue
+        merged = dict(inner)
+        for meta in ('id', 'object', 'created', 'model', 'system_fingerprint'):
+            if meta not in merged and payload.get(meta) is not None:
+                merged[meta] = payload[meta]
+        return merged
+    return None
+
+
+def _payload_snippet(payload: object, limit: int = 200) -> str:
+    """把响应压成一行短摘要，放进错误信息里方便定位。"""
+    if isinstance(payload, str):
+        text = payload
+    else:
+        try:
+            text = json.dumps(payload, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(payload)
+    return ' '.join(text.split())[:limit]
+
+
 def chat_body(body: dict) -> dict:
     """整理发往上游的请求体。
 
@@ -469,11 +530,15 @@ async def chat(account: dict, token: str, body: dict, *, base: str = C.LLM_V2,
     if not isinstance(payload, dict):
         raise PlatformError('小浣熊对话响应不是 JSON 对象', status=502,
                             code='bad_upstream', payload=text[:300])
-    choices = payload.get('choices')
-    if not isinstance(choices, list) or not choices:
-        raise PlatformError('小浣熊对话响应缺少 choices', status=502,
-                            code='bad_upstream', payload=payload)
-    return payload
+    root = completion_of(payload)
+    if root is None:
+        message = _message_of(payload)
+        detail = f'：{message}' if message else ''
+        raise PlatformError(
+            f'小浣熊对话响应缺少 choices{detail}'
+            f'（上游返回 {_payload_snippet(payload)}）',
+            status=502, code='bad_upstream', payload=payload)
+    return root
 
 
 async def open_chat(account: dict, token: str, body: dict,
@@ -505,7 +570,7 @@ async def open_chat(account: dict, token: str, body: dict,
         error = classify(200, payload, '小浣熊对话响应异常')
         if error is not None:
             raise error
-        if isinstance(payload, dict) and isinstance(payload.get('choices'), list):
+        if completion_of(payload) is not None:
             # 上游忽略了 stream（或中途降级）：交给适配器聚合成非流式响应。
             raise PlatformError('小浣熊忽略 stream，返回了完整响应', status=502,
                                 code='not_sse', payload=payload)

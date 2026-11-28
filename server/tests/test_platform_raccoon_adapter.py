@@ -163,6 +163,55 @@ class RaccoonProtocolTest(unittest.TestCase):
         self.assertEqual(error.retry_after, C.RISK_CONTROL_COOLDOWN)
         self.assertTrue(client.is_risk_control(error))
 
+    def test_classify_200_error_envelope_is_upstream_error(self) -> None:
+        """HTTP 200 也可能是错误信封（没有顶层 code，只有 error）。"""
+        error = client.classify(200, {'error': {'message': 'content blocked'}})
+        self.assertIsNotNone(error)
+        assert error is not None
+        self.assertEqual(error.status, 502)
+        self.assertEqual(error.code, 'upstream_error')
+        self.assertIn('content blocked', error.message)
+        # 正常响应里的 error:null 不能被误判
+        self.assertIsNone(client.classify(200, {'error': None, 'choices': [{}]}))
+
+    def test_completion_of_unwraps_data_envelope(self) -> None:
+        inner = {'choices': [{'index': 0, 'finish_reason': 'stop',
+                              'message': {'role': 'assistant',
+                                          'content': 'ok'}}],
+                 'usage': {'prompt_tokens': 1, 'completion_tokens': 1}}
+        root = client.completion_of({'code': 0, 'model': 'sn-glm-5-3',
+                                     'data': inner})
+        self.assertIsNotNone(root)
+        assert root is not None
+        self.assertEqual(root['choices'][0]['message']['content'], 'ok')
+        self.assertEqual(root['model'], 'sn-glm-5-3', '外层 model 应补回')
+        # data 被序列化成字符串也认
+        wrapped = client.completion_of({'data': json.dumps(inner)})
+        self.assertIsNotNone(wrapped)
+        assert wrapped is not None
+        self.assertEqual(wrapped['choices'][0]['message']['content'], 'ok')
+        # 业务信封、空 choices 都不能当成完成响应
+        self.assertIsNone(client.completion_of({'code': 0, 'data': {'foo': 1}}))
+        self.assertIsNone(client.completion_of({'choices': []}))
+        self.assertIsNone(client.completion_of('not json'))
+
+    def test_chat_missing_choices_includes_upstream_detail(self) -> None:
+        """找不到 choices 时错误里要带上游摘要，而不是一句无从查起的话。"""
+        class FakeResponse:
+            status_code = 200
+            text = '{"code":0,"message":"model unavailable","data":null}'
+
+        async def fake_request(*args, **kwargs):
+            return FakeResponse()
+
+        with mock.patch.object(client, '_request', new=fake_request):
+            with self.assertRaises(PlatformError) as ctx:
+                asyncio.run(client.chat({}, 'token',
+                                        {'model': 'x', 'messages': []}))
+        message = ctx.exception.message
+        self.assertIn('缺少 choices', message)
+        self.assertIn('model unavailable', message)
+
     def test_daily_reward_only_counts_positive_today(self) -> None:
         now = datetime(2026, 9, 1, 12, 0, tzinfo=_BEIJING).timestamp()
         items = [

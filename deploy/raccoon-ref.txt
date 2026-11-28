@@ -71,6 +71,14 @@
 #          标准 OpenAI Chat Completions 形状；流式是真增量 SSE，末尾
 #          `data: [DONE]`；思考在 choices[].delta.reasoning_content；
 #          非流式在 choices[0].message。
+#        · 完成对象正常在根上；有的账号 / 网关会把完整回复再包一层 `data`
+#          （偶尔是 JSON 字符串）。根上没有非空 choices 时再看 data / result，
+#          命中把外层 id / model 补回去；都没有才按 502 报错，并把上游摘要
+#          写进错误 —— 业务信封不能当成完成响应。
+#          → client.completion_of / client.chat、docs/multi-platform.md §16.3
+#        · HTTP 200 也可能是没有顶层 code 的错误信封（只有 error）：先归成
+#          upstream_error，再谈 choices，否则只会报「缺少 choices」。
+#          → client.classify
 #        · v1 **流式**实测报 invalid upstream stream response；v1 非流式可用。
 #          v2 非官网客户端可能被风控 429 code 200108。
 #          策略：流式先走 v2；非鉴权类失败退回 v1 非流式，再由
