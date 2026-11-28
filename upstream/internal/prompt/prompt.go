@@ -164,7 +164,7 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 // **请求级**重试机会，而不是把账号判成故障。文本一字不改，只换承载通道。
 //
 // 保守返回 (nil,false)：无 system/developer 文本、没有 user 消息、或首条 user 的
-// content 不是纯文本（数组/多模态）时，调用方按原错误处理。
+// content 既不是字符串也不是 content parts 数组（如 null）时，调用方按原错误处理。
 func MoveSystemToUser(body []byte) ([]byte, bool) {
 	if len(body) == 0 {
 		return nil, false
@@ -203,12 +203,29 @@ func MoveSystemToUser(body []byte) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	userText, ok := um["content"].(string)
-	if !ok {
+	// 系统文本放前、user 原有内容放后：语义顺序不变（设定先于用户输入）。
+	//
+	// 两种 content 形态都要支持（issue #479）：
+	//   - 字符串：直接拼在前面（原有行为）；
+	//   - 数组：Codex / 多模态客户端的 user content 是
+	//     `[{type:"text"...}, {type:"image_url"...}]`，以前这里 `.(string)`
+	//     失败就整条放弃——于是 11-128 的请求级抢救对这些请求从来不生效。
+	//     现在把 system 文本作为**第一个 text part** 插到数组最前，其余 part
+	//     （含图片）逐字不动；
+	//   - 其它类型（nil / 数字等）：仍保守放弃，不猜结构。
+	sysText := strings.Join(sysTexts, "\n\n")
+	var moved any
+	switch content := um["content"].(type) {
+	case string:
+		moved = sysText + "\n\n" + content
+	case []any:
+		parts := make([]any, 0, len(content)+1)
+		parts = append(parts, map[string]any{"type": "text", "text": sysText})
+		parts = append(parts, content...)
+		moved = parts
+	default:
 		return nil, false
 	}
-	// 系统文本放前、user 原有内容放后：语义顺序不变（设定先于用户输入）。
-	moved := strings.Join(sysTexts, "\n\n") + "\n\n" + userText
 	rewritten := make([]any, 0, len(msgs)-len(sysTexts)+1)
 	rewritten = append(rewritten, map[string]any{"role": "system", "content": Degraded})
 	for i, m := range msgs {
