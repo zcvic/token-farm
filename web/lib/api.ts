@@ -13,6 +13,7 @@ import type {
   CreditsFlow,
   AccountUsageResponse,
   AccountModelUsageResponse,
+  IpUsageResponse,
   ApiKey,
   ApiToken,
   AuditLogPage,
@@ -1080,6 +1081,9 @@ export const statsApi = {
   byAccountModel: (days = 30, realm?: Realm, platform?: string, range?: StatsRange) =>
     get<AccountModelUsageResponse>('/api/stats/by-account-model',
       {days, realm, platform, ...range}),
+  /** 按「IP × 密钥」聚合：看哪个来源用哪把密钥、用了多少 */
+  byIp: (days = 30, realm?: Realm, platform?: string, range?: StatsRange) =>
+    get<IpUsageResponse>('/api/stats/by-ip', {days, realm, platform, ...range}),
   /**
    * 上游自己那份统计（issue #59）。口径与本页其它数字不同：含**直连上游**的调用，
    * 且是自上游进程启动以来的累计（没有时段概念）。

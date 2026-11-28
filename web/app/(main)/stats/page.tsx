@@ -1,7 +1,7 @@
 'use client';
 
 import {useCallback, useState} from 'react';
-import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle, Server, CalendarDays, UserRound, Database} from 'lucide-react';
+import {Activity, TrendingUp, KeyRound, Cpu, Wrench, RotateCcw, Coins, AlertTriangle, Server, CalendarDays, UserRound, Database, Network} from 'lucide-react';
 import {
   Area,
   Bar,
@@ -20,6 +20,7 @@ import {statsApi, errText, type StatsRange} from '@/lib/api';
 import type {
   AccountModelUsageRow,
   AccountUsageRow,
+  IpUsageRow,
   StatsSummary,
   UpstreamStats,
   UsageBreakdown,
@@ -189,6 +190,7 @@ export default function StatsPage() {
       byKey: () => statsApi.byKey(d, statsRealm, platform, range),
       byAccount: () => statsApi.byAccount(d, statsRealm, platform, range),
       byAccountModel: () => statsApi.byAccountModel(d, statsRealm, platform, range),
+      byIp: () => statsApi.byIp(d, statsRealm, platform, range),
     },
     [statsRealm, platform, days, customStart, customEnd],
   );
@@ -231,6 +233,7 @@ export default function StatsPage() {
   const byKey: UsageBreakdown[] = values.byKey ?? EMPTY_BREAKDOWN;
   const byAccount: AccountUsageRow[] = values.byAccount?.items ?? [];
   const byAccountModel: AccountModelUsageRow[] = values.byAccountModel?.items ?? [];
+  const byIp: IpUsageRow[] = values.byIp?.items ?? [];
   const upstream: UpstreamStats | null = upstreamValues.upstream ?? null;
 
   const failedCount = Object.keys(errors).length;
@@ -705,6 +708,10 @@ export default function StatsPage() {
         <BreakdownPanel title={t('stats.byKey')} icon={KeyRound} items={byKey} showCost={isWorkbuddy} />
       </section>
 
+      {/* 按「IP × 密钥」聚合：看哪个来源用哪把密钥、用了多少。数据来自请求日志
+          （汇总表没有来源 IP 维度），所以跟时段选择器走、但不含日志保留期外的历史。 */}
+      <IpUsagePanel items={byIp} showCost={isWorkbuddy} />
+
       {/* 按「日期 × 账号」聚合（issue #402）：看每个号每天用了多少、扣了多少积分。 */}
       <AccountUsagePanel items={byAccount} showCost={isWorkbuddy} />
       <AccountModelUsagePanel items={byAccountModel} showCost={isWorkbuddy} />
@@ -828,6 +835,72 @@ function AccountModelUsagePanel({items, showCost}: {items: AccountModelUsageRow[
                   <TableCell className="text-xs tabular-nums">{fmtCredit(row.credit)}</TableCell>
                   {showCost && (
                     <TableCell className="text-xs tabular-nums">{fmtMoney(row.cost)}</TableCell>
+                  )}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <div className="text-xs text-muted-foreground">{t('stats.noUsageData')}</div>
+      )}
+    </section>
+  );
+}
+
+/** 按「IP × 密钥」的用量表。哪个来源用哪把密钥、用了多少。 */
+function IpUsagePanel({items, showCost}: {items: IpUsageRow[]; showCost: boolean}) {
+  const t = useT();
+  return (
+    <section className="rounded-[20px] bg-muted p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+        <Network className="h-4 w-4" />
+        {t('stats.byIp')}
+      </div>
+      {items.length ? (
+        <div className="max-h-[420px] overflow-auto">
+          <Table>
+            <TableHeader>
+              <TableRow className="border-b border-border/60 hover:bg-transparent">
+                <TableHead className="text-[11px] text-muted-foreground">{t('stats.ip')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('stats.colKey')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('metric.requestsShort')}</TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">Token</TableHead>
+                <TableHead className="whitespace-nowrap text-[11px] text-muted-foreground">
+                  {t('stats.cacheHitRate')}
+                </TableHead>
+                <TableHead className="text-[11px] text-muted-foreground">{t('metric.paid')}</TableHead>
+                {showCost && (
+                  <TableHead className="text-[11px] text-muted-foreground">{t('stats.colCost')}</TableHead>
+                )}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {items.map((row, i) => (
+                <TableRow key={`${row.ip}-${row.key_id ?? 'x'}-${i}`} className="border-b border-border/40">
+                  <TableCell className="max-w-[200px] truncate font-mono text-xs tabular-nums" title={row.ip}>
+                    {row.ip}
+                  </TableCell>
+                  <TableCell className="max-w-[220px] truncate text-xs" title={row.key}>
+                    {row.key || (row.key_id != null ? `#${row.key_id}` : t('metric.unknown'))}
+                  </TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtNumber(row.requests)}</TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtCompact(row.tokens)}</TableCell>
+                  <TableCell className="whitespace-nowrap text-xs tabular-nums">
+                    <span title={t('stats.cacheTokensHint', {
+                      hit: fmtCompact(row.cache_hit_tokens),
+                      miss: fmtCompact(row.cache_miss_tokens),
+                    })}>
+                      {fmtPercent(row.cache_hit_rate)}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-xs tabular-nums">{fmtCredit(row.credit)}</TableCell>
+                  {showCost && (
+                    <TableCell className="text-xs tabular-nums">
+                      {row.cost != null ? fmtMoney(row.cost) : (
+                        <span className="text-muted-foreground/70" title={t('stats.costUnavailableHint')}>—</span>
+                      )}
+                    </TableCell>
                   )}
                 </TableRow>
               ))}

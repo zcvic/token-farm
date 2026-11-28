@@ -983,6 +983,64 @@ def by_key(days: int = 30, realm: str | None = None,
     ]
 
 
+@router.get('/by-ip')
+def by_ip(days: int = 30, realm: str | None = None,
+          platform: str | None = None,
+          start: str | None = None, end: str | None = None,
+          limit: int = 2000, user: dict = Depends(security.current_user)) -> dict:
+    """按「IP × 密钥」聚合请求数、token 与积分。
+
+    数据源是 `request_logs`：`usage_daily` 只有 `key_id`，没有来源 IP，
+    补也不该补进汇总表（IP 属于逐请求的明细，回填/代理变更都可能改写）。
+    这里按 `(ip, key_id)` 分组，回答「哪个来源用哪把密钥、用了多少」。
+
+    口径与 `_failures` 一致：只统计**带了密钥**的请求（`key_id IS NOT NULL`）——
+    没有密钥的扫描器流量不是真实用量，混进来会把表和排行都撑歪。
+    IP 为空的历史行归到「未知」，不丢弃（否则数字对不上日志页）。
+
+    `realm` 与 `_daily_failures` 同口径：日志的 realm 列可能是历史 NULL，按 cn
+    归类，不能把 NULL 兜成查询目标版本。`limit` 默认 2000 行，超出时
+    `truncated=true`（按 token 从高到低取）。
+    """
+    lo, hi, _span = _range_bounds(days, start, end)
+    rf = " AND COALESCE(l.realm, 'cn') = ?" if realm in ('cn', 'global') else ''
+    pf, pargs = _platform_filter(platform, 'l.platform')
+    capped = max(1, min(int(limit or 2000), 10000))
+    args: tuple = (db.day_start_ts(lo), db.day_start_ts(hi) + 86400)
+    if rf:
+        args += (realm,)
+    args += pargs
+    rows = db.query(
+        "SELECT COALESCE(NULLIF(TRIM(l.ip), ''), '未知') AS ip, "
+        'l.key_id AS key_id, COALESCE(k.name, l.key_id || \'\') AS key_name, '
+        'COUNT(*) AS requests, '
+        'SUM(COALESCE(l.prompt_tokens,0) + COALESCE(l.completion_tokens,0)) AS tokens, '
+        'COALESCE(SUM(l.credit),0) AS credit, SUM(l.cost) AS cost, '
+        'COALESCE(SUM(l.cache_hit_tokens),0) AS ch, '
+        'COALESCE(SUM(l.cache_miss_tokens),0) AS cm '
+        'FROM request_logs l LEFT JOIN api_keys k ON k.id = l.key_id '
+        'WHERE l.ts >= ? AND l.ts < ? AND l.key_id IS NOT NULL'
+        f'{rf}{pf} '
+        "GROUP BY COALESCE(NULLIF(TRIM(l.ip), ''), '未知'), l.key_id "
+        'ORDER BY tokens DESC LIMIT ?',
+        args + (capped + 1,),
+    )
+    items: list[dict] = []
+    for r in rows[:capped]:
+        items.append({
+            'ip': str(r['ip'] or '未知'),
+            'key_id': int(r['key_id']) if r['key_id'] is not None else None,
+            'key': str(r['key_name'] or ''),
+            'requests': int(r['requests'] or 0),
+            'tokens': int(r['tokens'] or 0),
+            'credit': float(r['credit'] or 0),
+            'cost': None if r['cost'] is None else float(r['cost']),
+            **_cache_fields(r['ch'], r['cm']),
+        })
+    return {'items': items, 'total': len(rows), 'truncated': len(rows) > capped,
+            'from': lo, 'to': hi}
+
+
 @router.get('/by-account')
 def by_account(days: int = 30, realm: str | None = None,
                platform: str | None = None,

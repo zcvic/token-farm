@@ -971,6 +971,31 @@ export interface AccountUsageResponse {
   to: string;
 }
 
+/** 按「IP × 密钥」的一行（`/api/stats/by-ip`）。 */
+export interface IpUsageRow {
+  ip: string;
+  key_id: number | null;
+  /** 密钥名称；密钥已删除时为记录的 ID */
+  key: string;
+  requests: number;
+  tokens: number;
+  credit: number;
+  cost: number | null;
+  /** 输入侧命中 / 未命中缓存的 token 合计（来自请求日志） */
+  cache_hit_tokens?: number;
+  cache_miss_tokens?: number;
+  /** hit / (hit + miss)；null = 该行没有缓存计量（两列都是 0） */
+  cache_hit_rate?: number | null;
+}
+
+export interface IpUsageResponse {
+  items: IpUsageRow[];
+  total: number;
+  truncated: boolean;
+  from: string;
+  to: string;
+}
+
 export interface UsageBreakdown {
   name: string;
   requests: number;
