@@ -1526,3 +1526,89 @@ dad3acba65d476bb16f6c61e27bbfef083cc9475
 e30bb8c121f7927f7be1d6c6f4400a3aa496324c
 
 
+# ---- 2026-11-28 第三十一批：面板仓 e39c2528ba → 2a72e8ac12（15 个非 merge 提交）----
+#      仓库：https://github.com/misakano7545/workbuddy2api-panel
+#      本批取 4 项（都是 Go 侧能力 / 配置默认值），其余 11 项不取。
+#      已取（按本仓结构重写）：
+#        · 26b01b62ba 入站不是 JSON 就自己拒绝，不再让上游 11101 当回执（#295）。
+#          落点 upstream/internal/server/handler.go 的 chatCompletions：readBody
+#          之后先剥 BOM 与首尾空白，json.Valid 不通过就直接 400 invalid_request，
+#          并把开头 48 字节（logfmt.Truncate，rune 安全）回给客户端。收益是畸形
+#          body 不再真打上游花一次积分，报错也能直接看出客户端发了什么。
+#          新增 TestChatNonJSONBodyRejectedLocally（不打上游 + 错误码/片段）与
+#          TestChatBOMJSONStillForwarded（带 BOM 的合法 JSON 照旧转发）。
+#        · 0f6fd263a7 手动「立即保活」覆盖禁用号（#296）。本仓没有该提交前半段
+#          依赖的 SessionDeadButUsable / MarkRenewDead 链路（见下「未取」），只取
+#          force 这一半：RunKeepaliveNow 传 force=true，runKeepalive 的 disabled
+#          过滤改为 `st.Disabled && !force`；排程路径仍传 force=false，继续按
+#          disabled 过滤。新增 TestManualKeepaliveCoversDisabledAccount。
+#        · 232433d3d7 保活临期窗口默认 168h → 720h（#296）。本仓默认值在
+#          upstream/internal/config/schedule.go（不是参考仓的 cmd/server/config.go）：
+#          DefaultSchedule、Normalize 的空值回落、两处注释与 config.example.json
+#          同步改 720h；理由写进注释（RT 可能比 AT 先失效，7 天窗口会让新号前
+#          21 天一次都不试 refresh）。config / cmd.server 两个包的断言跟着改。
+#        · 2a72e8ac12 Status 透出凭证签发主机 domain（#296）。同一 realm 下可能
+#          混着多个签发方，上游按签发方整批清退。内部 Status 增加
+#          Domain（json `domain,omitempty`），statusOf 用 auth.DomainValue()
+#          （加锁读，避免与 RefreshToken 写竞争）；新增 TestStatusExposesDomain。
+#      未取：
+#        · 89c3c93f98「不可续期」标记 + access token 倒计时：本仓 handler / scheduler
+#          没有「refresh 已死但 AT 仍有效 → 继续用」这条路径（ErrSessionDead 直接
+#          按连续计数/禁用处理），MarkRenewDead 没有调用点；只加一个永远为 false
+#          的状态字段没有意义。面板倒计时同理。
+#        · 8c6479125e 可选把 system 挪到消息末尾（system_tail）与 8b7921df91
+#          对它的 revert：两个提交净效果为零，且本仓从未引入 features.system_tail。
+#        · 58614a6519 统计「缺 calls 包裹的 invoke 块」：本仓
+#          upstream/internal/upstream 没有 dsml.go（那套模型原生工具调用标记
+#          修复器不存在），没有落点。
+#        · fba9e147e6 截断按 rune 边界：本仓 logfmt.Truncate 早已是 rune 安全实现
+#          （internal/logfmt/logfmt.go，含 CJK 边界测试），无需再改。
+#        · 6fe24e3a1e zero-tool-calls 收尾日志带 tok/think：本仓没有这条日志，
+#          也没有 declaredTools / sawToolCalls 那套收尾判定。
+#        · 019348557e / c6b3cef679 面板 UI（积分到期分布展开、模型规则页积分列）：
+#          本仓面板是 Next.js web/，与参考仓 Go 内嵌 panel 不同构，UI 能力另行评估。
+#        · 064aab3511 / e21b97f593 embeddings（payload_too_large、README）：
+#          本仓没有 embeddings 数据面。
+#        · 7e9f53b4ec 参考仓库清单：上游自己的 autobot 运维文档，本仓不承接。
+#      锚点提交：2a72e8ac12732580e00cd068d7b2329bc95953fd（本批取到的最新提交）
+#      上一次基线：e39c2528ba2cea8eeb9cedac8caefdd8d9b1b3f5
+26b01b62ba58562749ed5b34b86198651e006626
+0f6fd263a733a218a04c60442dfedac6be7f9b56
+232433d3d779aff43deda0ad888de7d98caa0b6a
+2a72e8ac12732580e00cd068d7b2329bc95953fd
+
+
+# ---- 2026-11-28 第三十二批：上游 manager e30bb8c121 → 071b113e15（3 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      本批取 3 项（其中 1 项只取注释对齐），2 项不取。
+#      已取（按本仓结构重写）：
+#        · 79747194e8 11-128 请求级抢救支持 content parts 数组（0065，issue #479）。
+#          上游只新增 dev/upstream-patches/0065 补丁，本仓是源码树，手工落到
+#          upstream/internal/prompt/prompt.go 的 MoveSystemToUser：首条 user 的
+#          content 为字符串时保持原拼接；为 []any 时把 system 文本作为**第一个
+#          text part** 插到数组最前，其余 part（含 image_url）逐字保留；
+#          null / 其它类型仍保守返回 false。move_test.go 的「user 非纯文本」
+#          放弃用例改为 content=null，并新增 TestMoveSystemToUserSupportsContentParts
+#          （断言 text part 顺序、图片 part 原样）。
+#        · ee2a75b572 Next.js 15.5.25 → 15.5.29（SSG/ISR 缓存投毒公告）：
+#          web/package.json 的 next 与 eslint-config-next 同步升级；lock 用
+#          `npm install --package-lock-only` + `npm audit fix --package-lock-only`
+#          重算，带入 sharp 0.35.5 / source-map-js 1.2.4 / follow-redirects 1.16.3，
+#          生产依赖 `npm audit --omit=dev` 为 0 漏洞（dev-only brace-expansion 未动）。
+#        · 071b113e15 空闲看门狗说明修正：本仓无 WB_RETENTION_DAYS 保留期功能，
+#          compose 透传与 .env.example 不取；只取 server/config.py 的注释对齐——
+#          STREAM_IDLE_TIMEOUT 按「数据帧」计时（`data:` 才算，含工具调用增量；
+#          纯 `: keepalive` 不续命），与 server/services/wbforward.py 的
+#          has_data_frame 实现一致。
+#      未取：
+#        · 071b113e15 的 .env.example / docker-compose*.yml 保留期变量透传：
+#          本仓没有 #492 的保留期 / 各表覆盖 / 维护间隔 / WAL 上限配置，整条链路
+#          不存在。
+#        · 79747194e8 / ee2a75b572 里的上游 CHANGELOG：本仓版本线与发版流程不同。
+#      锚点提交：071b113e152573351259f9473f56c6c736439c4f（本批取到的最新提交）
+#      上一次基线：e30bb8c121f7927f7be1d6c6f4400a3aa496324c
+79747194e831135e1755ed1460c9f7b988cfaff6
+ee2a75b572695e3ecae1d54fe7afa2b5263bf9f1
+071b113e152573351259f9473f56c6c736439c4f
+
+

@@ -842,6 +842,87 @@ CN 专发的 `X-Client-*` 三头、小程序口径撤头、global UA 品牌段�
 
 逐条见 `deploy/workbuddy-panel-ref.txt` 第二十三批。
 
+### 已评估：misakano `e39c2528ba..2a72e8ac12`
+
+参考仓 2026-11-26 至 11-28 又推了 15 个非 merge 提交，**取 4 项 Go 侧能力 /
+默认值**：
+
+- **取 `26b01b62ba`** 入站不是合法 JSON 时网关自己拒绝（#295）：`readBody` 之后
+  剥 BOM 与首尾空白，`json.Valid` 不通过直接 400 `invalid_request`，并回显开头
+  48 字节（`logfmt.Truncate`，rune 安全）。此前畸形 body 会原样转发，上游只回
+  `11101 invalid character 'P'...`，既看不出是谁发坏的，还白扣一次积分。
+  新增两条用例：畸形体不打上游、带 BOM 的合法 JSON 照旧转发。
+- **取 `0f6fd263a7` 的 force 一半** 手动「立即保活」覆盖禁用号（#296）：本仓没有
+  该提交前半段依赖的 `SessionDeadButUsable` / `MarkRenewDead` 链路，只取
+  `RunKeepaliveNow` 传 `force=true`，`runKeepalive` 的 disabled 过滤改为
+  `st.Disabled && !force`；排程路径仍传 `force=false`。
+- **取 `232433d3d7`** 保活临期窗口默认 168h → 720h（#296）：落点在本仓
+  `upstream/internal/config/schedule.go`（参考仓在 `cmd/server/config.go`），
+  `DefaultSchedule`、`Normalize` 空值回落、`config.example.json` 与两个包的
+  断言同步改。理由是 refresh token 可能比 access token 先失效，7 天窗口会让
+  新号前 21 天一次都不尝试 refresh。
+- **取 `2a72e8ac12`** `Status` 透出凭证签发主机 `domain`（#296）：同一 realm 下
+  可能混着多个签发方，上游按签发方整批清退；`statusOf` 用 `auth.DomainValue()`
+  加锁读，新增 `TestStatusExposesDomain`。
+
+**不取**：`89c3c93f98`（本仓没有「refresh 已死但 AT 仍有效」路径，状态字段没有
+调用点）、`8c6479125e` + `8b7921df91`（system_tail 与其 revert 净效果为零，且
+本仓从未引入）、`58614a6519`（本仓没有 `dsml.go`）、`fba9e147e6`（`logfmt.Truncate`
+早已 rune 安全）、`6fe24e3a1e`（本仓没有 zero-tool-calls 收尾日志）、
+`019348557e` / `c6b3cef679`（Go 内嵌面板 UI，本仓是 Next.js `web/`，另行评估）、
+`064aab3511` / `e21b97f593`（本仓没有 embeddings 数据面）、`7e9f53b4ec`
+（上游 autobot 运维文档）。
+
+### 已评估：上游 manager `e30bb8c121..071b113e15`
+
+2026-11-28 的 3 个非 merge 提交，**取 3 项（1 项仅注释对齐）**：
+
+- **取 `79747194e8`** 11-128 请求级抢救支持 content parts 数组（0065，issue
+  #479）：上游只加 `dev/upstream-patches/0065` 补丁，本仓是源码树，手工落到
+  `upstream/internal/prompt/prompt.go` 的 `MoveSystemToUser`——user content 为
+  `[]any` 时把 system 文本作为第一个 `text` part 插到数组最前，其余 part（含
+  图片）逐字保留；`null` / 其它类型仍放弃。补 `TestMoveSystemToUserSupportsContentParts`。
+- **取 `ee2a75b572`** Next.js 15.5.25 → 15.5.29（SSG/ISR 缓存投毒公告）：
+  `web/package.json` 的 `next` 与 `eslint-config-next` 同步升级；lock 用
+  `npm install --package-lock-only` + `npm audit fix --package-lock-only` 重算，
+  带入 `sharp 0.35.5` / `source-map-js 1.2.4` / `follow-redirects 1.16.3`，
+  生产依赖审计 0 漏洞。
+- **取 `071b113e15` 的注释部分**：本仓无 `WB_RETENTION_DAYS` 保留期功能，
+  compose 透传不取；只把 `server/config.py` 的 `STREAM_IDLE_TIMEOUT` 注释改成
+  「按数据帧计时」，与 `has_data_frame` 实现一致。
+
+**不取**：`071b113e15` 的 compose / `.env.example` 保留期变量（本仓无该功能）。
+
+### 其他参考仓核查（2026-11-28）
+
+同一轮把所有 `deploy/*-ref.txt` 记录的上游/参考仓都核对了一遍：
+
+| 参考仓 | 记录锚点 | 当前 HEAD | 结论 |
+| --- | --- | --- | --- |
+| `ZFXing-lite/discovery2api` | `763ed2f5` | 同锚点 | 无新提交 |
+| `shuishuipingan/qoder2api-hub` | `2b0981c9` (v1.10.4) | 同锚点 | 无新提交 |
+| `shuishuipingan/trae2api-hub` | `f7b75787` | 同锚点 | 无新提交 |
+| `HITZY2002/codearts2api` | `ee754d88` | 同锚点 | 无新提交 |
+| `xingluoyuankong/loomy2api` | `cb27afdc` | 同锚点 | 无新提交 |
+| AutoClaw 6 个参考仓 | 2026-11-27 各锚点 | 全部同锚点 | 无新提交 |
+| `luawei1/cline2api` | `f459f003` | `68751e7e` | 26 个新提交，见下 |
+| `wearetheone777/dumate2api` | `db5c4348` | `b2e79f8e` | 7 个新提交，见下 |
+| `Kilo-Org/kilocode` | `bfdec549` | `e7ab222e` | 4 个 gateway 提交，见下 |
+
+- **cline2api**：新增提交集中在 zen / muse-spark 分流、opencode 自动保存与
+  故障转移、管理端 UI、Docker 数据目录、模型组合（combos）与仪表盘统计。
+  本仓 cline 适配层已覆盖其中可移植的协议行为（402 余额不足按账号换号、
+  超长工具名截短还原、WorkOS 自愈），其余是参考仓自己的面板与 zen 专属链路，
+  没有对等落点，本轮不取。
+- **dumate2api**：新增提交是桌面链路的本地发现端口转发、qwenwork 合并、
+  路由级 `maxBody`、跨通道账号导入导出、WSL CDP 登录。本仓 dumate 适配层
+  直连 `dumate-svc.baidu.com` / `www.dumate.cn`，没有本地端口或 CDP 链路；
+  账号导入导出本仓已有统一入口，故不取。
+- **kilocode**：4 个提交里 3 个是 `release: v7.8.x` 版本号，实际改动只有
+  `e645f7c2ce`（CLI/VS Code 区分「登录被拒」与「服务故障」，抛
+  `InvalidTokenError`）。本仓 kilo 适配层已把 401/403 归为
+  `invalid_account` 并换号，属于同一语义，不取。
+
 ```bash
 # 1) 在参考仓的临时 clone 里，把目标提交导出成补丁（一次一个提交）
 git format-patch -1 <commit> -o /tmp/sync
