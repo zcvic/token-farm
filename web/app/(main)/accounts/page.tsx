@@ -27,6 +27,7 @@ import {
   Sparkles,
   StickyNote,
   Scale,
+  ListX,
   FolderInput,
   TriangleAlert,
   ScanSearch,
@@ -445,6 +446,7 @@ function WorkbuddyAccountsPage() {
       //   already — 今天已经签过，本次没再打上游（这正是「不重复签到」的效果）
       const notes = [
         r.skipped > 0 ? t('accounts.checkinSkippedNote', {skipped: r.skipped}) : '',
+        r.skip_tasks > 0 ? t('accounts.checkinSkipTasksNote', {n: r.skip_tasks}) : '',
         r.already > 0 ? t('accounts.checkinAlreadyNote', {n: r.already}) : '',
       ].filter(Boolean).join(' ');
       const note = notes ? ' ' + notes : '';
@@ -808,6 +810,25 @@ function WorkbuddyAccountsPage() {
     } finally {
       setRestarting(false);
     }
+  }
+
+  /** 账号级「不参与定时任务」（issue #437）徽章。
+   *
+   *  语义容易被误解成「停用」，所以文案必须写明**转发不受影响**：它只让签到 /
+   *  保活 / 旅行 / 活跃 / 开学季 / 夜猫等任务跳过这个号，账号仍在号池里照常
+   *  被选号。企业账号不支持签到（上游恒 400/10001），这是不退池的静音开关。 */
+  function renderSkipTasksBadge(a: Account) {
+    if (a.skip_tasks !== true) return null;
+    return (
+      <Badge
+        variant="outline"
+        className="shrink-0 rounded-full border-muted-foreground/30 px-1.5 py-0 text-[10px] font-normal text-muted-foreground"
+        title={t('accounts.skipTasksBadgeTitle')}
+      >
+        <ListX className="mr-0.5 h-3 w-3" />
+        {t('accounts.skipTasksBadge')}
+      </Badge>
+    );
   }
 
   /** 账号状态徽章（表格与移动端卡片共用）。
@@ -1243,6 +1264,27 @@ function WorkbuddyAccountsPage() {
           <Scale
             className={
               'h-3.5 w-3.5 ' + (a.weight ? 'text-primary' : '')
+            }
+          />
+        </Button>
+        {/* 不参与定时任务（issue #437）：只停任务、不退池。企业账号不支持签到
+            （上游恒 400/10001），「临时停用」会把转发一起停掉，这个开关才是
+            「保留转发、静音任务」的那一档。写的是上游 auth 文件，改完重载生效。 */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 rounded-md"
+          title={a.skip_tasks ? t('accounts.skipTasksDisable') : t('accounts.skipTasksEnable')}
+          disabled={busy}
+          onClick={() => run(
+            a.file,
+            () => accountApi.setSkipTasks(a.file, a.skip_tasks !== true, groupId),
+            a.skip_tasks ? t('accounts.skipTasksSavedOff') : t('accounts.skipTasksSavedOn'),
+          )}
+        >
+          <ListX
+            className={
+              'h-3.5 w-3.5 ' + (a.skip_tasks ? 'text-primary' : '')
             }
           />
         </Button>
@@ -1769,6 +1811,7 @@ function WorkbuddyAccountsPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {renderSkipTasksBadge(a)}
                   {renderStatus(a)}
                   {renderModelLimit(a)}
                 </div>
@@ -1859,6 +1902,7 @@ function WorkbuddyAccountsPage() {
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap items-center gap-1.5">
+                    {renderSkipTasksBadge(a)}
                     {renderStatus(a)}
                   </div>
                   {/* 状态与模型受限入口分行显示，详情点击展开。 */}
