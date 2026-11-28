@@ -506,6 +506,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 条目），运维据此自查「为什么总选它」；只读遍历零风险，过期即消失。
 		ModelCosts: p.modelCostsStatusLocked(e, now),
 		Realm:      e.a.Realm(),
+		Domain:     e.a.DomainValue(),
 		Nickname:   e.a.Nickname,
 		Credits:    e.credits,
 		// Cooling 口径含连败降权（degradeUntil）：降权期账号不可选，运维在 /status

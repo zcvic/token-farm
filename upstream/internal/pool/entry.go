@@ -32,17 +32,23 @@ const degradeReason = "consecutive failures"
 
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	RefreshRisk   *RefreshRiskStatus `json:"refresh_risk,omitempty"`
-	UID           string             `json:"uid"`
-	Realm         string             `json:"realm,omitempty"`
-	Nickname      string             `json:"nickname,omitempty"`
-	Credits       int64              `json:"credits"`
-	Cooling       bool               `json:"cooling"`
-	CoolKind      string             `json:"cool_kind,omitempty"`
-	CoolRemaining int64              `json:"cool_remaining_sec,omitempty"`
-	Until         time.Time          `json:"until,omitempty"`
-	Reason        string             `json:"reason,omitempty"`
-	SoftStreak    int                `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
+	RefreshRisk *RefreshRiskStatus `json:"refresh_risk,omitempty"`
+	UID         string             `json:"uid"`
+	Realm       string             `json:"realm,omitempty"`
+	// Domain 凭证签发主机（auth 文件里的 domain 原值，如 www.codebuddy.cn /
+	// www.workbuddy.cn / www.workbuddy.ai）。
+	// 为什么单独给：同一 realm 下有多个签发方，上游清退是按签发方整批扫的
+	// （#296：cn 域 23 个 codebuddy.cn 号被清 21，同形态的 workbuddy.cn 号全活）。
+	// 出事时要能按签发方分组看「哪一批没了」，不能靠 realm 分组。
+	Domain        string    `json:"domain,omitempty"`
+	Nickname      string    `json:"nickname,omitempty"`
+	Credits       int64     `json:"credits"`
+	Cooling       bool      `json:"cooling"`
+	CoolKind      string    `json:"cool_kind,omitempty"`
+	CoolRemaining int64     `json:"cool_remaining_sec,omitempty"`
+	Until         time.Time `json:"until,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	SoftStreak    int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
 	// RateLimitedModels 当前仍在限额的模型列表（issue #36 限额台账）。
 	// 仅「带解析时间 6004」触发的模型级独立冷却（modelCooldowns 未到期条目）时非空，
 	// 每模型一行；运维据此看到"账号 A 的模型 X 还在限额中，预计 Z 时间恢复"。到期即消失（零回归）。
