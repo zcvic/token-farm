@@ -51,7 +51,7 @@ func LoadRoutesFromFile(path string) ([]string, error) {
 		return nil, fmt.Errorf("读取配置 %s: %w", path, err)
 	}
 	var doc struct {
-		Proxies map[string]string `json:"proxies"`
+		Proxies ProxyTable `json:"proxies"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("解析配置 %s: %w", path, err)

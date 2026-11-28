@@ -1543,6 +1543,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if cerr != nil {
 		// 线路配置错误：立刻失败、**不进轮转**（换多少个号都一样），也不喂熔断 ——
 		// 这是配置问题，不是账号问题（见 clientFor 的注释）。
+		logRouteConfigError(a, cerr)
 		return nil, 0, nil, cerr
 	}
 	paths := c.chatPaths(a)

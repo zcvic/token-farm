@@ -167,6 +167,11 @@ func main() {
 		stopSanitizeWatch := make(chan struct{})
 		defer close(stopSanitizeWatch)
 		go watchSanitizeConfig(*cfgPath, stopSanitizeWatch)
+		// 出口线路表同样随 config.json 热重载（issue #379）：面板加/改线路后
+		// 不必重启上游，聊天请求立刻按新线路出站。
+		stopProxyWatch := make(chan struct{})
+		defer close(stopProxyWatch)
+		go watchProxyConfig(*cfgPath, stopProxyWatch)
 	}
 	if n := len(cfg.Features.SanitizeExtraFeatures); n > 0 {
 		log.Printf("净化额外特征词表已加载：%d 条（config.json features.sanitize_extra_features）", n)

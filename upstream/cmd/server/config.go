@@ -12,6 +12,7 @@ import (
 
 	"workbuddy2api/internal/config"
 	"workbuddy2api/internal/prompt"
+	"workbuddy2api/internal/upstream"
 )
 
 // Config 顶层配置。
@@ -26,7 +27,7 @@ type Config struct {
 	// 面板会给账号绑一条线路（auths/*.json 顶层 `proxy` 写的是**线路名**），这个名字
 	// 在这里解析成地址；线路名查不到时上游**明确报错、不静默直连**（静默直连等于
 	// 「以为隔离了其实没隔离」，见 upstream.TransportFor）。
-	Proxies map[string]string `json:"proxies"`
+	Proxies upstream.ProxyTable `json:"proxies"`
 
 	// ReasoningAsContent 思考通道兜底（issue #135）：国际版 deepseek 思考模式下
 	// 答案只出现在 reasoning_content、content 恒空，只看 content 的客户端会看到
