@@ -1412,3 +1412,117 @@ e846aa27b6b7a4ee0531c7cb8d7d9ee8865b3dd4
 #      上游 manager 仓这一段之后若还有新提交，从 93395e16f1 之后继续按父链逐个扫。
 
 
+# ---- 2026-11 第三十批：上游 manager 93395e16f1 → e30bb8c121（14 个非 merge 提交）----
+#      仓库：https://github.com/ithtelab/workbuddy-manager
+#      区间：93395e16f1..e30bb8c121，14 个非 merge、无 merge 提交。本批取 7 项、
+#            不取 7 项（其中 2 项 CHANGELOG、2 项 README 赞助位、1 项 docs）。
+#      已取（按本仓结构重写）：
+#        · 40a694f3a8 风控预警噪音收敛（#405）。
+#          - server/db.py 新增 existing_task_log_keys()：一次取出已知任务日志的
+#            复合键集合，供增量采集比对。
+#          - server/services/tasklog.py 的 _collect_once 只处理**新增**行：旧行
+#            反复重扫会把「确认后 total 归零」的历史状态又算回来。
+#          - server/services/accountrisk.py 的 classify_task 忽略「后重试」这类
+#            中间态文案：它们最终会被成功行覆盖，逐条告警只会把真失败挤出视线。
+#          - 测试：test_account_risk.py 补对应断言（21 项通过）。
+#        · 4020905447 代理线路表热重载 + 对象写法兼容（#379 / 0062）。
+#          - upstream/internal/upstream/proxies_json.go：ProxyTable 的值同时接受
+#            字符串与 {url,weight,enabled} 对象，对象只取 url（旧实现按
+#            map[string]string 解码，前端写入对象后整份 config.json 读失败，
+#            表现为「保存成功、线路全丢」）。
+#          - upstream/cmd/server/proxy_reload.go：每 5 秒按 config.json 的
+#            mtime+size 判断是否重载，变化才 Load + ConfigureProxies；失败只
+#            WARN、沿用旧表，不退出进程（旧实现只在启动时加载一次）。
+#          - upstream/internal/upstream/proxy_error_log.go：同一条线路的配置
+#            错误只打一次 ERR，避免每笔转发都刷屏。
+#          - 接线：cmd/server/config.go、cmd/server/main.go、internal/upstream/
+#            client.go、internal/upstream/routes_file.go；测试 proxies_json_test.go
+#            与 proxy_reload_test.go。
+#          未取该提交的 CHANGELOG 段（上游版本线）。
+#        · 8cf2dc4b24 账号列表 4 秒短缓存 + 仪表板积分拆线（#444）。
+#          - 新增 server/services/accountcache.py：TTL 4 秒；键为（分组 id、账号
+#            目录、目录 mtime_ns），目录变化自动换键；每组只保留一条；提供
+#            get/put/invalidate/clear/stats。
+#          - server/routers/accounts.py：list_accounts 命中即返回、未命中扫描后
+#            写入；upload / set_proxy / set_weight / set_skip_tasks（本仓 #437
+#            新增）/ _save_and_finish / 单号签到 / 批量签到 / task-run 启动 /
+#            单号与批量刷令牌 / 刷新计划立即执行 / 每日任务立即执行 / 清冷却 /
+#            强制冷却 / 备注 / 删除 / 移动（源+目标）/ 重启 / 停用启用 均作废
+#            对应分组缓存；跨全部分组的动作（刷新计划、每日任务）整表 clear。
+#          - server/routers/upstreams.py：分组建 / 改 / 删后 accountcache.clear()。
+#          - web/app/(main)/dashboard/page.tsx：积分从账号列表请求里拆成独立
+#            creditsState，首屏不再等全量积分；积分卡用骨架屏；心跳时
+#            creditsState.reload()；partialFailed / refreshing 合并展示。
+#          - 新增 server/tests/test_account_cache_444.py：命中、TTL 到期、目录
+#            mtime 自动换键、上传后立刻可见、备注/停用立刻可见、按分组失效、
+#            每组单条。
+#        · b1fd6dae2e 新任务码适配与明确提示（#429 / 0061）。
+#          - upstream/scripts/task_runner.py：新增任务码识别与 jump_url 动态专家
+#            解析（_parse_expert_deeplink / _expert_id_from_jump_url，只信任
+#            workbuddy.cn / codebuddy.cn / tencent.com 后缀）；UNSUPPORTED_TASKS 明确列出
+#            本执行器不支持的码；describe_task_code / describe_missing_task 把
+#            「已知但服务端未下发」「未知码」「明确不支持」分开说明；
+#            resolve_task_spec 统一任务规格，process_task / light_up /
+#            process_school_task / process_account 接入。
+#          - 新增 upstream/scripts/test_task_new_codes.py（13 项，-S 下通过）。
+#          本地偏离（有意）：本仓早已用静态 expertx / EXPERT_EXPERIENCE 实现
+#          4 个 expert_use_* 与 WorkBuddy_Valorant，不整体替换成上游的 channel
+#          创建方案，只补 jump_url 动态解析与新码分类；wb_wechat_oa_subscribe_task
+#          本地是 claimonly 实现，**未**列入 UNSUPPORTED_TASKS（UNSUPPORTED_TASKS
+#          只含 task_student_verify）。
+#        · dad3acba65 积分加载中改用专用文案（#444 收尾）。
+#          - web/app/(main)/dashboard/page.tsx：creditsPending 时用
+#            dashboard.creditsLoading，不再复用「等待上游」；其余分支不变。
+#          - 五语言 locale 补 creditsLoading。
+#        · 776d383465 账号级「不参与任务、保留转发」开关（#437 / 0060）。
+#          - Go：internal/auth 的 Auth 增加 SkipTasks（Parse / SaveAtomic /
+#            AdoptNewer 全链路保留，旧文件缺字段按 false）；internal/scheduler
+#            的签到、活跃上报、保活、旅行、开学季逐号跳过；测试 skip_tasks_test.go
+#            两个包各一份。
+#          - 面板后端：wb2api.set_account_skip_tasks / task_account_files，列表
+#            下发 skip_tasks；tencent.write_auth_file 写回时保留旧 skip_tasks；
+#            renew.refresh_all 跳过；taskrun 的 build_command(accounts=) 与
+#            exclude_skip_tasks，target=ALL 时按 task_account_files 传显式
+#            名单，全部跳过时明确报「所有账号都设置了不参与定时任务…」；
+#            routers/accounts.py 新增 POST /api/accounts/skip-tasks、上传透传、
+#            批量签到/领补偿跳过并单列 skip_tasks 计数。
+#          - 前端：账号页徽章 + 开关、api.ts setSkipTasks、types.ts 字段、五语言
+#            各 7 个键（徽章/提示/开关/保存回执/签到附注）。
+#          - 新增 server/tests/test_account_skip_tasks.py（22 项通过）。
+#        · e30bb8c121 移除内置人设、空 file 回落中性兜底（#498 / 0064）。
+#          - Go：删除 internal/prompt/defaultprompt.md 与 go:embed；prompt.file
+#            为空时 custom/append 只回落一段极短的中性提示词并打 WARN，不再静默
+#            注入约 15 KB 内置人设；保存配置时校验 custom/append 必须给出文件，
+#            避免「存得下、跑起来才发现空」。
+#          - 面板：wb2api.py 删除「空 file 自动填内置路径」的死分支，保存时校验
+#            custom/append 必须有文件；test_config_io.py / test_issue62_prompt_file.py
+#            跟着改；settings/layout.tsx 的说明/警示/占位符同步；五语言 locale
+#            改对应键。
+#      未取：
+#        · 9b0cfdc4a1 / be0c0e456a 只改上游 CHANGELOG（分别补 #405、#429/#497），
+#          本仓版本线与发版流程不同。
+#        · 6925ecde4b / 51d4e1c469 README 赞助位换成招租展位 / 双语 SVG，纯上游
+#          仓库运营内容，本仓 README 不承接。
+#        · b75e053bf7 docs(sticky) 慢号波动与 session_sticky.ttl 的取舍，只改
+#          上游文档；本仓对应说明已在 docs/ 与代码注释里。
+#        · 226fcd61e8 默认出站 UA 对齐官方桌面端（0063，issue #497）：本仓
+#          upstream/internal/upstream/headers.go 已按 realm 分得更细且有真机
+#          抓包依据——CN chat/RPC 三段式、global 品牌段用 `workbuddy-ai`
+#          （上游默认的 `WorkBuddy AI` 带空格，实测会触发 403/11140）、billing
+#          单独单段。该补丁把默认一律收成单段并加 ua_style，会抹掉 RPC 与 CLI
+#          两族差异，是退步。
+#        · 4bf612b078 管理端 UA 同步（#497 收尾）：本仓 server/services/realm.py
+#          已镜像同一套更强的分域语义（_ua 只服务 chat/refresh/探测三段式，
+#          billing 路径走 billing_ua 单段，版本按 realm 取）。采纳该提交的
+#          ua_style 会与不取的 Go 侧 0063 脱节，并把 chat/探测 UA 一起改成单段。
+#      锚点提交：e30bb8c121f7927f7be1d6c6f4400a3aa496324c（本批取到的最新提交）
+#      上一次基线：93395e16f1（上一段「尾段评估」的终点；该段无取用）
+40a694f3a81f83aa4b17ad8ba98a5a1a0997d6ad
+4020905447393582435e2e30fe8712380495d575
+8cf2dc4b242f3798060ab9ef0c38e658a47ae5b3
+b1fd6dae2e9a65a92e0f09e136240176ed94e58f
+dad3acba65d476bb16f6c61e27bbfef083cc9475
+776d38346516b79fa4f4eb0b01a6c3d31e9d9e51
+e30bb8c121f7927f7be1d6c6f4400a3aa496324c
+
+

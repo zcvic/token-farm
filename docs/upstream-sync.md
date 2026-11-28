@@ -438,6 +438,52 @@ trae / discovery / dumate / cline / kilo 五个协议源）。
 > - 剩下 `4385320f0c`（上游 deploy/README 变量表）、`c1853fe9be` / `93395e16f1`
 >   （上游 CHANGELOG）都是上游文档，本仓结构与版本线不同。
 
+> **manager 仓新批（2026-11-28，`93395e16f1` → `e30bb8c121`）**：14 个非 merge 提交，
+> **取 7 个、不取 7 个**。取用的提交按本仓结构重写，逐条落点见
+> `deploy/workbuddy-panel-ref.txt` 第三十批。
+>
+> - **`40a694f3a8` 风控预警噪音（#405）**：`db.existing_task_log_keys()` 一次取出已知
+>   日志键，`tasklog._collect_once` 只处理新增行；`accountrisk.classify_task` 忽略
+>   「后重试」中间态。旧实现反复重扫旧行，已确认归零的历史状态会被再算回来。
+> - **`4020905447` 代理线路热重载（0062 / #379）**：新增 `proxies_json.go` 让线路表
+>   同时接受字符串与 `{url,...}` 对象（旧实现按 `map[string]string` 解码，前端存对象
+>   后整份 config.json 读失败）；`cmd/server/proxy_reload.go` 每 5 秒按 mtime+size
+>   重载并 `ConfigureProxies`，失败只 WARN 沿用旧表；`proxy_error_log.go` 去重同一条
+>   线路的错误日志。
+> - **`8cf2dc4b24` 账号列表 4 秒缓存（#444）**：新增 `server/services/accountcache.py`
+>   （键含账号目录 mtime，目录变化自动换键，每组单条）；`list_accounts` 命中直接返回；
+>   所有写路径（导入、代理、权重、本仓新增的 skip_tasks、落盘、签到、任务、刷令牌、
+>   冷却、备注、删/移、重启、停用）逐个作废，跨分组动作整表 clear；分组增删改
+>   （`upstreams.py`）也 clear。仪表板把积分拆成独立的 `creditsState`，首屏不再等全量
+>   积分，加载时用骨架屏与中性文案（`dad3acba65` 收尾的 `creditsLoading`）。
+> - **`b1fd6dae2e` 新任务码（0061 / #429）**：`task_runner.py` 增加 jump_url 动态专家
+>   解析（只信任 `workbuddy.cn` / `codebuddy.cn` / `tencent.com` 后缀）、
+>   `UNSUPPORTED_TASKS` 与「已知未下发 / 未知码 / 明确不支持」三类提示。本仓已有
+>   静态 `expertx` / `EXPERT_EXPERIENCE` 实现，不整体替换成上游的 channel 创建方案；
+>   `wb_wechat_oa_subscribe_task` 本地按 claimonly 实现，未列入不支持清单。
+> - **`776d383465` 账号级不参与任务（0060 / #437）**：Go 侧 `auth.SkipTasks` 全链路
+>   保留（旧文件缺字段按 false）+ 签到/活跃/保活/旅行/开学季逐号跳过；面板侧
+>   `wb2api.set_account_skip_tasks` / `task_account_files`、`tencent.write_auth_file`
+>   保留旧值、`renew.refresh_all` 与 `taskrun` 的 ALL 名单过滤、批量签到/领补偿跳过；
+>   前端徽章与开关、五语言 7 个键。
+> - **`e30bb8c121` 移除内置人设（0064 / #498）**：删除 `internal/prompt/defaultprompt.md`
+>   与 `go:embed`，空 `prompt.file` 只回落一段极短中性提示词并打 WARN；保存
+>   custom/append 时校验文件必填，面板删掉「空 file 自动填内置路径」的死分支。
+>
+> 不取：`9b0cfdc4a1` / `be0c0e456a`（上游 CHANGELOG）、`6925ecde4b` / `51d4e1c469`
+> （README 赞助位）、`b75e053bf7`（上游 docs）。**`226fcd61e8`（0063）与
+> `4bf612b078` 也不取**：本仓 `upstream/internal/upstream/headers.go` 与
+> `server/services/realm.py` 已按 realm 分得更细且有真机依据——CN chat/RPC 三段式、
+> global 品牌段 `workbuddy-ai`（上游默认的 `WorkBuddy AI` 带空格会触发 403/11140）、
+> billing 单独单段；这两个提交把默认 UA 一律收成单段并引入 `ua_style`，会抹掉 RPC /
+> CLI 两族差异，且面板与 Go 两侧需要一起改才有意义。
+>
+> 测试：`upstream` 的 `go build ./... && go vet ./... && go test ./...` 全通过；
+> `upstream/scripts` 的 `test_task_new_codes` 13 项通过；面板
+> `python -m unittest discover -s server/tests -t .` 5233 项通过（跳过 27）；
+> `web` 的 `tsc --noEmit` 与 `dashboard-credits.test.mjs` 通过。
+
+
 **`shuishuipingan/qoder2api-hub`**（Qoder 协议层参考源）不是 fork、也没有共享
 历史，接入方式是**整目录 vendor**，不按提交 cherry-pick：
 
