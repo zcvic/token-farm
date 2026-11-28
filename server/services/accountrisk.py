@@ -144,6 +144,11 @@ def classify_task(event: dict) -> tuple[str, int] | None:
     message, kind = str(event.get('message') or ''), event.get('kind')
     if kind not in ('keepalive', 'checkin', 'travel', 'activity', 'user-resource'):
         return None
+    # 重试中间态不是最终结果（issue #405）：上游偶发 5xx 时先记一条
+    # 「— 5s 后重试(1/3)」，同一轮往往随后成功。这类行会长期留在容器日志
+    # 末尾被反复重放，据此告警等于噪音。
+    if '后重试' in message:
+        return None
     if re.search(r'\b429\b', message):
         return ('token_refresh' if kind == 'keepalive' or 'refresh:' in message else str(kind), 429)
     server_error = re.search(r'http (5\d\d)', message, re.I)
@@ -198,7 +203,6 @@ async def warnings(*, group_id: int | None = None, all_groups: bool = False, rea
         for row in rows:
             if realm in ('cn', 'global') and row['realm'] != realm:
                 continue
-            total += 1
             risk = (pool.get(row['uid'], {}).get('refresh_risk') or {}) if known else {
                 'until': row['pause_until'], 'needs_review': bool(row['needs_review']),
                 'failures': row['failures'], 'last_failure_at': row['last_failure_at']}
@@ -208,6 +212,10 @@ async def warnings(*, group_id: int | None = None, all_groups: bool = False, rea
                 continue
             if active and row['uid'] in seen_paused:
                 continue
+            # 计数必须在**所有过滤之后**：issue #405 的现场是「确认后列表清空、
+            # 但接口仍返回 total=4」，前端拿 total 做角标，于是怎么点都消不掉。
+            # total 只统计本次真正返回的条目。
+            total += 1
             if active:
                 seen_paused.add(row['uid'])
             items.append({k: row[k] for k in ('id', 'uid', 'nickname', 'realm', 'operation', 'http_status', 'ts', 'action_error')} |

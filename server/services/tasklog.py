@@ -638,9 +638,17 @@ async def _collect_once(limit: int = TAIL_LINES) -> tuple[int, int]:
         events.extend(parse_lines(lines))
     if not events:
         return 0, 0
+    # 先算出「这一批里哪些是新增行」，只把新增行交给预警分类器（issue #405）：
+    # 否则容器日志尾部 3000 行里的历史失败/重试行每 30 秒被重放一次，
+    # 用户确认或删除记录后，下一轮又会原样重建。
+    keys = [str(e.get('dedup_key') or '') for e in events]
+    known = await asyncio.to_thread(db.existing_task_log_keys, keys)
+    fresh = [e for e in events
+             if str(e.get('dedup_key') or '') and str(e.get('dedup_key')) not in known]
     added = await asyncio.to_thread(db.add_task_logs, events)
-    from . import accountrisk
-    await accountrisk.handle_tasks(events)
+    if fresh:
+        from . import accountrisk
+        await accountrisk.handle_tasks(fresh)
     return len(events), added
 
 

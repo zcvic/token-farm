@@ -194,3 +194,62 @@ class AccountRiskTest(unittest.TestCase):
         from server.services import tasklog
         event=tasklog.parse_line('2026-11-01T01:00:00Z keepalive done: checked=49 ok=35 failed=14 skipped=0')
         self.assertIn('尝试 49，成功 35，失败 14',event['message'])
+
+
+class RetryNoiseTest(unittest.TestCase):
+    """issue #405：重试中间态不算预警；确认后 total 必须与列表一致。"""
+
+    setUp = AccountRiskTest.setUp
+    tearDown = AccountRiskTest.tearDown
+
+    def warnings(self):
+        return asyncio.run(accountrisk.warnings())
+
+    def test_retry_intermediate_is_not_classified(self):
+        self.assertIsNone(accountrisk.classify_task({
+            'kind': 'checkin',
+            'message': 'upstream server (http 500): {"code":10001} — 5s 后重试(1/3)',
+        }))
+        self.assertEqual(
+            accountrisk.classify_task({
+                'kind': 'checkin',
+                'message': 'upstream server (http 500): final failure',
+            }),
+            ('checkin', 500),
+        )
+
+    def test_acknowledged_total_matches_items(self):
+        event = {'ts': self.now, 'uid': self.uid[:8], 'kind': 'checkin',
+                 'message': 'upstream server (http 500): boom'}
+        asyncio.run(accountrisk.handle_tasks([event]))
+        first = self.warnings()
+        self.assertEqual(1, len(first['items']))
+        self.assertEqual(1, first['total'], 'total 应与列表一致')
+        self.assertTrue(accountrisk.acknowledge(first['items'][0]['id']))
+        after = self.warnings()
+        self.assertEqual([], after['items'])
+        self.assertEqual(0, after['total'],
+                         '确认后 total 必须归零，否则前端角标永远消不掉')
+
+    def test_collect_hands_only_fresh_events_to_risk(self):
+        from server.services import tasklog
+        event = {'ts': self.now, 'uid': self.uid[:8], 'kind': 'checkin',
+                 'message': 'upstream server (http 500): boom',
+                 'dedup_key': 'test-fresh-only'}
+        handled: list[list[dict]] = []
+
+        async def fake_handle_tasks(events, *args, **kwargs):
+            handled.append(list(events))
+
+        async def fake_read_logs(_name, _limit):
+            return ['raw']
+
+        with mock.patch.object(tasklog, '_log_containers', lambda: [None]), \
+             mock.patch.object(tasklog, '_read_logs', fake_read_logs), \
+             mock.patch.object(tasklog, 'parse_lines', lambda _lines: [dict(event)]), \
+             mock.patch.object(accountrisk, 'handle_tasks', fake_handle_tasks):
+            asyncio.run(tasklog._collect_once())
+            asyncio.run(tasklog._collect_once())
+
+        self.assertEqual(1, len(handled), '同一批日志第二次采集不应再交给预警')
+        self.assertEqual('test-fresh-only', handled[0][0]['dedup_key'])
