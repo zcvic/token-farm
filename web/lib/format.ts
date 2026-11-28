@@ -205,16 +205,19 @@ export function fmtAgo(ts: number | null | undefined): string {
  * 复制文本到剪贴板，返回**是否真的复制成功**。
  *
  * 为什么必须检查回退路径的返回值（issue #57）：`document.execCommand('copy')`
- * 是**有布尔返回值**的 —— 被浏览器拒绝时返回 `false`（非安全上下文、权限被拒、
- * 不在用户手势之内都会这样）。原先忽略它、直接 `return true`，于是「根本没复制
- * 成功」也会提示「已复制到剪贴板」，用户对着空剪贴板反复点，只能来报「提示成功
- * 但复制不上」。
+ * 是**有布尔返回值**的 —— 被浏览器拒绝时通常返回 `false`。原先忽略它、直接
+ * `return true`，于是「根本没复制成功」也会提示「已复制到剪贴板」，用户对着
+ * 空剪贴板反复点，只能来报「提示成功但复制不上」。
  *
  * 两条路径的判据都落在「真的写进去了」：
  *   1. 优先 Clipboard API —— 它只在**安全上下文**（HTTPS 或 localhost）可用，
  *      普通 HTTP 访问时 `navigator.clipboard` 是 undefined；
  *   2. 回退到 `execCommand('copy')`，并**检查它的布尔返回值**。
  * 都失败返回 `false`，由调用方如实提示（文案引导手动选择复制）。
+ *
+ * 还有一类更隐蔽的假成功：`execCommand` 可能返回 true，但实际什么都没写 ——
+ * 异步等待后手势过期、文档失焦、选区落在视口外、iOS 只读选区都会这样。
+ * 所以回退前先确认窗口有焦点且用户激活未过期，临时元素也放在视口内。
  *
  * iOS 的例外：iOS Safari **只允许从「可编辑」区域复制**。用只读 textarea 走
  * execCommand 时它会返回 true，却什么都没写——这正是「提示已复制、粘贴是空的」
@@ -234,7 +237,25 @@ export async function copyText(text: string): Promise<boolean> {
     }
   }
 
+  // 回退路径靠「临时元素 + execCommand」：它必须在用户手势仍然有效、文档
+  // 仍有焦点时才有写入权限。Safari 尤其严格 —— 点击里先 `await` 一次
+  // （比如密钥页要向后端要明文）再复制时，手势已经过期，`execCommand`
+  // 可能**返回 true 却什么都没写**。既然无法回读剪贴板，就如实返回失败，
+  // 让调用方展示可手动复制的明文，而不是谎报成功。
+  if (!document.hasFocus() || hasUserActivationExpired()) return false;
   return copyViaTextarea(text, isAppleTouchDevice());
+}
+
+/**
+ * 用户手势是否已经过期（仅在浏览器实现了 UserActivation API 时能判断）。
+ *
+ * 正常情况下复制按钮的 click 回调里 `isActive` 为 true；密钥页那种
+ * 「先请求后端拿明文、再复制」的流程在 Safari 上会变成 false。
+ * 没实现该 API 的浏览器返回 false（不阻止复制）。
+ */
+function hasUserActivationExpired(): boolean {
+  const activation = (navigator as Navigator & {userActivation?: {isActive?: boolean}}).userActivation;
+  return activation?.isActive === false;
 }
 
 /** iPhone / iPad（含 iPadOS 13+ 伪装成 Mac 的触屏设备）。 */
@@ -242,6 +263,18 @@ function isAppleTouchDevice(): boolean {
   const ua = navigator.userAgent || '';
   if (/iPad|iPhone|iPod/.test(ua)) return true;
   return /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+}
+
+/**
+ * 是否为 Apple 的 WebKit（Safari / iOS 上用壳的浏览器）。
+ *
+ * iOS 上的 Chrome / Edge / Firefox 虽然也包着 WebKit，但 `ios` 分支已经先
+ * 拦下了；这里主要识别 macOS Safari —— 它在 `copy` 事件里 `preventDefault`
+ * 会把要写的内容变成空串，不能走「事件里 setData」那条路。
+ */
+function isAppleWebKit(): boolean {
+  const ua = navigator.userAgent || '';
+  return /AppleWebKit/.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|EdgiOS|Edg\//.test(ua);
 }
 
 /** 执行复制并恢复用户原来的选区：复制是旁路动作，不该弄丢界面上已有的选择。 */
@@ -259,10 +292,18 @@ function withSavedSelection(fn: () => boolean): boolean {
 }
 
 /**
- * execCommand 回退：只读 textarea（不弹键盘），选中后复制。
+ * execCommand 回退：临时 textarea（桌面端只读，不弹键盘），选中后复制。
  *
  * `ios` 为真时临时打开 contentEditable / readOnly，这是 iOS Safari 认可的唯一
  * 复制姿势（只读 textarea 的选区会被忽略，命令照样返回 true）。
+ *
+ * 元素必须留在**视口内**：Safari 会忽略视口外元素上的选区，命令仍返回 true，
+ * 结果剪贴板是空的。复制完把焦点还给原来的元素，避免弹窗/键盘操作丢焦点。
+ *
+ * Chromium / Firefox（Windows 上的 Chrome、Edge，以及安卓等）再额外在 `copy`
+ * 事件里直接写入目标文本：不依赖临时元素的选区是否仍然有效，弹窗的焦点陷阱、
+ * 滚动或重排都不会让「返回 true 但复制的是空串」发生。WebKit 上 `preventDefault`
+ * 反而可能把内容写成空串（实测），所以 Apple 设备仍走选区方案。
  */
 function copyViaTextarea(text: string, ios: boolean): boolean {
   const ta = document.createElement('textarea');
@@ -273,14 +314,39 @@ function copyViaTextarea(text: string, ios: boolean): boolean {
   } else {
     ta.setAttribute('readonly', '');
   }
-  // 透明且不占位：不闪、不挡界面。iOS 上不能放到视口外（选区会被忽略）
+  // 1px、透明、不占位：不闪、不挡界面，但仍在视口内（Safari 需要）
   ta.style.position = 'fixed';
   ta.style.top = '0';
-  ta.style.left = ios ? '0' : '-9999px';
-  ta.style.width = ios ? '1px' : '';
-  ta.style.height = ios ? '1px' : '';
+  ta.style.left = '0';
+  ta.style.width = '1px';
+  ta.style.height = '1px';
+  ta.style.padding = '0';
+  ta.style.border = '0';
+  ta.style.outline = 'none';
+  ta.style.boxShadow = 'none';
   ta.style.overflow = 'hidden';
   ta.style.opacity = '0';
+  // 12pt：避开 iOS 对小于 16px 输入框的自动缩放
+  ta.style.fontSize = '12pt';
+  ta.setAttribute('aria-hidden', 'true');
+  ta.setAttribute('tabindex', '-1');
+
+  const previousFocus =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+  // 非 WebKit 引擎：在 copy 事件里显式写数据，彻底摆脱对选区的依赖。
+  // 成功判据也随之变成「命令返回 true **且** 我们的 copy 事件真的跑过」——
+  // 事件没跑就说明 execCommand 没有走到写入，不能报成功。
+  const writeInCopyEvent = !ios && !isAppleWebKit();
+  let copiedInEvent = false;
+  const onCopy = (e: ClipboardEvent) => {
+    if (!e.clipboardData) return;
+    e.clipboardData.setData('text/plain', text);
+    e.preventDefault();
+    copiedInEvent = true;
+  };
+  if (writeInCopyEvent) document.addEventListener('copy', onCopy, true);
+
   document.body.appendChild(ta);
   try {
     return withSavedSelection(() => {
@@ -290,17 +356,23 @@ function copyViaTextarea(text: string, ios: boolean): boolean {
         range.selectNodeContents(ta);
         sel?.removeAllRanges();
         sel?.addRange(range);
+      } else {
+        ta.focus({preventScroll: true});
       }
       ta.select();
       ta.setSelectionRange(0, text.length);
       try {
-        return document.execCommand('copy') === true;
+        const ok = document.execCommand('copy') === true;
+        return writeInCopyEvent ? ok && copiedInEvent : ok;
       } catch {
         return false;
       }
     });
   } finally {
     document.body.removeChild(ta);
+    if (writeInCopyEvent) document.removeEventListener('copy', onCopy, true);
+    // 复制是旁路动作：焦点该留在原来的按钮/输入框上
+    previousFocus?.focus({preventScroll: true});
   }
 }
 

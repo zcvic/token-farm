@@ -408,9 +408,20 @@ namespace TokenFarmLauncher
                 _settings.Set(InitialCredentialsShownKey, "1");
                 _settings.Save();
             }
-            try { Clipboard.SetText(pwd); } catch { }
+            // 剪贴板可能被其他程序占用（SetText 会抛 ExternalException）。
+            // 以前吞掉异常后仍然提示「已复制到剪贴板」，用户去粘贴却是空的；
+            // 这里重试几次并如实告诉用户复制是否成功。
+            bool copied = false;
+            for (int attempt = 0; attempt < 3 && !copied; attempt++)
+            {
+                try { Clipboard.SetText(pwd); copied = true; }
+                catch { if (attempt < 2) { Thread.Sleep(50); } }
+            }
+            string copyHint = copied
+                ? "密码已复制到剪贴板"
+                : "剪贴板被其他程序占用，自动复制失败；请手动记下下面的密码";
             MessageBox.Show(this,
-                "面板的初始管理员账号如下（密码已复制到剪贴板）：\n\n用户名：admin\n密码：" + pwd +
+                "面板的初始管理员账号如下（" + copyHint + "）：\n\n用户名：admin\n密码：" + pwd +
                 "\n\n请登录后立即在「设置 → 管理用户」中修改密码。\n" +
                 "（若你已修改过密码，此处显示的是初始密码、已失效。随时可在托盘菜单再次查看。）",
                 "初始管理员账号", MessageBoxButtons.OK, MessageBoxIcon.Information);
