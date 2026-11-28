@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"workbuddy2api/internal/prompt"
 )
 
 func TestDefault(t *testing.T) {
@@ -583,7 +585,7 @@ func TestPromptFileMissing(t *testing.T) {
 	}
 }
 
-// TestPromptFileOverride 自定义 file 覆盖内置默认。
+// TestPromptFileOverride 自定义 file 覆盖兜底文本。
 func TestPromptFileOverride(t *testing.T) {
 	dir := t.TempDir()
 	pf := filepath.Join(dir, "my.md")
@@ -599,6 +601,25 @@ func TestPromptFileOverride(t *testing.T) {
 	}
 	if c.PromptText != want {
 		t.Errorf("PromptText=%q want %q", c.PromptText, want)
+	}
+}
+
+// TestPromptEmptyFileFallsBackToDegraded issue #498：custom/append 未配 file 时
+// 不再加载随二进制分发的人设，而是极短的中性兜底（并打 WARN，不静默）。
+func TestPromptEmptyFileFallsBackToDegraded(t *testing.T) {
+	for _, mode := range []string{"custom", "append"} {
+		dir := t.TempDir()
+		fp := filepath.Join(dir, "c.json")
+		if err := os.WriteFile(fp, []byte(`{"prompt":{"mode":"`+mode+`"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatalf("mode=%s: %v", mode, err)
+		}
+		if c.PromptText != prompt.Degraded {
+			t.Errorf("mode=%s: PromptText len=%d want Degraded", mode, len(c.PromptText))
+		}
 	}
 }
 
@@ -691,8 +712,8 @@ func TestUpstreamUserAgentConfig(t *testing.T) {
 
 // ---- prompt.mode=append（issue #129 三模式） ----
 
-// TestPromptAppendModeAccepted B1：append 新值合法，PromptText 非空（内置默认，
-// 与 custom 同加载路径）。
+// TestPromptAppendModeAccepted B1：append 新值合法，PromptText 非空（空 file 走
+// 中性兜底，与 custom 同加载路径）。
 func TestPromptAppendModeAccepted(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
@@ -705,7 +726,7 @@ func TestPromptAppendModeAccepted(t *testing.T) {
 		t.Errorf("mode=%q want append", c.Prompt.Mode)
 	}
 	if c.PromptText == "" {
-		t.Error("append should load PromptText (built-in default)")
+		t.Error("append should load PromptText (neutral fallback)")
 	}
 }
 

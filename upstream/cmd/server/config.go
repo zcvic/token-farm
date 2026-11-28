@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"strconv"
@@ -171,8 +172,8 @@ type Config struct {
 		// custom = 网关用自有系统提示词替换客户端 system/developer（显式配置仍可覆盖回替换）；
 		// append = 两者并用：开头连续 system/developer 块后插网关 system，既有消息逐字不动（issue #129）。
 		Mode string `json:"mode"` // "custom" / "append" / "passthrough"
-		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
-		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
+		// File 提示词文件路径；空 = 中性兜底 prompt.Degraded（issue #498 起不再内置人设）；
+		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到兜底文本）。
 		File string `json:"file"`
 	} `json:"prompt"`
 
@@ -659,8 +660,8 @@ func parseServerDur(key, raw string, def time.Duration) (time.Duration, error) {
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。
 // mode 非法（非 custom/append/passthrough）启动报错，避免静默回落到某一分支；
-// custom/append 模式下 file 非空但不可读 → 报错（fail fast），file 空 → 用内置默认
-// （两模式共用同一加载路径，PromptText 均非空）。
+// custom/append 模式下 file 非空但不可读 → 报错（fail fast）；file 空 → 回落到
+// prompt.Degraded 中性兜底（issue #498：不再有随二进制分发的人设文本）。
 // passthrough 模式不加载文本（透传客户端原始 system，文本在降级时用 prompt.Degraded）。
 func (c *Config) normalizePrompt() error {
 	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
@@ -677,6 +678,10 @@ func (c *Config) normalizePrompt() error {
 		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)
 		if err != nil {
 			return err
+		}
+		if strings.TrimSpace(c.Prompt.File) == "" {
+			// 不静默：issue #498 的抱怨之一就是「回落到内置文本却没有任何日志」。
+			log.Printf("[WARN] prompt.mode=%s 但 prompt.file 为空，使用中性兜底提示词（不再内置人设）", c.Prompt.Mode)
 		}
 		c.PromptText = text
 	}
