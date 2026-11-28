@@ -35,7 +35,7 @@ import {useRealm} from '@/lib/realm-context';
 import {usePlatform} from '@/lib/platform-context';
 import {filterByPlatformRealm} from '@/lib/platform-realm';
 import {platformExpiryOf} from '@/lib/platform-account-list';
-import {formatCreditValue} from '@/lib/platform-credits';
+import {creditUnitWithFallback, formatCreditValue} from '@/lib/platform-credits';
 import type {
   CreditsFlow,
   CreditsMeta,
@@ -413,15 +413,16 @@ export default function DashboardPage() {
    * 平台余额的单位。
    *
    * Kilo 的余额是**美元**（`unit='usd'`），Trae 国际版也是。卡片上写「积分」
-   * 会把 `$12.34` 读成「12 积分」，数量级完全错。同平台的账号单位一致，取到
-   * 一个 `usd` 就按美元画；没有 `unit` 的旧数据按积分（改造前的口径）。
+   * 会把 `$12.34` 读成「12 积分」，数量级完全错。**只看当前版本可见的账号**：
+   * Trae 一次返回国内版与国际版两个池的余额，拿全量判断会让国内版的积分卡
+   * 跟着国际版变成美元。没有 `unit` 的旧数据按积分（改造前的口径）。
    */
   const platCreditUnit = useMemo(
-    () => (platCreditsList.some((c) => c?.unit === 'usd')
+    () => (platAccounts.some((a) => platCreditsOf[a.uid]?.unit === 'usd')
         || (platCreditsList.length === 0 && platform === 'kilo')
       ? 'usd'
       : 'credits'),
-    [platCreditsList, platform],
+    [platAccounts, platCreditsOf, platCreditsList.length, platform],
   );
   const platCreditLabel = platCreditUnit === 'usd'
     ? t('metric.balance')
@@ -1330,6 +1331,9 @@ export default function DashboardPage() {
               {platAccounts.slice(0, 9).map((a) => {
                 const remain = platformRemain(a);
                 const cred = platCreditsOf[a.uid]?.credits;
+                // 单位按这一条自己的 `unit`：分版本平台的国内版（积分）与国际版
+                // （美元）可能同时出现在同一个列表里。
+                const credUnit = creditUnitWithFallback(platCreditsOf[a.uid], platCreditUnit);
                 return (
                   <div key={a.uid} className="rounded-2xl bg-background/60 p-3">
                     <div className="flex items-center justify-between gap-2">
@@ -1358,9 +1362,10 @@ export default function DashboardPage() {
                     </div>
                     <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px]">
                       <span className="text-muted-foreground">{a.realm_label || a.realm}</span>
-                      <span className="font-medium tabular-nums" title={platCreditLabel}>
+                      <span className="font-medium tabular-nums"
+                            title={credUnit === 'usd' ? t('metric.balance') : t('metric.credits')}>
                         {typeof cred === 'number'
-                          ? (platCreditUnit === 'usd'
+                          ? (credUnit === 'usd'
                               ? formatCreditValue(cred, 'usd')
                               : t('metric.creditAmount', {n: fmtNumber(cred), count: Math.round(cred)}))
                           : ''}

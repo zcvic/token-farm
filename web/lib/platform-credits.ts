@@ -59,6 +59,21 @@ export function creditUnit(
 }
 
 /**
+ * 条目自己的单位优先，缺省时才用整列的兜底口径。
+ *
+ * 为什么不能反着来：Trae 同时有国内版（积分）与国际版（美元）账号，账号一次
+ * 全部取回、按版本在前端过滤。整列兜底若压过条目，国内版账号就会被画成
+ * `$1234`——它登记的明明是积分。反过来，旧后端没给 `unit` 的条目仍要跟着
+ * 整列走，否则同一列里数字与列头单位会不一致。
+ */
+export function creditUnitWithFallback(
+  entry: PlatformCredits | undefined | null,
+  fallback: 'usd' | 'credits' = 'credits',
+): 'usd' | 'credits' {
+  return (entry?.unit ?? fallback) === 'usd' ? 'usd' : 'credits';
+}
+
+/**
  * 余额数字的展示文本（纯函数，不依赖 i18n 运行时）。
  *
  * 美元带 `$` 前缀并按量级给位数：余额常是 `0.0x` 量级，截成整数就等于显示

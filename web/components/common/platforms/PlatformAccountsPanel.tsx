@@ -71,7 +71,7 @@ import {useNow} from '@/lib/use-now';
 import {fmtDateTime, fmtRemain} from '@/lib/format';
 import {paginate} from '@/lib/account-list';
 import {
-  creditUnit,
+  creditUnitWithFallback,
   formatCreditValue,
   platformCreditExpiries,
   platformCreditPacks,
@@ -123,9 +123,7 @@ const PAGE_SIZE = 20;
  */
 function creditText(entry: PlatformCredits | undefined, loading: boolean,
                     fallback?: 'usd' | 'credits'): string {
-  const unit = creditUnit(entry) === 'usd' || fallback === 'usd'
-    ? 'usd' as const
-    : 'credits' as const;
+  const unit = creditUnitWithFallback(entry, fallback);
   if (entry && typeof entry.credits === 'number') {
     return formatCreditValue(entry.credits, unit);
   }
@@ -996,20 +994,23 @@ export function PlatformAccountsPanel({
    * 余额单位：Kilo 的余额是美元（`unit='usd'`），Trae 国际版也是。
    *
    * 列头与数字必须一起换：只把数字画成 `$12.34` 而列头还写「积分」，用户仍会
-   * 以为那是积分。同平台账号单位一致，取到一个 `usd` 就整列按美元；没有
-   * `unit` 的旧数据按积分（改造前的口径）。
+   * 以为那是积分。**只看当前版本可见的账号**：分版本平台（Trae）一次返回
+   * 国内版与国际版两个池的余额，拿全量去判断会让国内版的积分列跟着国际版
+   * 变成美元（`$1234`）。没有 `unit` 的旧数据按积分（改造前的口径）。
    *
    * 余额还没取回时（首次加载 / 查询失败清空）用平台的固定口径兜底：Kilo 只有
    * 美元，否则列头会先写「积分」再跳成「余额」。Trae 的单位随版本变，只能等
    * 数据到了再定。
    */
-  const creditUnitOf = Object.values(credits).some((c) => c?.unit === 'usd')
+  const creditUnitOf = scopedAccounts.some((a) => credits[a.uid]?.unit === 'usd')
       || (Object.keys(credits).length === 0 && platform === 'kilo')
     ? 'usd' as const
     : 'credits' as const;
   const creditColumnLabel = creditUnitOf === 'usd'
     ? t('metric.balance')
     : t('platforms.colCredits');
+  /** 用量弹窗的单位：同样以这一条账号自己的 `unit` 为准（见上）。 */
+  const usageUnit = creditUnitWithFallback(usageCredit, creditUnitOf);
 
   const loginStatusText = (() => {
     if (!login) return '';
@@ -1494,6 +1495,9 @@ export function PlatformAccountsPanel({
                   // 积分到期明细：后端已经筛过一遍，这里按**当前时刻**再筛一次
                   // —— 页面停留期间包会到期 / 被用满，列表不会每分钟重新请求。
                   const creditExpiries = platformCreditExpiries(credits[a.uid], now);
+                  // 单位同样按这一条自己的 `unit` 定：分版本平台里国内版（积分）
+                  // 与国际版（美元）会出现在同一个接口结果里，不能用整列口径压过去。
+                  const creditUnitHere = creditUnitWithFallback(credits[a.uid], creditUnitOf);
                   return (
                     <TableRow key={a.uid} className="border-b border-border/40">
                       <TableCell className="pl-4">
@@ -1597,12 +1601,12 @@ export function PlatformAccountsPanel({
                               title={creditTitle(credits[a.uid], creditsHint,
                                 (when) => t('platforms.creditsLastRecorded', {when}))}
                             >
-                              {creditText(credits[a.uid], creditsLoading, creditUnitOf)}
+                              {creditText(credits[a.uid], creditsLoading, creditUnitHere)}
                               {typeof credits[a.uid]?.checkin_credits === 'number'
                                 && (credits[a.uid]?.checkin_credits as number) > 0 && (
                                   <span className="ml-1 text-[10px] text-muted-foreground">
                                     {t('platforms.creditsCheckinShort', {
-                                      n: creditNum(credits[a.uid]?.checkin_credits, creditUnitOf),
+                                      n: creditNum(credits[a.uid]?.checkin_credits, creditUnitHere),
                                     })}
                                   </span>
                                 )}
@@ -1611,7 +1615,7 @@ export function PlatformAccountsPanel({
                                 「多少分 · 还有几天到期」，悬停给出逐包明细与合计。
                                 只画最近一笔（单元格放不下多行），但金额必须带上 ——
                                 只写日期会被读成「余额整体那天到期」。 */}
-                            <CreditCountdown expiries={creditExpiries} unit={creditUnitOf} />
+                            <CreditCountdown expiries={creditExpiries} unit={creditUnitHere} />
                           </div>
                         </TableCell>
                       )}
@@ -1999,7 +2003,7 @@ export function PlatformAccountsPanel({
                     <div className="rounded-[12px] border border-border/60 bg-muted/30 px-3 py-2">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs text-muted-foreground">
-                          {creditUnitOf === 'usd'
+                          {usageUnit === 'usd'
                             ? t('metric.balance')
                             : t('platforms.creditsBalance')}
                         </span>
@@ -2008,21 +2012,21 @@ export function PlatformAccountsPanel({
                           title={creditTitle(usageCredit, creditsHint,
                             (when) => t('platforms.creditsLastRecorded', {when}))}
                         >
-                          {creditText(usageCredit, creditsLoading, creditUnitOf)}
+                          {creditText(usageCredit, creditsLoading, usageUnit)}
                         </span>
                       </div>
                       <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                         <span>{t('platforms.creditsLimit')}</span>
                         <span className="text-right tabular-nums text-foreground">
-                          {creditNum(usageCredit?.limit, creditUnitOf)}
+                          {creditNum(usageCredit?.limit, usageUnit)}
                         </span>
                         <span>{t('platforms.creditsUsed')}</span>
                         <span className="text-right tabular-nums text-foreground">
-                          {creditNum(usageCredit?.used, creditUnitOf)}
+                          {creditNum(usageCredit?.used, usageUnit)}
                         </span>
                         <span>{t('platforms.creditsCheckin')}</span>
                         <span className="text-right tabular-nums text-foreground">
-                          {creditNum(usageCredit?.checkin_credits, creditUnitOf)}
+                          {creditNum(usageCredit?.checkin_credits, usageUnit)}
                           {usageCredit?.checked_in
                             ? ` · ${t('platforms.checkinAlready')}`
                             : ''}
@@ -2044,7 +2048,7 @@ export function PlatformAccountsPanel({
                                   {pack.label || t('platforms.creditsPack')}
                                 </span>
                                 <span className="shrink-0 tabular-nums text-foreground">
-                                  {creditNum(pack.amount, creditUnitOf)} · {fmtDateTime(pack.expire_at * 1000)}
+                                  {creditNum(pack.amount, usageUnit)} · {fmtDateTime(pack.expire_at * 1000)}
                                 </span>
                               </li>
                             ))}

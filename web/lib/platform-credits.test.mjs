@@ -12,6 +12,7 @@
 import {
   creditExpiryVisible,
   creditUnit,
+  creditUnitWithFallback,
   formatCreditValue,
   platformCreditExpiries,
   platformCreditPacks,
@@ -98,6 +99,20 @@ check('unit=usd 认成美元', creditUnit({uid: 'u1', unit: 'usd'}), 'usd');
 check('unit=credits 是积分', creditUnit({uid: 'u1', unit: 'credits'}), 'credits');
 check('没有 unit 时按积分', creditUnit({uid: 'u1'}), 'credits');
 check('条目为 null 时按积分', creditUnit(null), 'credits');
+
+/* 条目自己的单位优先于整列兜底：Trae 国内版（积分）与国际版（美元）的余额
+   来自同一次查询，列表按版本在前端过滤；若整列兜底压过条目，国内版会被
+   画成 `$1234`。旧后端没给 `unit` 的条目才跟着整列走。 */
+check('条目的积分单位压过整列美元兜底',
+  creditUnitWithFallback({uid: 'u1', unit: 'credits'}, 'usd'), 'credits');
+check('条目的美元单位压过整列积分兜底',
+  creditUnitWithFallback({uid: 'u1', unit: 'usd'}, 'credits'), 'usd');
+check('条目没 unit 时跟整列美元兜底',
+  creditUnitWithFallback({uid: 'u1'}, 'usd'), 'usd');
+check('条目没 unit 且没兜底时按积分',
+  creditUnitWithFallback({uid: 'u1'}), 'credits');
+check('条目为 null 时用整列兜底',
+  creditUnitWithFallback(null, 'usd'), 'usd');
 
 check('积分原样显示', formatCreditValue(1234, 'credits'), '1234');
 check('美元带符号并保留两位', formatCreditValue(12.34, 'usd'), '$12.34');
