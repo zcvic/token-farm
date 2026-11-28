@@ -242,6 +242,15 @@ _CODEARTS = _NATIVE_POOL
 # 与 Loomy 同一组策略；没有「保底积分」选号实现，也没有桌面端回写。
 # `credit_meter` 不适用：上游按额度扣减，没有可对齐的每请求积分口径。
 _AUTOCLAW = _NATIVE_POOL
+# Accio（阿里国际站）是原生选号 / 按区域的在线目录 / 积分查询，没有签到
+# （每日积分由登录触发）。冷却策略是**固定**的（402 → 次日 24:00、429 → 1h、
+# 401/403 不冻号），所以不放出 `cooldown_*`——放出来就是改了也不生效的假开关。
+_ACCIO = frozenset({
+    'request_timeout', 'idle_timeout', 'max_accounts_try',
+    'session_affinity', 'session_affinity_ttl',
+    'catalog_ttl', 'catalog_retry_ttl', 'catalog_timeout',
+    'credits_ttl', 'credits_timeout',
+})
 # 组合是虚拟平台，没有自己的账号 / 目录，但**会话粘性**直接决定它会不会把
 # 同一段对话拆到多个成员平台（缓存作废，上下文被反复重读）。它与 Trae /
 # Loomy 用同一组开关，运维可以关掉或调整时长，而不必改代码 / 重启。
@@ -260,6 +269,7 @@ _BY_PLATFORM: dict[str, frozenset[str]] = {
     'raccoon': _RACCOON,
     'codearts': _CODEARTS,
     'autoclaw': _AUTOCLAW,
+    'accio': _ACCIO,
     'combo': _COMBO,
 }
 

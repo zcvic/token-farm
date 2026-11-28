@@ -4,8 +4,8 @@
 **Trae**、**Qoder**、**Loomy（讯飞星火）**、**DuMate（百度搭子）**、
 **MiniMax Code**、**Discovery（Intern TokenPlan）**、**Kilo**、**Cline**、
 **豆包（Doubao）**、**WPS 灵犀（Lingxi）**、**商汤小浣熊（Raccoon）**、
-**华为云 CodeArts 码道（CodeArts Agent）** 与 **AutoClaw（智谱 / Z.ai）**
-十四类账号，统一对外提供 OpenAI 兼容接口。
+**华为云 CodeArts 码道（CodeArts Agent）**、**AutoClaw（智谱 / Z.ai）** 与
+**Accio（阿里国际站 AI 电商工作台）** 十五类账号，统一对外提供 OpenAI 兼容接口。
 
 本项目派生自 [`workbuddy-manager`](https://github.com/ithtelab/workbuddy-manager)
 （MIT）。上游的全部能力都保留且行为不变 —— 账号池、扫码纳管、签到保活、密钥分发、
@@ -13,7 +13,7 @@ IP / 模型白名单、用量与日志。在此之上新增：
 
 | 新增 | 位置 | 说明 |
 |---|---|---|
-| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline / 豆包 / 灵犀 / 小浣熊 / CodeArts / AutoClaw 为原生实现，Qoder 用内置网关 |
+| 平台适配层 | `server/platforms/` | 以 `Platform` 契约为边界，WorkBuddy 仍委托给 `workbuddy2api`，Trae / Loomy / DuMate / MiniMax Code / Discovery / Kilo / Cline / 豆包 / 灵犀 / 小浣熊 / CodeArts / AutoClaw / Accio 为原生实现，Qoder 用内置网关 |
 | Trae 适配器 | `server/platforms/trae/` | 账号存储 / 令牌刷新 / 签到 / 额度 / 模型 / 对话（SSE → OpenAI chunk） |
 | Qoder 适配器 | `server/platforms/qoder/` | 账号 / 签到 / 额度 / 模型 / 对话；协议层内置在 `_vendor/`，无需额外部署 |
 | Loomy 适配器 | `server/platforms/loomy/` | 账号 / 微信扫码登录（含手机号补绑）/ 手机验证码登录 / 本机会话导入 / 签到 / 积分 / 模型 / 对话；账号服务与 OpenAI 兼容网关均为原生实现，无额外部署 |
@@ -27,7 +27,8 @@ IP / 模型白名单、用量与日志。在此之上新增：
 | 小浣熊适配器 | `server/platforms/raccoon/` | 账号（JWT access + 一次性 refresh）/ token 轮换（先落盘再使用）/ 本机客户端 `auth.json` 导入 / 在线模型目录 / 签到（触发桌面端每日积分后核对账单）/ 积分余额与流水 / 对话（v2 流式，失败降级 v1 非流式合成 SSE）；单区域前缀 `raccoon/`，未知模型本地拒绝 |
 | CodeArts 适配器 | `server/platforms/codearts/` | 账号（华为云 STS 临时 AK/SK + `security_token` + 一次性 refresh + DPoP 私钥）/ AK/SK 请求签名 / DPoP（ES256）/ 网页登录（OAuth2 PKCE 回环回调 + ticket 轮询 + 粘贴兜底）/ token 轮换（先落盘再使用）/ 按账号的三路模型目录（agent-center + 内置 + 限时福利）/ 签到（`/v1/ops` 三步）/ 对话（`text` 累计全文 → OpenAI chunk，非流式本地聚合）；单区域前缀 `codearts/` |
 | AutoClaw 适配器 | `server/platforms/autoclaw/` | 账号（access JWT + 一次性 refresh + 持久化设备号）/ token 轮换（先落盘再使用）/ 双区（`autoclawcn/`、`autoclawcom/`）/ 国内短信验证码登录 + 国际 OAuth「打开授权页 + 粘回调」/ 按区域独立的在线模型目录 / 签到（任务列表判断，无任务不算失败）/ 积分钱包与流水 / 对话（OpenAI 兼容 SSE，空流报错）；`810000` 只冷却单模型 |
-| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` / `doubao/` / `lingxi/` / `raccoon/` / `codearts/` / `autoclawcn/` / `autoclawcom/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` / `autoclaw/` 继续兼容），其余保持原样走 WorkBuddy |
+| Accio 适配器 | `server/platforms/accio/` | 账号（OAuth 2.0 + PKCE(S256) 回环登录，access + refresh + 秒级 `expiresAt` 归一化）/ 双区（`acciocn/`、`acciocom/`，仅登录页域名不同）/ 手工导入（含 `ac_token` Cookie 解包）/ 在线模型目录（`/api/llm/config/v2`，倍率拼进展示名）/ 积分三桶（每日 / 每月 / 推荐，`/api/entitlement/*`）/ 对话（Gemini 风格帧 → OpenAI chunk，工具参数跨帧合并）；**无签到端点**，402 冷至次日 24:00、429 冷 1 小时 |
+| 网关分流 | `server/routers/gateway.py` | 模型名带 `traecn/` / `traecom/` / `qodercn/` / `qodercom/` / `loomy/` / `dumate/` / `minimaxcn/` / `minimaxcom/` / `discovery/` / `kilo/` / `cline/` / `doubao/` / `lingxi/` / `raccoon/` / `codearts/` / `autoclawcn/` / `autoclawcom/` / `acciocn/` / `acciocom/` 前缀走对应平台（旧式 `trae/` / `qoder/` / `minimax/` / `autoclaw/` / `accio/` 继续兼容），其余保持原样走 WorkBuddy |
 | 多平台接口 | `server/routers/platforms.py` | `/api/platforms/*`：账号、导入、刷新、签到、额度、模型 |
 | 多平台页面 | `web/app/(main)/accounts/page.tsx`、`models/page.tsx` | 顶部平台下拉切换；账号 / 模型页随平台更换数据源，分版本的平台（Trae / Qoder / MiniMax Code）再按国内版 / 国际版过滤，统计与日志按平台过滤 |
 | 设计文档 | [`docs/multi-platform.md`](docs/multi-platform.md) | 契约、路由、凭据安全、已知限制 |
@@ -67,6 +68,7 @@ token-farm/
 │  ├─ raccoon-ref.txt   # 小浣熊参考源的 JWT 轮换 / 目录 / 对话 / 积分事实
 │  ├─ codearts-ref.txt  # CodeArts 参考源的签名 / DPoP / 目录 / 对话 / 签到事实
 │  ├─ autoclaw-ref.txt  # AutoClaw 参考源的双区域名 / 签名 / 目录 / 对话 / 签到事实
+│  ├─ accio-ref.txt     # Accio 参考源的双区登录页 / OAuth PKCE / 目录 / 积分 / 对话事实
 │  ├─ install.sh        # 上游原版：装依赖 + systemd（Linux 服务器）
 │  └─ windows-native/   # 上游原版：原生 Windows（无需 Docker）
 ├─ docs/                # 用户文档与维护者手册
@@ -356,6 +358,7 @@ MANAGER_REPO = os.environ.get('WB_MANAGER_REPO') or 'zcvic/token-farm'
 | `raccoon-ref` | [xiaohuanxiong2api](https://github.com/haoxinyu1/xiaohuanxiong2api)、[pi-provider-xhx](https://github.com/flying-dragon-ai/pi-provider-xhx)、[dsh-raccoon-connect](https://github.com/zhlcba/dsh-raccoon-connect)、[Coding2API](https://github.com/RobbsLuo/Coding2API) | 小浣熊网页 / 桌面端协议事实来源，**原生重写**、无副本 | 对照 JWT 一次性轮换 / 在线目录 / 对话降级 / 积分账单，改 `server/platforms/raccoon/` |
 | `codearts-ref` | [codearts2api](https://github.com/HITZY2002/codearts2api)（MIT） | 华为云 CodeArts 码道协议事实来源，**原生重写**、无副本 | 对照 AK/SK 签名 / DPoP / OAuth2 PKCE / 三路目录 / SSE 重拼 / 签到三步，改 `server/platforms/codearts/` |
 | `autoclaw-ref` | [AutoClawProxyAPI](https://github.com/VVVVVILK/AutoClawProxyAPI)（MIT）、[opencode-autoclaw-auth](https://github.com/hubo1989/opencode-autoclaw-auth)（MIT）、[AutoClaw2api](https://github.com/hj01857655/AutoClaw2api)、[autoclaw2api](https://github.com/ZFXing-lite/autoclaw2api)、[autoclaw-switch](https://github.com/apmengzi/autoclaw-switch)（MIT） | AutoClaw 双区协议事实来源，**原生重写**、无副本 | 对照双区基址 / `X-Auth-Sign` / 短信与 OAuth 登录 / 目录 / 对话 / 签到，改 `server/platforms/autoclaw/` |
+| `accio-ref` | `dsh-providers-hub`（MIT，DSH 插件包） | Accio 双站协议事实来源，**原生重写**、无副本 | 对照双区登录页 / OAuth PKCE / `generateContent` 信封 / 目录倍率 / 积分三桶，改 `server/platforms/accio/` |
 
 上游 Go 源码（workbuddy2api）已经并入本仓库的 `upstream/`，日常直接在这里改，
 不再从外部仓库 fetch / merge。面板侧新能力的参考来源是
@@ -470,6 +473,17 @@ AutoClaw（智谱 / Z.ai，中文名「澳龙」）同样没有开放平台 API�
 按区域独立在线拉取，`810000` 只冷却「账号 + 模型」不冻整号。已核对范围与
 「有意不跟」见 `deploy/autoclaw-ref.txt`，用户向的说明见
 [`docs/multi-platform.md`](docs/multi-platform.md) §18。
+
+Accio（阿里国际站 AI 电商工作台）没有开放平台 API，协议事实来自网页端与桌面端
+的真实请求，核对自 `dsh-providers-hub`（MIT）。本仓库为**原生重写**：国内与国际
+两站只有登录页域名不同（`www.accio-ai.com` / `zh.accio.com`），网关与推理面是同一
+个（`phoenix-gw.alibaba.com`），区域由服务端按账号下发，登录前无法自动判断，所以
+登录时必须先选区域；登录是 OAuth 2.0 + PKCE(S256) 回环回调，`client_id` 是公开
+客户端、无 secret；对话是 Gemini 风格信封，`token` 必须放在**请求体**里（放
+`Authorization` 头恒回 402），`system_instruction` 是字符串、工具 schema 字符串化，
+工具参数分片到达需要跨帧合并。积分只有每日 / 每月 / 推荐三个只读桶，**没有签到
+端点**，所以不提供签到按钮。已核对范围与「有意不跟」见 `deploy/accio-ref.txt`，
+用户向的说明见 [`docs/multi-platform.md`](docs/multi-platform.md) §19。
 
 所有参考源都没有共享提交历史，`git merge` / `git pull` 不成立 ——
 只能挑单个提交，导出成补丁再应用。流程与注意事项见

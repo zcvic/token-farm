@@ -758,11 +758,12 @@ export function PlatformAccountsPanel({
       // 这个形状）。能力位来自后端，新增同类平台不用改这里。
       if (supportsCookieImport && raw.includes('=')) {
         body = {cookie: raw};
-      } else if ((platform === 'raccoon' || platform === 'autoclaw')
+      } else if ((platform === 'raccoon' || platform === 'autoclaw'
+                  || platform === 'accio')
                  && !looksLikeJson) {
-        // 小浣熊 / AutoClaw 的凭证是 JWT：裸 JWT / `Bearer ...` / 整段 Cookie
-        // 都按 access token 提交，后端会自己清洗（refresh token 只支持 JSON
-        // 字段，因为两条裸 JWT 无法从一段文本里无歧义地分开）。
+        // 小浣熊 / AutoClaw / Accio 的凭证都是单段 opaque token：裸 token /
+        // `Bearer ...` / 整段 Cookie 都按 access token 提交，后端会自己清洗
+        // （refresh token 只支持 JSON 字段，因为两段裸 token 无法无歧义分开）。
         body = {access_token: raw};
       } else {
         notify.err(t('platforms.importInvalid'));
@@ -987,7 +988,9 @@ export function PlatformAccountsPanel({
             ? t('platforms.creditsHintCodearts')
             : platform === 'autoclaw'
               ? t('platforms.creditsHintAutoclaw')
-              : t('platforms.creditsHint');
+              : platform === 'accio'
+                ? t('platforms.creditsHintAccio')
+                : t('platforms.creditsHint');
 
   /**
    * 余额单位：Kilo 的余额是美元（`unit='usd'`），Trae 国际版也是。
@@ -1408,7 +1411,9 @@ export function PlatformAccountsPanel({
                       ? t('platforms.noAccountsDescCodearts')
                       : platform === 'autoclaw'
                         ? t('platforms.noAccountsDescAutoclaw')
-                        : t('platforms.noAccountsDesc')}
+                        : platform === 'accio'
+                          ? t('platforms.noAccountsDescAccio')
+                          : t('platforms.noAccountsDesc')}
             className="flex flex-col items-center justify-center p-8 text-center"
           >
             {/* 空态里给的是**这个平台真正能用**的入口：没有本机客户端可导入的
@@ -2206,7 +2211,9 @@ export function PlatformAccountsPanel({
                     ? t('platforms.loginSameMachineCodearts')
                     : platform === 'autoclaw'
                       ? t('platforms.loginSameMachineAutoclaw')
-                      : t('platforms.loginSameMachine')}</span>
+                      : platform === 'accio'
+                        ? t('platforms.loginSameMachineAccio')
+                        : t('platforms.loginSameMachine')}</span>
                 </div>
               )}
               {loginQrVisible && (
@@ -2331,7 +2338,9 @@ export function PlatformAccountsPanel({
                           ? t('platforms.loginCallbackPlaceholderCodearts')
                           : platform === 'autoclaw'
                             ? t('platforms.loginCallbackPlaceholderAutoclaw')
-                            : t('platforms.loginCallbackPlaceholder')}
+                            : platform === 'accio'
+                              ? t('platforms.loginCallbackPlaceholderAccio')
+                              : t('platforms.loginCallbackPlaceholder')}
                       className="h-8 rounded-xl text-xs"
                       disabled={callbackBusy}
                       autoComplete="off"
@@ -2354,7 +2363,9 @@ export function PlatformAccountsPanel({
                         ? t('platforms.loginCallbackHintCodearts')
                         : platform === 'autoclaw'
                           ? t('platforms.loginCallbackHintAutoclaw')
-                          : t('platforms.loginCallbackHint')}
+                          : platform === 'accio'
+                            ? t('platforms.loginCallbackHintAccio')
+                            : t('platforms.loginCallbackHint')}
                   </p>
                 </div>
               )}
@@ -2398,7 +2409,9 @@ export function PlatformAccountsPanel({
                           ? t('platforms.importDescCodearts')
                           : platform === 'autoclaw'
                             ? t('platforms.importDescAutoclaw')
-                            : t('platforms.importDesc')}
+                            : platform === 'accio'
+                              ? t('platforms.importDescAccio')
+                              : t('platforms.importDesc')}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="max-h-[min(640px,calc(100dvh-12rem))]">
@@ -2425,7 +2438,9 @@ export function PlatformAccountsPanel({
                             ? t('platforms.importPlaceholderCodearts')
                             : platform === 'autoclaw'
                               ? t('platforms.importPlaceholderAutoclaw')
-                              : t('platforms.importPlaceholder')}
+                              : platform === 'accio'
+                                ? t('platforms.importPlaceholderAccio')
+                                : t('platforms.importPlaceholder')}
                 className="field-sizing-fixed min-h-40 overflow-auto font-mono text-[11px]"
                 spellCheck={false}
                 autoFocus

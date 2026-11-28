@@ -168,13 +168,21 @@ class GatewayPassthroughTest(unittest.TestCase):
         #   · platforms/codearts/client.py：CodeArts 上游**永远**走流式，非流式
         #     由适配器本地聚合，同样必须把分片的 `delta.tool_calls` 按 `index`
         #     聚合成完整调用。只作用于 `codearts/`。
+        #   · platforms/accio/chat.py：Accio 的帧是 Gemini 形状，工具参数叫
+        #     `args_json` 且**分片重复下发**，必须合并成 OpenAI 的
+        #     `delta.tool_calls`（再按 `index` 聚合回非流式 message）。只作用于
+        #     `acciocn/` / `acciocom/` 前缀。
+        #   · platforms/accio/protocol.py：与上一条互补的**请求侧**翻译——历史里
+        #     的 assistant `tool_calls` 要改写成 Gemini 的 `functionCall`。它只
+        #     构造上行请求体，不碰转发路径。
         allow = {'routers/anthropic.py', 'routers/responses.py', 'services/tencent.py',
                  'platforms/trae/chat.py', 'platforms/trae/client.py',
                  'platforms/trae/text_tools.py',
                  'platforms/minimax/translate.py', 'platforms/minimax/adapter.py',
                  'platforms/cline/client.py',
                  'platforms/lingxi/chat.py', 'platforms/lingxi/adapter.py',
-                 'platforms/raccoon/client.py', 'platforms/codearts/client.py'}
+                 'platforms/raccoon/client.py', 'platforms/codearts/client.py',
+                 'platforms/accio/chat.py', 'platforms/accio/protocol.py'}
         root = Path(__file__).resolve().parents[2] / 'server'
         # Qoder 的内置网关是**第三方源码副本**（vendor 自 qoder2api-hub），它的
         # `tool_calls` 处理属于 Qoder 私有协议 ↔ OpenAI 的翻译层，与 trae/chat.py

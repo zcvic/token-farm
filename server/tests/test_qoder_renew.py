@@ -165,7 +165,7 @@ class PlatformRenewersTest(unittest.TestCase):
         names = [name for name, _label, _fn in renew._PLATFORM_RENEWERS]
         self.assertEqual(
             names, ['trae', 'qoder', 'minimax', 'cline', 'raccoon', 'codearts',
-                    'autoclaw'],
+                    'autoclaw', 'accio'],
             '巡检循环 / 计划任务 / 立即执行都从这里取平台清单')
 
     def test_every_renewer_is_async(self) -> None:

@@ -1,0 +1,191 @@
+# Accio（阿里国际站 AI 电商工作台）协议事实 —— 本仓库 Accio 适配层的参考
+#
+# 参考源：dsh-providers-hub（MIT，DSH 插件包）
+#         版本 0.2.1-rc.5（2026-11 取到的 npm 包快照，不分发 git 历史）
+#         核对范围：
+#           src/accio.ts           常量 / 凭据 / 纯函数 / 错误分级
+#           src/accio-product.ts   双区基址与产品口径
+#           src/accio-oauth.ts     PKCE / 授权 URL / 兑换 / 续期
+#           src/accio-adapter.ts   账号池 / 选号 / 续期 / 签到 / 额度 / 目录
+#           src/accio-credits.ts   积分三桶与配额口径
+#           src/accio-messages.ts  消息序列化 / 工具定义 / 帧翻译
+#           docs/agent-notes/providers-accio.md
+#                                  逐项实测笔记（含请求/响应样例）
+#
+# 形态：不是 fork，也没有共享历史。**不是源码副本**，仓库里没有 vendor 目录。
+#       账号 / 登录 / 目录 / 积分 / 对话全部在 server/platforms/accio/ 里按协议
+#       事实重写（httpx + 标准库，不新增依赖）；参考源的 HTTP 服务、账号池、
+#       面板、轮询与浏览器自动化一律不引入。
+#
+# 状态：**已接入（第一版）**。`server/platforms/accio/` 已有 constants.py /
+#       protocol.py / catalog.py / store.py / client.py / chat.py / login.py /
+#       adapter.py，并已注册到网关（acciocn/ / acciocom/，旧式 accio/ 兼容）。
+#       本文件记录事实、分歧与取舍；下列端点仍**没有**用本仓库的真实账号复测，
+#       凡标「未实测」的都按参考实现与真机抓包写，联调后只需调整常量 / 回退
+#       顺序，不必改策略层。
+#
+# 记录方式：一次同步写一段；未核对的版本号不要提前写进来（与
+# deploy/trae-ref.txt、deploy/qoder-ref.txt、deploy/loomy-ref.txt 同一约定）。
+#
+# ---- 2026-11 首次核对（只读源码 + 抓包笔记，未用本仓库账号复测）----
+#
+# 1. 双区只差登录页域名
+#    · 国内 cn     ：https://www.accio-ai.com/login
+#    · 国际 global ：https://zh.accio.com/login
+#    · 网关两区相同：https://phoenix-gw.alibaba.com
+#    · token 两区通用；区域由服务端按账号下发（userinfo.routeRegion）。
+#    ⇒ 登录前无法自动判断区域，发起登录时必须让用户先选。
+#    ⇒ 旧式 accio/ 不猜区域：实际区域取自被选中账号记录的 realm。
+#
+# 2. OAuth 2.0 + PKCE(S256)
+#    · client_id = 'accio-work'（公开客户端，没有 client_secret）
+#    · verifier  = 48 随机字节的 base64url（无 padding）
+#    · challenge = base64url(SHA-256(verifier))
+#    · state     = 32 字节 hex
+#    · ttid      = 'ttid_' + 32 hex
+#    · 授权 URL 参数：
+#        return_url / state / code_challenge / code_challenge_method=S256 /
+#        client_id=accio-work / ttid / language=zh
+#    · 上游**没有** return_url 白名单 ⇒ 用本机回环
+#        http://127.0.0.1:<端口>/auth/callback（只绑 127.0.0.1）
+#    · 回调里的 state 必须与发起时逐字相同，否则拒绝。
+#    · 缺 code_challenge 会命中上游 legacy 门禁（实测笔记明确标注）。
+#
+# 3. 令牌兑换 / 续期 / 响应信封
+#    · 兑换 POST /api/oauth/token
+#        body {code, codeVerifier, clientId, redirectUri}
+#    · 续期 POST /api/auth/refresh_token
+#        body {accessToken, refreshToken}
+#    · 信封 {success, code, message, data}：success !== true 即失败；
+#      accessToken / refreshToken / expiresAt 三者缺一即无效。
+#    · 兑换响应偶尔带 sgcookie，缺了不影响请求。
+#    · ⚠️ expiresAt 上游是**秒**（如 1767225600）。官方客户端自己也做 1e3×。
+#      量纲写错 ⇒ new Date(1767225600) = 1970 年 ⇒ 每请求都续期 ⇒ 并发下
+#      反复消费 refresh ⇒ invalid_grant ⇒ 账号被标死。归一只做一次：
+#      > 1e12 视为已是毫秒，否则 ×1000；落盘写 ISO，读取用 epoch_from_iso。
+#
+# 4. userinfo 与额度端点的方法差异
+#    · userinfo：POST /api/auth/userinfo，body {accessToken}（GET 会 405）
+#      → 取 routeRegion / activeTeam.teamId / userName。
+#      activeTeam 为 null 表示个人空间；teamId 非空才写账号与请求头。
+#    · 额度 / 目录：GET，token 放 query ?accessToken=（缺 token 回 400）。
+#    · 额度信封判据是 success !== false。
+#    · 认证失败判据：HTTP 401/403，或 body code/message 为 '401' / 'NOT_LOGIN'。
+#    · 团队额度 /gateway/subscription/current 只认网页 Cookie，token 打过去
+#      401 ⇒ 如实记录为「不支持」，不伪造数字。
+#
+# 5. 请求头
+#    固定发：
+#      Content-Type: application/json
+#      Accept: application/json（流式时 text/event-stream）
+#      utdid / version:0.34.4 / appKey:OneChat / x-package-region
+#      x-package-region: cn→CN，global→GLOBAL
+#    有值才发（空串一律不发）：
+#      sgcookie / x-team-id / x-accio-route-region
+#    · utdid 实测只在请求体 properties.utdid 被校验，且上游不核对取值；
+#      本地生成一份稳定的即可（每次请求现造会被当成换设备）。
+#    · x-team-id 保留但不解决团队额度（团队额度只认 Cookie）。
+#
+# 6. 对话请求体（Gemini 风格信封）
+#    POST /api/adk/llm/generateContent?sg_k=<md5(requestId)>
+#    · token 必须放在 **body**：放 Authorization 头会恒回 HTTP 200 + 流内 402。
+#    · system_instruction 是**字符串**，不是 {parts:[{text}]}；空 system 时
+#      整个键都不出现。
+#    · tools 是**扁平**形态且 schema 字符串化：
+#        [{name, description, parameters_json: JSON.stringify(params)}]
+#      没有工具时不发 tools 键。不能写成 function_declarations。
+#    · 固定字段：empid/tenant/iai_tag 空串；stop_sequences:[]；
+#      incremental:true；normalized_response:'true'；message_id 必填且不重复。
+#    · properties 子树不参与通用 camel→snake：
+#        {utdid, version, appKey, normalized_response:'true'}
+#      两种键形混用是实测成功形状。
+#    · 消息序列化：
+#        system/developer → system_instruction（多段空行连接）
+#        user            → {role:'user', parts:[{text}]}
+#        assistant       → {role:'model', parts:[{text},{function_call:{...}}]}
+#        tool            → {role:'user', parts:[{function_response:{id,name,response_json}}]}
+#      历史里工具调用缺参数串时补 '{}'。
+#    · 图片本轮**不实装**：遇到图片块抛 UnsupportedContent（转 400），不静默丢。
+#
+# 7. 模型目录
+#    POST /api/llm/config/v2，body {token}
+#    响应 data[].modelList[]，带 x-team-id / x-accio-route-region / x-package-region。
+#    · visible !== true 剔除。
+#    · 对外 id 用展示名归一后的 slug；**先剥第一个 · 之后的内容**（含裸「免费」）
+#      再 slug 化，否则倍率后缀会进 id。上行用上游 modelCode，反查不到原样发。
+#    · effectiveMultiple 拼进展示名「名称 · x倍率」：0 与 1 也拼，非有限值不拼；
+#      已带 · x1.5 后缀的先剥再拼，避免重复。
+#    · 目录按倍率升序，无倍率最后。
+#    · reasoningEfforts 原样保留远端顺序；null 与 [] 都表达为「无档位」；
+#      efforts 为 null 但 defaultReasoningEffort 有值时声明为单档；
+#      defaultEffort 只有落在 efforts 集合内才声明。
+#    · multimodal:false 的模型逐条声明 modalities.input=['text']（不能省略）。
+#    · 目录按区域分别缓存（platforms.accio.models.<realm>），**没有离线快照**：
+#      本区拉不到就是空表，不借另一区的名单。冷启动不拿空表拒绝未知模型。
+#
+# 8. 对话流 / SSE / 工具调用
+#    · 帧是顶层 {content:{parts}}（等价 Gemini），成功判据：
+#      有 content.parts 且有 text、且无 error_code；
+#      error_code === '200' 是成功哨兵，必须先于错误判据返回。
+#    · 流没有 [DONE]，终帧即最后一行；终帧可能是 {content:{role:'model'}}
+#      （有 content 无 parts），不能当空流。
+#    · 上游会把多帧拼成连续的 data: 行，不用空行分隔 ⇒ 必须**逐行**解析
+#      data:；解析失败才累积到空行再试。
+#    · 工具调用分片到达：首帧 {id,name} 无参，后续帧重复完整 args_json。
+#      合并职责在适配器；只缓冲工具 part、按 id 分组、flush 排在当前行之前、
+#      data: 之外的行原样透传；匿名 id 用 anon-<n>。
+#    · 参数三形态：args_json 非空串优先；空串回退同帧 args 对象；再容忍
+#      argsJson。参数为空时省略 args_json 键。
+#    · 纯 usage / finish 帧不得丢弃；同帧 turn_complete / usage_metadata /
+#      finish_reason 跟着合并：非 usage 后者覆盖，usage 取 total 最大者。
+#    · 输出：正文 delta.content、思考 delta.reasoning_content、
+#      工具 delta.tool_calls；非流式 object='chat.completion'，有工具时
+#      finish_reason='tool_calls'。
+#    · usage：promptTokenCount→prompt_tokens、
+#      candidatesTokenCount→completion_tokens、totalTokenCount→total_tokens。
+#
+# 9. 积分（没有签到）
+#    · Accio **没有每日签到端点**。每日额度由服务端在登录时按日发放
+#      （24 小时不累积），新用户另有一次性额度；没有可点的按钮。
+#      ⇒ supports_checkin=False；checkin() 明确报 checkin_unsupported。
+#    · GET /api/entitlement/currentSubscription?accessToken=
+#        entitlement.daily / monthly / referral 三桶，各取
+#        remaining / total / used。
+#    · GET /api/entitlement/quota?accessToken=
+#        usagePercent / refreshCountdownSeconds（只展示余额与重置倒计时）。
+#    · 三桶顺序固定：每日 → 每月 → 推荐，标签「每日积分」/「每月积分」/
+#      「推荐积分」；单位 credit。
+#    · 总额优先 data.remaining，缺席才逐桶求和；桶有对象但 remaining 读不到
+#      时跳过该桶，**不编造 0**（0 会被读成额度已用光）。
+#    · 只有每日桶知道周期何时结束（quota 倒计时），其余桶不臆造到期时刻。
+#
+# 10. 失败分级 / 冷却 / 续期
+#    · 402 / QUOTA_EXCEEDED → 换号 + 冷却至 UTC+8 当日 24:00
+#    · 429                  → 换号 + 冷却 1 小时（retry_after 优先）
+#    · 401 / 403            → 只换号，**绝不**写冷却（写冷却会冻住好号）
+#    · 403 + text/html      → PERMISSION_DENIED，不换号、不写冷却
+#    · 400 / 5xx / 风控页   → 不换号，原样回给调用方
+#    · httpErrorCode 映射：401/403→AUTH、402→QUOTA_EXCEEDED、
+#      429→RATE_LIMIT、400→INVALID_REQUEST、>=500→SERVER。
+#    · 风控响应是 HTTP 200 + text/html（含 window._config_=
+#      {"action":"deny"}），必须校验 content-type，否则会被当成功解析。
+#    · 单次请求最多试 8 个账号（MAX_ACCOUNTS_TRY）。
+#    · 选号：SWRR + LRU + 会话亲和 + 单账号并发闸门；按 realm 过滤。
+#    · 续期巡检提前 2 小时（只按 access 到期，refresh 无单独寿命），
+#      刷新成功**先落盘再使用**；只有终态错误才标「登录已失效」。
+#
+# 11. 有意不跟
+#    · 图片上行（参考实现有，但本轮未实测）→ 明确报不支持。
+#    · 团队额度（只认网页 Cookie）→ 如实记录为不支持。
+#    · 浏览器自动化 / TLS 指纹伪造 / 内嵌滑块 → 项目红线。
+#    · 写死离线模型快照、跨区借用目录、改写 system prompt 绕风控、
+#      force-model 静默改写 → 都会让用户看到上游并不支持的模型 / 请求。
+#    · 参考实现的 HTTP 服务 / 账号池 / 面板 / 轮询调度 → 全部按 token-farm
+#      口径重写（SWRR + LRU + 亲和 + 分级冷却）。
+#
+# 12. 未实测清单（联调时优先核对）
+#    · 授权 URL 的完整参数顺序与 return_url 编码（当前按参考实现拼）。
+#    · 兑换 / 续期响应里 data 的嵌套层级（当前同时容忍 data.* 与顶层）。
+#    · 目录响应 data[].modelList[] 的分页（当前只读第一页）。
+#    · 工具调用首帧是否总带 id（无名 / 无 id 时已做丢弃与 anon 兜底）。
+#    · 额度三桶在某些账号上是否只有 daily（当前按存在即读、缺即跳过）。

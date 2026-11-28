@@ -53,6 +53,11 @@
     登录，国际是 Google / z.ai OAuth（只做「打开授权页 + 粘回调」）；凭证是
     access + **一次性 refresh** JWT，`deviceId` 必须持久化。对话是 OpenAI
     形状，国内 2.x 禁发 `max_tokens` 族。
+  · Accio（accio）—— 原生实现（阿里国际站 AI 电商工作台），分国内 / 国际
+    两站，模型名以 `acciocn/` / `acciocom/` 为前缀。登录是 OAuth 2.0 + PKCE
+    （打开授权页 + 本机回环 / 粘回调）；凭证是 access + refresh token，
+    设备指纹 `utdid` 必须持久化。对话是 Gemini 风格 SSE，适配器内部翻译成
+    OpenAI chunk。**没有签到**：每日积分由登录触发服务端发放。
   · 组合（combo）—— **虚拟平台**：没有账号，只把 `combo/<name>` 按权重
     分发给上面这些真实平台。因此不在界面里露出（`ui_visible=False`）。
 """
@@ -77,6 +82,7 @@ from .lingxi import adapter as lingxi_adapter
 from .raccoon import adapter as raccoon_adapter
 from .codearts import adapter as codearts_adapter
 from .autoclaw import adapter as autoclaw_adapter
+from .accio import adapter as accio_adapter
 from .combo import adapter as combo_adapter
 
 # 注册内置平台。放在 import 之后而不是模块顶层逐个 register，是为了让
@@ -95,6 +101,7 @@ register(lingxi_adapter)
 register(raccoon_adapter)
 register(codearts_adapter)
 register(autoclaw_adapter)
+register(accio_adapter)
 register(combo_adapter)
 
 __all__ = [

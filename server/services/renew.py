@@ -118,6 +118,11 @@ _QODER_RENEW_BEFORE_SECONDS = 6 * 3600
 # 有足够余量。
 _MINIMAX_RENEW_BEFORE_SECONDS = 3 * 86400
 
+# Accio 的 refresh token 没有单独寿命（上游只下发 access 的 `expiresAt`），
+# 所以巡检只看 access 的到期时间。提前 2 小时续期：既不会让令牌在两次巡检
+# 之间过期，也不会把一个还很久的 token 反复轮换。
+_ACCIO_RENEW_BEFORE_SECONDS = 2 * 3600
+
 # 连续写入失败（磁盘只读等）时不刷屏的间隔
 _LOG_THROTTLE_SECONDS = 6 * 3600
 
@@ -427,6 +432,10 @@ def _raccoon_adapter():
 
 def _autoclaw_adapter():
     return _platform_adapter('autoclaw')
+
+
+def _accio_adapter():
+    return _platform_adapter('accio')
 
 
 def _trae_expires_at(account: dict) -> int | None:
@@ -855,6 +864,55 @@ async def refresh_autoclaw_all(force: bool = False, now: int | None = None) -> d
     return stats
 
 
+async def refresh_accio_all(force: bool = False, now: int | None = None) -> dict:
+    """巡检一遍 Accio 账号并按需续期 access token。
+
+    国内 / 国际两区共用同一份账号目录，`list_accounts()` 已经把两区都列出来，
+    这里不按区域过滤：网关与 token 两区通用。
+
+    Accio 的 refresh token 没有单独寿命（上游只下发 access 的 `expiresAt`），
+    所以只看 **access 的到期时间**：进入 2 小时窗口才续期。续期成功后由适配器
+    **先落盘再使用**，这里只调用 `refresh_account`，不绕过它直接打端点。
+    """
+    stats = {'checked': 0, 'renewed': 0, 'failed': 0, 'skipped': 0}
+    adapter = _accio_adapter()
+    if adapter is None:
+        return stats
+    now_ts = int(time.time()) if now is None else int(now)
+    for account in adapter.list_accounts():
+        uid = str(account.get('uid') or '').strip()
+        if not uid:
+            continue
+        if account.get('disabled'):
+            stats['skipped'] += 1
+            continue
+        if not account.get('has_refresh_token'):
+            # 只有手工粘贴的 access token：没法续期，也不算故障。
+            stats['skipped'] += 1
+            continue
+        if not force:
+            expires = _parse_expiry(account.get('expiredAt'))
+            if expires is None:
+                # 解不出 access 的寿命：不臆测，交给「刷新」按钮。
+                stats['skipped'] += 1
+                continue
+            if expires - now_ts > _ACCIO_RENEW_BEFORE_SECONDS:
+                continue
+        stats['checked'] += 1
+        try:
+            await adapter.refresh_account(uid, force=True)
+        except Exception as exc:  # noqa: BLE001
+            _note_failure(f'accio/{uid}', err_text(exc))
+            stats['failed'] += 1
+            continue
+        stats['renewed'] += 1
+        _last_fail_log.pop(f'accio/{uid}', None)
+        logger.info('Accio token 已续期: %s', uid)
+        _record({'uid': uid, 'nickname': str(account.get('nickname') or ''),
+                 'file': uid}, 1, 'token 自动续期成功（Accio）')
+    return stats
+
+
 #: 平台账号的续期入口：`(平台名, 日志标签, 巡检函数)`。新增平台只加一行——
 #: 巡检循环、计划任务与「立即执行一次」都从这里遍历，避免三处各写一份清单。
 _PLATFORM_RENEWERS = (
@@ -865,6 +923,7 @@ _PLATFORM_RENEWERS = (
     ('raccoon', '商汤小浣熊', refresh_raccoon_all),
     ('codearts', '华为云 CodeArts 码道', refresh_codearts_all),
     ('autoclaw', 'AutoClaw', refresh_autoclaw_all),
+    ('accio', 'Accio', refresh_accio_all),
 )
 
 

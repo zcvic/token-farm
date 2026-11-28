@@ -45,6 +45,12 @@ refresh，模型目录在线拉取，对话是标准 OpenAI Chat Completions；�
 「打开授权页 + 粘回调」。账号是 access JWT + 一次性 refresh JWT，`810000`
 只冷却「账号 + 模型」不冻整号。
 
+**Accio（阿里国际站 AI 电商工作台）**（`acciocn/` / `acciocom/` 前缀，详见
+§19）：两个区域只差登录页域名，网关与 token 通用，区域由服务端按账号下发，
+所以登录前必须先选区域。登录是 OAuth 2.0 + PKCE（本机回环回调 + 粘回调），
+对话是 Gemini 风格信封——`token` 放在请求体、工具参数分片到达需要跨帧合并。
+它**没有签到端点**，积分只有每日 / 每月 / 推荐三个只读桶。
+
 ---
 
 ## 1. 目标与非目标
@@ -740,6 +746,11 @@ DuMate 的每日签到奖励由服务端 00:00 自动发放，手动签到时 `h
   选，`autoclawcom/` 只在 `global` 里选，一个都没有时直接报错、不回退到另一区
   ——把国内 token 打到国际域只会 401，还会把好号标成「登录已失效」。旧式
   `autoclaw/<model>` 两区都在池里。
+- `acciocn/<model>` / `acciocom/<model>` 走 Accio（双站，OAuth 账号池）。两站
+  只有登录页域名不同、token 通用，但目录仍然按区域分别缓存（同名模型在不同区
+  可能有不同的 `modelCode`）；`acciocn/` 只在 `realm=cn` 的账号里选，
+  `acciocom/` 只在 `global` 里选。旧式 `accio/<model>` 两区都在池里，实际区域
+  由选中的账号决定。
 - 其他模型名 → 原样走 WorkBuddy（与今天完全一致）。
 - `/v1/models` 会把 Trae 的模型**按区域**并入列表（`traecn/` / `traecom/`），
   `owned_by` 标成 `trae`、`realm` 标出所属区域，客户端据此区分来源。
@@ -2528,4 +2539,189 @@ SWRR + LRU、会话亲和（`session_affinity`）、单账号并发闸门、`max
   「打开授权页 + 粘回调」。
 - **从本机桌面端导入凭证**：DPAPI + AES-GCM 与设备绑定，且会与桌面端互踢。
 - **写死离线模型快照**、**跨区借用目录**、**改写 system prompt 绕 406**、
+  **force-model 静默改写**：都会让用户看到一个上游并不支持的模型 / 请求。
+
+## 19. Accio（阿里国际站 AI 电商工作台）
+
+原生实现，包在 `server/platforms/accio/`，只用 httpx + 标准库，不引入第三方
+运行时。Accio 是阿里国际站的 AI 电商工作台，没有开放平台 API，协议事实来自
+网页端与桌面端的真实请求，核对自 `dsh-providers-hub`（MIT，DSH 插件包）。取用
+范围与「有意不跟」见 `deploy/accio-ref.txt`。
+
+**两个区域只差登录页域名**：网关、推理面、token 都是同一套，区域由服务端按
+账号下发（`userinfo.routeRegion`），因此**登录前无法自动判断区域**，发起登录时
+必须让用户先选。
+
+### 19.1 双区对照
+
+| | 国内版 `cn` | 国际版 `global` |
+| --- | --- | --- |
+| 模型前缀 | `acciocn/` | `acciocom/` |
+| 登录页 | `https://www.accio-ai.com/login` | `https://zh.accio.com/login` |
+| 网关（两区相同） | `https://phoenix-gw.alibaba.com` | 同左 |
+| `x-package-region` | `CN` | `GLOBAL` |
+| 额度 / 目录 | 按账号区域下发，两区接口一致 | 同左 |
+
+旧式 `accio/` 前缀继续可用：账号池里两区都在候选内，真正决定区域的是被选中
+账号记录里的 `realm`。**不按 token 猜区域**，因为 token 两区通用。
+
+### 19.2 凭据与导入
+
+| 字段 | 说明 |
+| --- | --- |
+| `realm` | `cn` / `global`；只决定登录页，网关与 token 通用 |
+| `accessToken` | 上游不透明 32 位串（**不是 JWT**）；过期时刻只能来自 `expiresAt` |
+| `refreshToken` | 续期用；缺失时手工导入的 access token 仍可用一次，401 再换号 |
+| `expiredAt` | 落盘为 ISO；上游 `expiresAt` 是**秒**，读取时归一成毫秒 |
+| `utdid` | 设备指纹，首次生成后持久化；只在请求体 `properties.utdid` 被校验 |
+| `sgcookie` | 兑换响应偶尔下发，缺了不影响请求 |
+| `teamId` / `routeRegion` | 登录后 `userinfo` 回填，写进 `x-team-id` / `x-accio-route-region` |
+| `userName` / `userId` | 展示与去重 |
+
+- uid 由「区域 + 用户标识」派生（`ao_<sha256 前缀>`），同一账号重登覆盖同一条。
+- 导入接受 `access_token` / `accessToken` 两种写法、`Bearer ...`、裸 token，以及
+  整段 Cookie（自动取出 `ac_token`）。
+- 凭据明文只落盘（`data/platforms/accio/accounts/<uid>.json`，文件锁 + 临时文件 +
+  `os.replace` 原子替换 + 0600），接口只回摘要与 `has_token` / `has_refresh_token`。
+- **`expiresAt` 的量纲是这套接入最容易出事的地方**：忘乘 1000 会被判成 1970 年
+  已过期，于是每个请求都去续期，并发下把 refresh 用废、账号被标死。
+
+### 19.3 登录（OAuth 2.0 + PKCE）
+
+1. 面板先让用户选国内版 / 国际版（`realm`），再调 `login_start`；
+2. 后端生成 `verifier`（48 随机字节 base64url）、`challenge`（SHA-256）、
+   `state`（32 字节 hex）与一次性 `ttid`，拼授权 URL 并在浏览器打开；
+3. `return_url` 用本机回环 `http://127.0.0.1:<端口>/auth/callback`（只绑
+   127.0.0.1），回调里的 `state` 必须与发起时**逐字相同**；
+4. 兑换 `POST /api/oauth/token`，body 是
+   `{code, codeVerifier, clientId, redirectUri}`；`client_id='accio-work'` 是
+   公开客户端，**没有 secret**；
+5. 续期 `POST /api/auth/refresh_token`，body `{accessToken, refreshToken}`；
+6. 登录成功后补一次 `userinfo` 拿 `routeRegion` / `activeTeam.teamId` /
+   `userName`，失败不影响登录。
+
+授权 URL 必须带 `code_challenge_method=S256`：缺 `code_challenge` 会命中上游的
+legacy 门禁。响应信封是 `{success, code, message, data}`，`success !== true` 即
+失败；`accessToken` / `refreshToken` / `expiresAt` 三者缺一即无效。
+
+面板与浏览器不在同一台机器时，把浏览器地址栏里的整条回调链接粘回面板即可；
+后端只接受回环主机名，拒绝外部域名伪造。
+
+### 19.4 请求头与请求体
+
+账号面与推理面共用客户端指纹头：
+
+- 固定发：`Content-Type: application/json`、`Accept`、`utdid`、`version`、
+  `appKey: OneChat`、`x-package-region`；
+- 有值才发：`sgcookie`、`x-team-id`、`x-accio-route-region`；空串一律不发。
+
+对话 `POST /api/adk/llm/generateContent?sg_k=<md5(requestId)>`，body 是 Gemini
+风格信封（键 snake_case）：
+
+- **`token` 必须在请求体里**。放 `Authorization` 头会恒回 HTTP 200 + 流内 402，
+  这是本平台最隐蔽的坑；
+- `system_instruction` 是**字符串**（不是 `{parts:[{text}]}`），空 system 时整个
+  键都不出现；
+- `tools` 是**扁平**形态：`{name, description, parameters_json}`，schema 是
+  **字符串**；没有工具时不发 `tools` 键；
+- `properties` 子树不参与通用 snake 化，固定
+  `{utdid, version, appKey, normalized_response:'true'}`（两种键形混用是实测成功
+  形状）；
+- `empid` / `tenant` / `iai_tag` 固定空串；`stop_sequences: []`、
+  `incremental: true`、`normalized_response: 'true'` 固定；`message_id` 必填且
+  同一次 `requestId` 内不能重复。
+
+历史消息：system / developer 拼进 `system_instruction`；`role='tool'` 转成
+`{role:'user', parts:[{function_response:{id,name,response_json}}]}`；assistant 的
+文本与 `tool_calls` 转成 `{role:'model', parts:[{text},{function_call:{...}}]}`。
+**图片本轮不实装**：遇到图片块直接报「不支持图片输入」，不静默丢弃。
+
+### 19.5 模型目录
+
+目录是 `POST /api/llm/config/v2`，body `{token}`，读 `data[].modelList[]`：
+
+- `visible !== true` 的模型剔除；
+- 对外 id 用展示名归一后的 slug（先剥第一个 `·` 之后的内容，含「免费」后缀），
+  上行用上游 `modelCode`；反查不到时原样发 slug，由上游报错；
+- `effectiveMultiple`（倍率）拼进展示名 `名称 · x倍率`，0 与 1 也拼；已带
+  `· x1.5` 后缀的先剥再拼，避免重复；
+- 目录按倍率升序，无倍率的排最后；
+- `reasoningEfforts` 原样保留远端顺序；`null` / `[]` 都表达为「无档位」，
+  但 `efforts` 为 null 而 `defaultReasoningEffort` 有值时声明为单档；
+  `defaultEffort` 只有落在 `efforts` 集合里才声明；
+- `multimodal: false` 的模型逐条声明 `modalities.input = ['text']`，不省略。
+
+目录**按区域分别缓存**（`platforms.accio.models.<realm>`），没有离线快照：本区
+拉不到就是空表，**不借另一区的名单**。
+
+### 19.6 对话与工具调用
+
+上游是 SSE 的 Gemini 风格帧，`content.parts` 在顶层：
+
+- 判成功不能只看 HTTP 200：必须有 `content.parts` 且带 `text`，且没有
+  `error_code`；`error_code === '200'` 是成功哨兵，必须先于错误判据返回；
+- 帧按**逐行**解析 `data:`：上游会把多帧拼成连续的 `data:` 行，不用空行分隔；
+- 工具调用分片到达：首帧只有 `{id, name}`，后续帧重复完整的 `args_json`。
+  合并职责在适配器，**只缓冲工具 part**，按 `id` 分组，flush 排在当前行之前；
+  匿名 id 用 `anon-<n>`；
+- 参数三形态：`args_json` 非空串优先；空串回退同帧 `args` 对象；再容忍
+  `argsJson`；参数为空时省略 `args_json` 键；
+- 纯 usage / finish 帧不丢弃（否则会丢结尾用量或 finish_reason）；
+  同一帧上的 `turn_complete` / `usage_metadata` / `finish_reason` 跟着合并，
+  usage 取 `total` 最大者；
+- 输出统一成 OpenAI chunk：正文 `delta.content`、思考
+  `delta.reasoning_content`、工具 `delta.tool_calls`；非流式聚合成
+  `object='chat.completion'`，有工具时 `finish_reason='tool_calls'`；
+- usage 映射：`promptTokenCount` → `prompt_tokens`、`candidatesTokenCount` →
+  `completion_tokens`、`totalTokenCount` → `total_tokens`。
+
+### 19.7 积分与签到
+
+**Accio 没有签到端点**：每日额度由服务端在登录时按日发放（24 小时不累积），
+新用户另有一次性额度，都是服务端行为，没有可点的按钮。因此
+`supports_checkin = False`，账号页**不显示签到按钮**，`checkin()` 明确报
+`checkin_unsupported`，不伪造一个假签到。
+
+余额来自两段只读查询：
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /api/entitlement/currentSubscription` | `entitlement.daily` / `monthly` / `referral` 三桶，各取 `remaining` / `total` / `used` |
+| `GET /api/entitlement/quota` | `usagePercent` / `refreshCountdownSeconds`，只展示余额与重置倒计时 |
+
+- 三桶顺序固定：每日 → 每月 → 推荐，标签「每日积分」/「每月积分」/「推荐积分」；
+- 总额优先 `data.remaining`，缺席才逐桶求和；桶有对象但 `remaining` 读不到时
+  跳过该桶，**不编造 0**（0 会被读成额度已用光）；
+- 只有每日桶知道周期何时结束（quota 的倒计时），其余桶不臆造到期时刻；
+- 额度端点用 `?accessToken=` 查询参数，`userinfo` 反而是 `POST + body`（GET 会
+  405）；额度信封判据是 `success !== false`；
+- 认证失败判据是 HTTP 401/403 或 body `code` / `message` 为 `'401'` /
+  `NOT_LOGIN`。
+
+### 19.8 账号调度与失败分级
+
+与其它原生平台同一套 `_NATIVE_POOL`：权重 SWRR + LRU、会话亲和、单账号并发
+闸门、`max_accounts_try`（单次请求最多试 8 个账号）。选号按区域过滤：
+`acciocn/` 只挑 `realm=cn`，`acciocom/` 只挑 `global`。
+
+| 失败 | 处理 |
+| --- | --- |
+| `402` / `QUOTA_EXCEEDED` | 换号 + 冷却至 **UTC+8 当日 24:00** |
+| `429` | 换号 + 冷却 **1 小时** |
+| `401` / `403` | 只换号，**绝不**写冷却（写冷却会把好号冻住） |
+| `403 + text/html` | 判 `PERMISSION_DENIED`：不换号、不写冷却（权限 / 风控页） |
+| `400` / `5xx` / 风控页 | 不换号，原样回给调用方 |
+
+续期巡检只按 access 到期判断：提前 2 小时刷新，刷新成功**先落盘再使用**；只有
+终态错误（`invalid_grant` 一类）才把账号标成「登录已失效」。
+
+### 19.9 有意不跟
+
+- **图片上行**：参考实现有图片通路，但本轮未实测，宁可明确报不支持，也不把
+  图片悄悄丢掉。
+- **团队额度（`/gateway/subscription/current`）**：只认网页 Cookie，token 打过去
+  401，如实记录为「不支持」，不伪造数字。
+- **浏览器自动化 / TLS 指纹伪造 / 内嵌滑块**：项目红线；登录只做 OAuth 回环回调
+  与「粘回调链接」。
+- **写死离线模型快照**、**跨区借用目录**、**改写 system prompt 绕风控**、
   **force-model 静默改写**：都会让用户看到一个上游并不支持的模型 / 请求。
