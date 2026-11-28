@@ -2442,7 +2442,7 @@ export interface PlatformUsage {
  * 平台的调度设置（`/api/platforms/{name}/settings`）。
  *
  * 两组口径互不相干：
- *   · `max_in_flight` —— **单账号**推理并发（每个账号最多几个在途请求，0 = 不限）；
+ *   · `max_in_flight` —— **单账号**推理并发（每个账号最多几个在途请求，默认 2，0 = 不限）；
  *     总吞吐 = 该上限 × 可用账号数。Trae 严格按账号占位；Qoder 由内置网关
  *     选号，按「单账号上限 × 可用账号数」折算成整池总闸门。
  *   · `checkin_*` —— **批量签到**节奏：同时签到的账号数 + 相邻两个账号开始
@@ -2518,7 +2518,7 @@ export interface PlatformSettingsOverview {
 
 export interface PlatformSettings {
   platform: string;
-  /** 每个账号的在途请求上限（0 = 不限）；总量 = 该值 × 可用账号数 */
+  /** 每个账号的在途请求上限（默认 2，0 = 不限）；总量 = 该值 × 可用账号数 */
   max_in_flight: number;
   limits: {min: number; max: number};
   /** 同时进行签到的账号数（默认 2） */

@@ -255,7 +255,7 @@ HTTP 接口（`server/routers/platforms.py`）：
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `max_in_flight` | `0` | 单账号在途请求上限（0 = 不限） |
+| `max_in_flight` | `2` | 单账号在途请求上限（0 = 不限） |
 | `request_timeout` | `300` | 非流式请求读超时（秒） |
 | `idle_timeout` | `60` | 流式连续无数据多久中止（秒） |
 | `max_accounts_try` | `3` | 一次对话最多尝试几个账号 |

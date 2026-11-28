@@ -624,7 +624,7 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(self.adapter._limiter.limit(), 4)
 
     def test_unlimited_limit_skips_gateway_roundtrip(self) -> None:
-        """默认「不限」时不该为了折算总闸门去打本机网关。"""
+        """显式「不限」时不该为了折算总闸门去打本机网关。"""
         with mock.patch.object(self.adapter._limiter, 'per_account',
                                return_value=0):
             asyncio.run(self.adapter._refresh_usable_accounts())

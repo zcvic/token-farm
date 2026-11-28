@@ -10,7 +10,8 @@
   · `PoolLimiter`（Qoder）：内置网关自己选号，总闸门 = 单账号上限 × 可用
     账号数，账号数变化时按新值重建。
 
-0 仍然表示「不限」——默认值不变，老部署升级后行为一致。
+0 仍然表示「不限」，但**未配置时默认 2**：多数上游对单账号的容忍度在 2–5
+之间，完全不限反而容易把号跑进冷却。老部署想恢复旧行为，保存一次 0 即可。
 """
 from __future__ import annotations
 
@@ -46,14 +47,18 @@ class _DbCase(unittest.TestCase):
 
 
 class SettingsTest(_DbCase):
-    def test_default_is_unlimited(self) -> None:
-        self.assertEqual(limiter.load_limit('trae'), 0)
+    def test_default_is_two(self) -> None:
+        self.assertEqual(limiter.load_limit('trae'), 2)
 
     def test_save_and_read_back(self) -> None:
         self.assertEqual(limiter.save_limit('trae', 3), 3)
         self.assertEqual(limiter.load_limit('trae'), 3)
         # 按平台分开：改 Trae 不影响 Qoder。
-        self.assertEqual(limiter.load_limit('qoder'), 0)
+        self.assertEqual(limiter.load_limit('qoder'), 2)
+
+    def test_explicit_zero_means_unlimited(self) -> None:
+        self.assertEqual(limiter.save_limit('trae', 0), 0)
+        self.assertEqual(limiter.load_limit('trae'), 0)
 
     def test_rejects_invalid_values(self) -> None:
         for bad in (-1, limiter.LIMIT_MAX + 1, True, 'x', None):
@@ -61,9 +66,9 @@ class SettingsTest(_DbCase):
                 with self.assertRaises(ValueError):
                     limiter.save_limit('trae', bad)
 
-    def test_broken_stored_value_falls_back_to_unlimited(self) -> None:
+    def test_broken_stored_value_falls_back_to_default(self) -> None:
         db.set_setting('platforms.trae.max_in_flight', 'many')
-        self.assertEqual(limiter.load_limit('trae'), 0)
+        self.assertEqual(limiter.load_limit('trae'), limiter.DEFAULT_LIMIT)
         db.set_setting('platforms.trae.max_in_flight', 999)
         self.assertEqual(limiter.load_limit('trae'), limiter.LIMIT_MAX)
 
@@ -90,6 +95,7 @@ class AccountLimiterTest(_DbCase):
         asyncio.run(scenario())
 
     def test_zero_means_unlimited(self) -> None:
+        limiter.save_limit('trae', 0)
         gate = limiter.AccountLimiter('trae')
 
         async def scenario() -> None:
@@ -100,12 +106,12 @@ class AccountLimiterTest(_DbCase):
 
     def test_invalidate_applies_new_limit_immediately(self) -> None:
         gate = limiter.AccountLimiter('trae')
-        self.assertEqual(gate.limit(), 0)
-        limiter.save_limit('trae', 2)
+        self.assertEqual(gate.limit(), limiter.DEFAULT_LIMIT)
+        limiter.save_limit('trae', 3)
         # 缓存未过期时仍是旧值；路由保存后会调 invalidate。
-        self.assertEqual(gate.limit(), 0)
+        self.assertEqual(gate.limit(), limiter.DEFAULT_LIMIT)
         gate.invalidate()
-        self.assertEqual(gate.limit(), 2)
+        self.assertEqual(gate.limit(), 3)
 
     def test_raising_limit_rebuilds_semaphore(self) -> None:
         limiter.save_limit('trae', 1)
@@ -146,6 +152,7 @@ class PoolLimiterTest(_DbCase):
         self.assertEqual(gate.limit(), 4)
 
     def test_unlimited_ignores_scale(self) -> None:
+        limiter.save_limit('qoder', 0)
         gate = limiter.PoolLimiter('qoder', scale=lambda: 10)
         self.assertEqual(gate.limit(), 0)
 

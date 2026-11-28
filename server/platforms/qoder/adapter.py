@@ -192,7 +192,7 @@ class QoderAdapter(PlatformAdapter):
         停用 / 冷却中的账号不算（网关也不会选它们）。网关没起来时保持旧值
         （首次为 0 → `_usable_accounts` 按 1 算），不因为一次失败把闸门放宽。
         """
-        # 不限并发时不需要账号数：跳过本机网关往返（默认就是这一档）。
+        # 不限并发时不需要账号数：跳过本机网关往返（用户显式填 0 时才是这一档）。
         if self._limiter.per_account() <= 0:
             return
         now = time.time()

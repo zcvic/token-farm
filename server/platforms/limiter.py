@@ -2,9 +2,10 @@
 
 ## 口径：设置是「每个账号」的上限，不是整池
 
-`platforms.<name>.max_in_flight` 表示**一个账号**最多同时跑几个上游请求，
-0 = 不限。总吞吐随账号数增长，而不是所有账号共享一个数字——后者在账号很多
-时等于没有上限，也分不清「是池子满了」还是「这个号被上游限流了」。
+`platforms.<name>.max_in_flight` 表示**一个账号**最多同时跑几个上游请求。
+未配置时默认 2（多数上游对单账号的容忍度就在这附近），0 = 不限。总吞吐随
+账号数增长，而不是所有账号共享一个数字——后者在账号很多时等于没有上限，也
+分不清「是池子满了」还是「这个号被上游限流了」。
 
 两种执行方式，取决于适配器能不能自己选号：
 
@@ -38,6 +39,10 @@ from .. import db
 # 而是把上游当成无限并发的通道；真要放开，填 0 更诚实。
 LIMIT_MIN = 0
 LIMIT_MAX = 64
+# 未配置时的默认值。多数上游对单账号的并发容忍度在 2–5 之间（超过会回 429），
+# 完全不限反而容易把号跑进冷却；默认 2 与 WorkBuddy 上游国际版账号的口径一致。
+# 显式填 0 仍是「不限」，老部署想恢复旧行为只需在平台设置里保存一次 0。
+DEFAULT_LIMIT = 2
 # 等一个空位的上限：超过就明确拒绝（429），而不是把请求无限期挂着。
 DEFAULT_WAIT = 20.0
 
@@ -52,15 +57,15 @@ def _clamp(value: object) -> int:
     try:
         number = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return LIMIT_MIN
+        return DEFAULT_LIMIT
     if isinstance(value, bool):
-        return LIMIT_MIN
+        return DEFAULT_LIMIT
     return min(LIMIT_MAX, max(LIMIT_MIN, number))
 
 
 def load_limit(platform: str) -> int:
-    """当前生效的**单账号**并发上限（0 = 不限）。"""
-    return _clamp(db.get_setting(setting_key(platform), LIMIT_MIN))
+    """当前生效的**单账号**并发上限（0 = 不限；未配置时默认 2）。"""
+    return _clamp(db.get_setting(setting_key(platform), DEFAULT_LIMIT))
 
 
 def save_limit(platform: str, value: object) -> int:

@@ -2691,7 +2691,7 @@
     "weightInvalid": "Weight must be 0 (default) or a number between 0.1 and 100",
     "weightSaved": "Weight saved",
     "poolLimit": "Per-account concurrency",
-    "poolHint": "Per-account concurrency cap: how many upstream requests one account may run at once (0 = unlimited). Total in-flight = cap × available accounts (platforms that count per account enforce it directly; platforms with a built-in gateway selector apply it to the converted overall gate). Streaming requests count until the stream ends.",
+    "poolHint": "Per-account concurrency cap: how many upstream requests one account may run at once (default 2, 0 = unlimited). Total in-flight = cap × available accounts (platforms that count per account enforce it directly; platforms with a built-in gateway selector apply it to the converted overall gate). Streaming requests count until the stream ends.",
     "poolUnlimited": "unlimited",
     "poolInvalid": "Concurrency must be between {min} and {max} (0 = unlimited)",
     "poolSaved": "Concurrency limit saved",
