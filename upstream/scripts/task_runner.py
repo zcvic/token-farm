@@ -96,6 +96,7 @@ linguo2625469/workbuddy2api-panel（autotask.go/desktop.go/report.go/tasks.go �
   - 日志前缀 [task_runner]，行为 action ∈ query/accept/report/claim，汇总行 task_runner done: ...
 """
 import sys, os, json, time, argparse, glob, re, random, urllib.request, urllib.error
+import urllib.parse
 
 # Windows 中文区域的 stdout 默认按 ANSI 代码页（cp936）编码：账号昵称里带 emoji
 # （🏅）时，打印昵称的那一行会抛 UnicodeEncodeError，整个脚本就死在那儿
@@ -229,6 +230,157 @@ EXPERT_EXPERIENCE = {
         "name": "播旺旺", "profession": "直播电商教练",
         "expertType": "agent", "version": "1.0.2", "category": "expert-all"}),
 }
+
+# expert_use_* 未登记的新 slug：从任务 jump_url 的 deeplink 里动态解析专家 id
+# （上游 0061 / issue #429）。只接受 workbuddy://experts?expertId=ex_... 这一种深链，
+# 外层 URL 必须是可信域名——不把任意 URL 里的 ex_ 片段当专家 id。
+_EXPERT_ID_RE = re.compile(r"^ex_[A-Za-z0-9]{6,64}$")
+_TRUSTED_JUMP_HOST_SUFFIXES = ("workbuddy.cn", "codebuddy.cn", "tencent.com")
+
+# 已知但当前不能自动完成的任务码（与「脚本不认识」严格区分）：
+#   manual  —— 必须真人完成
+#   capture —— 参数或接口尚未在本仓验证：不盲发请求，等抓包确认
+# 注意：wb_wechat_oa_subscribe_task 本仓已按 claimonly 处理（用户手动关注后只领奖），
+# 不能列进来；WorkBuddy_Valorant 也已在 EXPERT_EXPERIENCE 实现，不能退回「需抓包」。
+UNSUPPORTED_TASKS = {
+    "task_student_verify": {
+        "reason_kind": "manual",
+        "reason": "需人工完成：学生身份认证",
+    },
+}
+
+
+def _parse_expert_deeplink(value):
+    """只接受 workbuddy://experts?expertId=ex_xxx 这一种专家深链（纯函数）。"""
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(value.strip())
+        if parsed.scheme.lower() != "workbuddy":
+            return ""
+        if parsed.netloc.lower() != "experts" or parsed.path not in ("", "/"):
+            return ""
+        if parsed.fragment:
+            return ""
+        ids = urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("expertId", [])
+        unique = {item.strip() for item in ids if item.strip()}
+        if len(ids) != 1 or len(unique) != 1:
+            return ""
+        expert_id = unique.pop()
+        return expert_id if _EXPERT_ID_RE.fullmatch(expert_id) else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def _expert_id_from_jump_url(jump_url):
+    """从任务 jump_url 的 deeplink 参数提取专家 id（纯函数）。
+
+    只接受可信域名的外层 URL，且内层必须是 workbuddy://experts 深链——
+    不把任意 URL 里的 ex_ 片段当专家 id，避免任务数据被污染时发错对象。
+    """
+    if not isinstance(jump_url, str):
+        return ""
+    raw = jump_url.strip()
+    if not raw:
+        return ""
+    direct = _parse_expert_deeplink(raw)
+    if direct:
+        return direct
+    if raw.lower().startswith("deeplink="):
+        deeplinks = urllib.parse.parse_qs(raw, keep_blank_values=True).get("deeplink", [])
+        return _parse_expert_deeplink(deeplinks[0]) if len(deeplinks) == 1 else ""
+    try:
+        outer = urllib.parse.urlparse(raw)
+        if outer.scheme.lower() not in ("http", "https") or outer.fragment:
+            return ""
+        host = (outer.hostname or "").rstrip(".").lower()
+        if not any(host == suffix or host.endswith("." + suffix)
+                   for suffix in _TRUSTED_JUMP_HOST_SUFFIXES):
+            return ""
+        deeplinks = urllib.parse.parse_qs(outer.query, keep_blank_values=True).get("deeplink", [])
+        return _parse_expert_deeplink(deeplinks[0]) if len(deeplinks) == 1 else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def expert_experience(code, task=None):
+    """expertx 任务 -> 固定专家 (eid, meta)；返回 None 表示「不知道用哪个专家」。
+
+    已登记 slug（EXPERT_EXPERIENCE）直接返回静态表；未登记的 expert_use_* 只在
+    任务 jump_url 带合法专家 id 时动态构造。调用方拿到 None 应明确报 unsupported，
+    不要拿市场第一个专家盲发（服务端按 (eventCode, id) 归账，发错不会点亮）。
+    """
+    base = EXPERT_EXPERIENCE.get(code)
+    if base is None and not str(code).startswith("expert_use_"):
+        return None
+    eid, meta = base if base else ("", {})
+    meta = dict(meta)
+    dynamic_id = _expert_id_from_jump_url((task or {}).get("jump_url"))
+    if dynamic_id:
+        eid = dynamic_id
+    if not eid:
+        return None
+    meta.setdefault("name", meta.get("profession") or code)
+    meta.setdefault("profession", meta.get("name") or code)
+    meta.setdefault("version", "")
+    meta.setdefault("expertType", "agent")
+    meta.setdefault("category", "expert-all")
+    return (eid, meta)
+
+
+def resolve_task_spec(code, task=None):
+    """任务码 -> 动作 spec（纯函数；单测与运行期共用同一个判定入口）。
+
+    - MAPPING 精确命中：返回副本（旧任务码行为不变）；expertx 额外挂上专家定义。
+    - expert_use_* 家族：未列入 MAPPING 的新 slug 也尝试从 jump_url 解析，
+      解析成功按 expertx 处理。
+    - UNSUPPORTED_TASKS：返回带 `unsupported` + `reason` 的 spec。
+    - 其余：None —— 脚本不认识这个任务码（能力缺口，不是「这次没得做」）。
+    """
+    spec = MAPPING.get(code)
+    if spec is not None:
+        out = dict(spec)
+        if out.get("kind") == "expertx":
+            out["expert"] = expert_experience(code, task)
+        return out
+    if code in UNSUPPORTED_TASKS:
+        return dict(UNSUPPORTED_TASKS[code], unsupported=True)
+    if str(code).startswith("expert_use_"):
+        picked = expert_experience(code, task)
+        if picked:
+            return {"kind": "expertx", "target": 1,
+                    "src": "专家 %s" % picked[0], "expert": picked}
+        return {"kind": "expertx", "target": 1, "expert": None,
+                "unsupported": True, "reason_kind": "capture",
+                "reason": "未知 expert_use 任务码，且任务未下发专家 id，需抓包确认"}
+    return None
+
+
+def describe_task_code(code, spec):
+    """把任务码分类成一条可读结论（纯函数；日志与单测共用）。
+
+    关键区分：
+      - spec is None            -> unknown：脚本不认识这个码（能力缺口）
+      - spec.unsupported        -> unsupported：认识，但当前不能自动完成（附原因）
+      - 其余                    -> 空串：可处理
+    """
+    if spec is None:
+        return ("unknown task code: %s"
+                "（脚本不认识该任务码，尚未实现；如需适配请附 query 状态反馈）" % code)
+    if spec.get("unsupported"):
+        return "unsupported task code: %s（%s）" % (
+            code, spec.get("reason") or "暂不支持自动完成")
+    return ""
+
+
+def describe_missing_task(code, spec):
+    """任务码已知、但服务端本次未下发时的结论（纯函数）。"""
+    notice = describe_task_code(code, spec)
+    if notice:
+        return notice
+    return ("known task code: %s（服务端未下发该任务，可能已下线或不在活动期；"
+            "本次无动作）" % code)
+
 
 # mp 对话事件（chat_request_send）的**真人节奏**间隔（秒）。
 #
@@ -1371,7 +1523,12 @@ def process_school_task(auth, code, t, st_tasks, uid8, opts, stats):
 
     report_kind = SCHOOL_REPORT_KIND.get(code)
     if report_kind is None:
-        print(f"[task_runner] {uid8} {code}: query {status} -> school 未映射(人工/未知)，skip")
+        spec = resolve_task_spec(code, t)
+        notice = describe_task_code(code, spec)
+        if not notice:
+            notice = ("unknown school task code: %s"
+                      "（脚本不认识该任务码，尚未实现）" % code)
+        print(f"[task_runner] {uid8} {code}: query {status} -> {notice}，skip")
         stats["skip"] += 1
         return
 
@@ -1678,9 +1835,10 @@ def process_minichat_task(auth, code, opts, stats, uid8, known=None):
 # --------------------------------------------------------------------------
 def process_task(auth, code, t, opts, stats):
     uid8 = auth["uid"][:8]
-    spec = MAPPING.get(code)
-    if spec is None:
-        print(f"[task_runner] {uid8} {code}: query 非映射任务，skip")
+    spec = resolve_task_spec(code, t)
+    if spec is None or spec.get("unsupported"):
+        print(f"[task_runner] {uid8} {code}: query {t.get('accept_status')} -> "
+              f"{describe_task_code(code, spec)}，skip")
         stats["total"] += 1
         stats["skip"] += 1
         return
@@ -1690,9 +1848,10 @@ def process_task(auth, code, t, opts, stats):
     target = prog.get("target") or spec.get("target") or 1
     stats["total"] += 1
 
-    # 不可伪造任务：跳过并如实标注
+    # 不可伪造任务：跳过并如实标注为「需人工」，不再用「不可伪造」这种含糊措辞
     if spec.get("unforgeable"):
-        print(f"[task_runner] {uid8} {code}: query {ast}({cur}/{target}) -> 不可伪造({spec['reason']})，skip")
+        print(f"[task_runner] {uid8} {code}: query {ast}({cur}/{target}) -> "
+              f"需人工完成（{spec['reason']}；脚本不可伪造），skip")
         stats["skip"] += 1
         return
 
@@ -1898,9 +2057,10 @@ def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0, known=None
         #   → expert_actual_use(mode=LOCAL, type 空, cost=0)。
         # 为什么不能用通用上报分支：自造 requestId 服务端不计数（issue #221，
         # 轻量云实测进度恒 0/1），这条任务吃的是同一份判据。
-        picked = EXPERT_EXPERIENCE.get(code)
+        # 专家参数来自 spec（resolve_task_spec 注入：静态表或 jump_url 动态解析）。
+        picked = spec.get("expert") or EXPERT_EXPERIENCE.get(code)
         if picked is None:
-            print(f"[task_runner] {uid8} {code}: 未登记的专家体验任务，skip")
+            print(f"[task_runner] {uid8} {code}: 未登记的专家体验任务（未能解析专家 id），skip")
             stats["fail"] += 1
             return
         eid, emeta = picked
@@ -2085,6 +2245,14 @@ def process_account(auth, opts, stats):
                                                     "miniautomation", "miniglmchat",
                                                     "miniplybook", "claimonly")]
     special = set(school_in_map) | set(minichat_in_map)
+    # 任务列表里出现、但不在 MAPPING 的码：先按 resolve_task_spec 分类一次。
+    # expert_use_* 且能从静态表/jump_url 解析到专家 id 的，加入本轮 codes；
+    # 其余（需人工 / 需抓包 / 完全不认识）只做分类展示，不猜动作。
+    dynamic_specs = {}
+    for t in tasks:
+        c = t.get("task_code")
+        if c and c not in MAPPING and c not in dynamic_specs:
+            dynamic_specs[c] = resolve_task_spec(c, t)
     if opts.only_codes:
         codes = [c for c in opts.only_codes if c not in special]
         process_school = bool(set(opts.only_codes) & set(school_in_map))
@@ -2096,19 +2264,25 @@ def process_account(auth, opts, stats):
                                                    "miniglmchat", "miniplybook", "claimonly")]
         process_school = True
         process_minichat = True
-        # 未在映射表但存在于任务列表的（如 Expert_Philanthropy）——只计数展示
-        for t in tasks:
-            c = t.get("task_code")
-            if c and c not in MAPPING:
-                ast = t.get("accept_status")
-                if ast == "claimed":
-                    print(f"[task_runner] {uid8} {c}: query claimed -> 已领，跳过(非映射任务)")
-                    stats["total"] += 1
-                    stats["already"] += 1
-                else:
-                    print(f"[task_runner] {uid8} {c}: query {ast} -> 非映射任务，skip")
-                    stats["total"] += 1
-                    stats["skip"] += 1
+        # expert_use_* 家族的新 slug（不在 MAPPING）走 process_task，用同一套专家链
+        for c, spec in dynamic_specs.items():
+            if spec is not None and not spec.get("unsupported") and c not in codes:
+                codes.append(c)
+        # 其余未映射任务：按分类给出明确结论（不认识 / 需人工 / 需抓包），
+        # 不再统一写成「非映射任务」——那会把能力缺口伪装成「这次没什么可做」。
+        for c, spec in dynamic_specs.items():
+            if spec is not None and not spec.get("unsupported"):
+                continue  # 已加入 codes，由 process_task 处理
+            ast = by_code.get(c, {}).get("accept_status")
+            stats["total"] += 1
+            if ast == "claimed":
+                print(f"[task_runner] {uid8} {c}: query claimed -> 已领，跳过"
+                      f"（{describe_task_code(c, spec) or '已领取'}）")
+                stats["already"] += 1
+            else:
+                print(f"[task_runner] {uid8} {c}: query {ast} -> "
+                      f"{describe_task_code(c, spec)}，skip")
+                stats["skip"] += 1
 
     for code in codes:
         t = by_code.get(code)
@@ -2132,7 +2306,8 @@ def process_account(auth, opts, stats):
                     stats["total"] += 1
                     stats["pending"] += 1
                     continue
-                print(f"[task_runner] {uid8} {code}: query 任务不存在")
+                print(f"[task_runner] {uid8} {code}: query -> "
+                      f"{describe_missing_task(code, resolve_task_spec(code, by_code.get(code)))}")
                 stats["total"] += 1
                 stats["skip"] += 1
                 continue
